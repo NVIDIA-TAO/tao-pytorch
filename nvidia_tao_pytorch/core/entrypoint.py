@@ -321,12 +321,19 @@ def launch(args, unknown_args, subtasks, network=None):
                 log_target.write(last_progress_bar_line + '\n')
                 log_target.flush()
             if proc.returncode == 0:
+                logging.info("Command completed successfully with return code 0")
                 process_passed = True
+            else:
+                logging.info(f"Command completed with return code {proc.returncode}")
 
     except (KeyboardInterrupt, SystemExit):
+        logging.info("Command was interrupted")
         logging.exception("Command was interrupted")
         process_passed = True
     except Exception as e:
+        logging.info("Command encountered an exception")
+        import traceback
+        logging.info(traceback.format_exc())
         # Check if the exception is a user configuration error
         error_message = str(e)
         user_error = any(keyword in error_message for keyword in [
