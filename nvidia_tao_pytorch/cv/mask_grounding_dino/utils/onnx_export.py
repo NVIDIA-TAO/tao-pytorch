@@ -54,6 +54,8 @@ class MaskGDINOExporter(ONNXExporter):
                 "pred_logits": {0: "batch_size"},
                 "pred_boxes": {0: "batch_size"},
                 "pred_masks": {0: "batch_size"},
+                "no_targets": {0: "batch_size"},
+                "union_mask_logits": {0: "batch_size"},
             }
         else:
             dynamic_axes = None

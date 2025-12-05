@@ -1,0 +1,60 @@
+results_dir: 
+
+dataset:
+  train:
+    annotations:
+    images: 
+    panoptic: 
+    batch_size: 4
+    num_workers: 4
+  val:
+    annotations:  
+    images: 
+    panoptic: 
+    batch_size: 4
+    num_workers: 4
+  test:
+    annotations: 
+    images: 
+    panoptic: 
+    batch_size: 4
+    num_workers: 4
+  label_map: 
+  image_size: 1024
+  cutmix_prob: 0.0
+
+model:
+  backbone:
+    name: D2SwinTransformer
+    freeze_at: 0
+    swin:
+      embed_dim: 192
+      depths: [2, 2, 18, 2]
+      num_heads: [6, 12, 24, 48]
+      window_size: 12
+      mlp_ratio: 4.0
+      patch_size: 4
+      patch_norm: true
+      ape: false
+      pretrain_img_size: 384
+      qkv_bias: true
+      qk_scale: null
+      attn_drop_rate: 0.0
+      drop_rate: 0.0
+      drop_path_rate: 0.3
+      out_features: [res2, res3, res4, res5]
+      out_indices: [0, 1, 2, 3]
+      use_checkpoint: false
+  one_former:
+    num_object_queries: 250
+  sem_seg_head:
+    num_classes: 150
+
+train:
+  num_epochs: 100
+  num_gpus: 8
+  num_nodes: 1
+  pretrained_model: 
+  pretrained_backbone:
+  precision: 16-mixed
+  iters_per_epoch: 15000

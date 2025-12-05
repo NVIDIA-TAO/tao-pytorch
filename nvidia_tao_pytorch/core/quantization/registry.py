@@ -19,8 +19,9 @@ import threading
 
 
 class RegistryManager:
-    """
-    A thread-safe registry manager for quantization components. This class manages registries for observers, fake quantizers, and backends,
+    """A thread-safe registry manager for quantization components.
+
+    This class manages registries for observers, fake quantizers, and backends,
     providing a centralized way to register and retrieve quantization components.
     """
 
@@ -345,8 +346,7 @@ _registry_manager = RegistryManager()
 
 # Convenience functions that use the global registry manager
 def register_observer(name: str):
-    """
-    Decorator to register an observer class under a specified name.
+    """Register an observer class under a specified name.
 
     This decorator adds the given observer class to the global registry manager,
     enabling it to be referenced by name in quantization configurations.
@@ -360,7 +360,6 @@ def register_observer(name: str):
     -------
     decorator : callable
         A decorator that registers the observer class.
-
     """
 
     def decorator(observer):
@@ -371,8 +370,7 @@ def register_observer(name: str):
 
 
 def register_fake_quant(name: str):
-    """
-    Decorator to register a fake quant class under a specified name.
+    """Register a fake quant class under a specified name.
 
     This decorator adds the given fake quant class to the global registry manager,
     enabling it to be referenced by name in quantization configurations.
@@ -386,7 +384,6 @@ def register_fake_quant(name: str):
     -------
     decorator : callable
         A decorator that registers the fake quant class.
-
     """
 
     def decorator(fake_quant):
@@ -397,8 +394,7 @@ def register_fake_quant(name: str):
 
 
 def register_backend(name: str):
-    """
-    Decorator to register a backend class under a specified name.
+    """Register a backend class under a specified name.
 
     This decorator adds the given backend class to the global registry manager,
     enabling it to be referenced by name in quantization configurations.
@@ -412,7 +408,6 @@ def register_backend(name: str):
     -------
     decorator : callable
         A decorator that registers the backend class.
-
     """
 
     def decorator(backend):

@@ -7,6 +7,7 @@ Mostly copy-paste from torchvision references.
 """
 from typing import Any, Mapping, List, Optional
 from collections import OrderedDict, namedtuple
+from contextlib import contextmanager
 
 import torch
 import torch.distributed as dist
@@ -99,7 +100,19 @@ def load_state_dict(self, state_dict: Mapping[str, Any],
     return _IncompatibleKeys(missing_keys, unexpected_keys)
 
 
-torch.nn.modules.Module.load_state_dict = load_state_dict
+@contextmanager
+def patch_module_load_state_dict():
+    """Temporarily patch torch.nn.Module.load_state_dict to accept a prefix.
+
+    This avoids global monkeypatching on import; callers should use this
+    context where prefixed loading is required.
+    """
+    original = torch.nn.modules.Module.load_state_dict
+    torch.nn.modules.Module.load_state_dict = load_state_dict
+    try:
+        yield
+    finally:
+        torch.nn.modules.Module.load_state_dict = original
 
 
 def _max_by_axis(the_list):

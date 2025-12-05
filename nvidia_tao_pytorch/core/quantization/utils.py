@@ -19,9 +19,26 @@ patterns and unified model creation for quantized models.
 """
 
 import fnmatch
+
 import torch
 import torch.nn as nn
+from omegaconf import DictConfig, OmegaConf
+
+from nvidia_tao_pytorch.core.quantization import (
+    ActivationQuantizationConfig,
+    LayerQuantizationConfig,
+    ModelQuantizationConfig,
+    WeightQuantizationConfig,
+)
+from nvidia_tao_pytorch.core.quantization.constants import QuantizationMode
+from nvidia_tao_pytorch.core.quantization.validation import normalize_dtype
 from nvidia_tao_pytorch.core.tlt_logging import logging
+
+__all__ = [
+    "match_layer",
+    "create_quantized_model_from_config",
+    "build_model_quant_config_from_omegaconf",
+]
 
 
 def match_layer(module: nn.Module, module_name_in_graph: str, pattern: str) -> bool:
@@ -130,7 +147,7 @@ def create_quantized_model_from_config(model_path: str, model_class, **model_kwa
 
     # Handle ModelOpt backend artifacts
     backend = getattr(experiment_config.quantize, 'backend', None)
-    if backend == "modelopt" and isinstance(state_dict, dict) and "model_state_dict" in state_dict:
+    if backend == "modelopt.pytorch" and isinstance(state_dict, dict) and "model_state_dict" in state_dict:
         state_dict = state_dict["model_state_dict"]
 
     # Prefix keys with "model." to match Lightning module structure
@@ -139,3 +156,81 @@ def create_quantized_model_from_config(model_path: str, model_class, **model_kwa
     logging.info("Quantized model loaded successfully.")
 
     return model
+
+
+def build_model_quant_config_from_omegaconf(qcfg: DictConfig | dict) -> ModelQuantizationConfig:
+    """Construct a ``ModelQuantizationConfig`` from an OmegaConf config or dict.
+
+    Normalizes dtype strings (e.g., "float8_*" -> "fp8_*") and builds the corresponding TAO
+    dataclasses. Populates all supported configuration fields including:
+    - backend, mode, algorithm
+    - layers, skip_names
+    - model_path, results_dir, backend_kwargs, device
+
+    Parameters
+    ----------
+    qcfg : omegaconf.DictConfig | dict
+        User-provided configuration.
+
+    Returns
+    -------
+    ModelQuantizationConfig
+        Complete TAO quantization configuration object.
+    """
+    cfg_dict = (
+        OmegaConf.to_container(qcfg, resolve=True)
+        if isinstance(qcfg, DictConfig)
+        else dict(qcfg)
+    )
+
+    layers: list[LayerQuantizationConfig] = []
+    for layer in cfg_dict.get("layers", []):
+        weights_cfg = None
+        if isinstance(layer.get("weights"), dict):
+            w = dict(layer["weights"])  # shallow copy
+            if "dtype" in w:
+                w["dtype"] = normalize_dtype(w["dtype"])
+            weights_cfg = WeightQuantizationConfig(**w)
+
+        activations_cfg = None
+        if isinstance(layer.get("activations"), dict):
+            a = dict(layer["activations"])  # shallow copy
+            if "dtype" in a:
+                a["dtype"] = normalize_dtype(a["dtype"])
+            activations_cfg = ActivationQuantizationConfig(**a)
+
+        layers.append(
+            LayerQuantizationConfig(
+                module_name=layer["module_name"],
+                weights=weights_cfg,
+                activations=activations_cfg,
+            )
+        )
+
+    # Normalize/validate mode: accept enum name or string
+    mode_value = cfg_dict.get("mode", "static_ptq")
+    if isinstance(mode_value, QuantizationMode):
+        normalized_mode = mode_value.name.lower()
+    else:
+        normalized_mode = str(mode_value).lower()
+
+    # Normalise algorithm, if provided. Keep None if unspecified to allow defaults downstream.
+    algorithm_value = cfg_dict.get("algorithm", None)
+    normalized_algorithm = None
+    if algorithm_value is not None:
+        normalized_algorithm = str(algorithm_value).lower()
+
+    # Create the config object with all supported fields
+    config = ModelQuantizationConfig(
+        backend=cfg_dict.get("backend", "torchao"),
+        mode=normalized_mode,
+        algorithm=normalized_algorithm,
+        layers=layers,
+        skip_names=cfg_dict.get("skip_names", []),
+        model_path=cfg_dict.get("model_path", ""),
+        results_dir=cfg_dict.get("results_dir", ""),
+        backend_kwargs=cfg_dict.get("backend_kwargs", {}),
+        device=cfg_dict.get("device", "cuda"),
+    )
+
+    return config

@@ -85,6 +85,7 @@ setuptools.setup(
             'visual_changenet=nvidia_tao_pytorch.cv.visual_changenet.entrypoint.visual_changenet:main',
             'centerpose=nvidia_tao_pytorch.cv.centerpose.entrypoint.centerpose:main',
             'mask2former=nvidia_tao_pytorch.cv.mask2former.entrypoint.mask2former:main',
+            'oneformer=nvidia_tao_pytorch.cv.oneformer.entrypoint.oneformer:main',
             # SDG entry point
             'stylegan_xl=nvidia_tao_pytorch.sdg.stylegan_xl.entrypoint.stylegan_xl:main',
             'nvdinov2=nvidia_tao_pytorch.ssl.nvdinov2.entrypoint.nvdinov2:main',

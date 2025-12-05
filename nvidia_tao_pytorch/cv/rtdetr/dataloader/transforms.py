@@ -11,6 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# Original implementation: https://github.com/lyuwenyu/RT-DETR
+# Licensed under the Apache License 2.0
+# Copyright (c) 2023 lyuwenyu. All Rights Reserved.
 
 """ Transformation for RT-DETR."""
 
@@ -101,8 +105,8 @@ class ConvertBox(T.Transform):
             'cxcywh': tv_tensors.BoundingBoxFormat.CXCYWH
         }
 
-    def _transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
-        """_transform function."""
+    def transform(self, inpt: Any, params: Dict[str, Any]) -> Any:
+        """transform function."""
         if self.out_fmt:
             spatial_size = inpt.canvas_size
             in_fmt = inpt.format.value.lower()

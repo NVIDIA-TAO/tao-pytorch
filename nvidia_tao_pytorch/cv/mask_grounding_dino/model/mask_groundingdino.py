@@ -24,7 +24,7 @@ from nvidia_tao_pytorch.cv.deformable_detr.utils.misc import tensor_from_tensor_
 from nvidia_tao_pytorch.cv.dino.model.model_utils import MLP
 
 from nvidia_tao_pytorch.cv.grounding_dino.model.groundingdino import GroundingDINO
-from nvidia_tao_pytorch.cv.grounding_dino.utils.vl_utils import create_positive_map
+from nvidia_tao_pytorch.cv.mask_grounding_dino.utils.vl_utils import create_positive_map, create_positive_map_from_span
 
 from nvidia_tao_pytorch.cv.mask_grounding_dino.model.model_utils import (
     aligned_bilinear, compute_locations, parse_dynamic_params,
@@ -39,6 +39,7 @@ class MaskGroundingDINO(GroundingDINO):
         self,
         *args,
         has_mask=True,
+        rela=None,
         **kwargs,
     ):
         """Initializes the model.
@@ -48,11 +49,13 @@ class MaskGroundingDINO(GroundingDINO):
             num_queries: number of object queries, ie detection slot. This is the maximal number of objects
                          Conditional DETR can detect in a single image. For COCO, we recommend 100 queries.
             aux_loss: True if auxiliary decoding losses (loss at each decoder layer) are to be used.
+            rela: ReLA module. See rela.py
         """
         super().__init__(*args, **kwargs)
 
         # Mask Branch
         self.has_mask = has_mask
+        self.rela = None
         if has_mask:
             self.in_channels = self.hidden_dim // 32
             self.dynamic_mask_channels = 8
@@ -61,7 +64,7 @@ class MaskGroundingDINO(GroundingDINO):
             self.mask_out_stride = 4
             self.up_rate = 8 // self.mask_out_stride
             self.rel_coord = True
-
+            self.rela = rela
             # dynamic_mask_head params
             weight_nums, bias_nums = [], []
             for index in range(self.controller_layers):
@@ -198,7 +201,7 @@ class MaskGroundingDINO(GroundingDINO):
                 pos.append(self.position_embedding(not_mask, src.device))
 
         input_query_bbox = input_query_label = attn_mask = None
-        hs, inter_references, hs_enc, ref_enc, init_box_proposal, memory = self.transformer(
+        hs, inter_references, hs_enc, ref_enc, init_box_proposal, memory, spatial_shapes = self.transformer(
             srcs, masks, input_query_bbox, pos, input_query_label, attn_mask, text_dict
         )
         # hs: 6 of [4, 900, 256]
@@ -209,6 +212,7 @@ class MaskGroundingDINO(GroundingDINO):
         outputs_class_list = []
         outputs_coord_list = []
         outputs_mask_list = []
+        outputs_mask_feature_list = []
         indices_list = []
         enc_lay_num = len(hs)
         assert enc_lay_num == 6
@@ -232,21 +236,29 @@ class MaskGroundingDINO(GroundingDINO):
                     label_map_list = []
                     indices = []
                     for j in range(len(cat_list)):  # bs
-                        label_map = []
-                        for i in range(len(cat_list[j])):
-                            label_id = torch.tensor([i])
-                            per_label = create_positive_map(one_hot_token[j], label_id, cat_list[j], captions[j])
-                            label_map.append(per_label)
-                        label_map = torch.stack(label_map, dim=0).squeeze(1)
+                        if len(targets[j].get("positive_tokens", [])) > 0:
+                            tokens_positive = targets[j]["positive_tokens"]  # List[List[(char_start, char_end)]]
+                            label_map = create_positive_map_from_span(one_hot_token[j], [tokens_positive], empty=targets[j].get('empty', False))
+                        else:
+                            label_map = []
+                            for i in range(len(cat_list[j])):
+                                label_id = torch.tensor([i])
+                                per_label = create_positive_map(one_hot_token[j], label_id, cat_list[j], captions[j], empty=targets[j].get('empty', False))
+                                label_map.append(per_label)
+                            label_map = torch.stack(label_map, dim=0).squeeze(1)
                         label_map_list.append(label_map)
                     # label_map.shape == [80, 256]
                     for j in range(len(cat_list)):  # bs
-                        for_match = {
-                            "pred_logits": outputs_layer['pred_logits'][j].unsqueeze(0),
-                            "pred_boxes": outputs_layer['pred_boxes'][j].unsqueeze(0)
-                        }
+                        if targets[j].get('empty', False):
+                            # inds = [(torch.as_tensor([0], dtype=torch.int64), torch.as_tensor([0], dtype=torch.int64))]
+                            inds = [(torch.zeros((0,), dtype=torch.int64), torch.zeros((0,), dtype=torch.int64))]
+                        else:
+                            for_match = {
+                                "pred_logits": outputs_layer['pred_logits'][j].unsqueeze(0),
+                                "pred_boxes": outputs_layer['pred_boxes'][j].unsqueeze(0)
+                            }
 
-                        inds = self.matcher(for_match, [targets[j]], label_map_list[j])
+                            inds = self.matcher(for_match, [targets[j]], label_map_list[j])
                         indices.extend(inds)
 
                     # indices : A list of size batch_size, containing tuples of (index_i, index_j) where:
@@ -290,7 +302,7 @@ class MaskGroundingDINO(GroundingDINO):
                             dummy_output += p.sum()
                         outputs_layer['pred_masks'] = 0.0 * dummy_output
                     outputs_mask_list.append(outputs_layer['pred_masks'])
-
+                    outputs_mask_feature_list.append(outputs_layer['mask_features'])
             outputs_class = torch.stack(outputs_class_list)
             outputs_coord = torch.stack(outputs_coord_list)
             outputs['pred_logits'] = outputs_class[-1]
@@ -311,6 +323,7 @@ class MaskGroundingDINO(GroundingDINO):
         if self.has_mask:
             if is_training:
                 outputs["pred_masks"] = outputs_mask_list[-1]
+                outputs["mask_features"] = outputs_mask_feature_list[-1]
             else:
                 # mask infer
                 outputs['reference_points'] = inter_references[-2][:, :, :2]
@@ -360,6 +373,30 @@ class MaskGroundingDINO(GroundingDINO):
                 outputs['interm_outputs'] = {'pred_logits': interm_class, 'pred_boxes': interm_coord}
                 outputs['interm_outputs_for_matching_pre'] = {'pred_logits': interm_class, 'pred_boxes': init_box_proposal}
 
+        if self.rela is not None:
+            # Split memory into per-level sequences: [(B, H*W, C), ...]
+            spatial_shapes = spatial_shapes.tolist()
+            memory_split = memory.split([h * w for h, w in spatial_shapes], dim=1)
+
+            # Flatten positional embeddings from (B, C, H, W) → (B, C, HW)
+            rela_pos = [p.flatten(2) for p in pos]
+
+            # Forward pass through ReLA module
+            rela_outputs = self.rela(
+                srcs=memory_split,
+                pos_embeds=rela_pos,
+                mask_features=outputs['mask_features'],
+                lang_feat=text_dict['encoded_text'],
+                spatial_shapes=spatial_shapes,
+            )
+
+            # Use only the last layer outputs
+            outputs['no_targets'] = rela_outputs['no_targets'][-1]
+            outputs['union_mask_logits'] = rela_outputs['union_mask_logits'][-1]
+            if self.training:
+                outputs['minimaps'] = rela_outputs['minimaps'][-1]
+                outputs['valid_masks'] = samples[:, 3:4]
+        outputs.pop('mask_features')
         return outputs
 
     @torch.jit.unused
@@ -522,10 +559,12 @@ class MaskGroundingDINO(GroundingDINO):
             for lvl in range(self.num_feature_levels - 1):
                 encod_feat_f.append(encod_feat_l[lvl][:, :, iframe, :, :])  # [bs, C, hi, wi]
 
+            mask_head_outputs = self.mask_head(encod_feat_f, fpns=None)
+            decod_feat_f = mask_head_outputs['fused_x']
+            fused_x_fpn = mask_head_outputs['fused_x_fpn']
             if self.use_raft:
-                decod_feat_f, up_masks = self.mask_head(encod_feat_f, fpns=None)
+                up_masks = mask_head_outputs['up_masks']
             else:
-                decod_feat_f = self.mask_head(encod_feat_f, fpns=None)
                 up_masks = None
 
             mask_logits = self.dynamic_mask_with_coords(decod_feat_f, reference_points, mask_head_params,
@@ -549,4 +588,5 @@ class MaskGroundingDINO(GroundingDINO):
             output_pred_masks.append(torch.cat(out_masks_b, dim=2))
 
         outputs['pred_masks'] = output_pred_masks
+        outputs['mask_features'] = fused_x_fpn
         return outputs

@@ -21,26 +21,25 @@ APIs for calibration and quantization.
 
 from __future__ import annotations
 
-from typing import Callable, Optional
-from nvidia_tao_pytorch.core.tlt_logging import logger as tlt_logger
+import os
+from typing import Any, Callable, Dict, Optional
 
 import torch
 import torch.nn as nn
-
-from nvidia_tao_pytorch.core.quantization.quantizer_base import QuantizerBase
-from nvidia_tao_pytorch.core.quantization.calibratable import Calibratable
-from nvidia_tao_pytorch.core.quantization.registry import register_backend
-from nvidia_tao_pytorch.core.quantization.constants import QuantizationMode
-from nvidia_tao_pytorch.core.quantization.backends.modelopt.utils import convert_tao_to_modelopt_config
+from tqdm import tqdm
 
 from nvidia_tao_core.config.common.quantization.default_config import ModelQuantizationConfig
-from tqdm import tqdm
-import os
+from nvidia_tao_pytorch.core.quantization.backends.modelopt_pytorch.utils import convert_tao_to_modelopt_config
+from nvidia_tao_pytorch.core.quantization.calibratable import Calibratable
+from nvidia_tao_pytorch.core.quantization.constants import QuantizationMode
+from nvidia_tao_pytorch.core.quantization.quantizer_base import PyTorchQuantizerBase
+from nvidia_tao_pytorch.core.quantization.registry import register_backend
+from nvidia_tao_pytorch.core.quantization.validation import validate_model, validate_backend_mode_compatibility
+from nvidia_tao_pytorch.core.tlt_logging import logger as tlt_logger
 
 try:
-    import modelopt.torch.quantization as mtq  # type: ignore
     import modelopt.torch.opt as mto
-
+    import modelopt.torch.quantization as mtq  # type: ignore
 except Exception as exc:  # pragma: no cover - import error path
     raise ImportError(
         "modelopt is not installed or failed to import. Install ModelOpt (pip install nvidia-modelopt) "
@@ -48,7 +47,7 @@ except Exception as exc:  # pragma: no cover - import error path
     ) from exc
 
 
-SUPPORTED_MODES = {QuantizationMode.STATIC_PTQ.name.lower()}
+SUPPORTED_MODES = {QuantizationMode.STATIC_PTQ.value}
 
 
 def _default_forward_loop(model: nn.Module) -> None:
@@ -64,8 +63,8 @@ def _default_forward_loop(model: nn.Module) -> None:
         return
 
 
-@register_backend("modelopt")
-class ModelOptBackend(QuantizerBase, Calibratable):
+@register_backend("modelopt.pytorch")
+class ModelOptBackend(PyTorchQuantizerBase, Calibratable):
     """ModelOpt quantization backend.
 
     Adapts the TAO quantization configuration to the ModelOpt configuration
@@ -73,10 +72,12 @@ class ModelOptBackend(QuantizerBase, Calibratable):
     ``modelopt.torch.quantization`` APIs.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, backend_kwargs: Optional[Dict[str, Any]] = None) -> None:
         self._forward_loop: Optional[Callable[[nn.Module], None]] = None
-        self.backend_name = "modelopt"  # Store the backend name as an instance attribute
+        self.backend_name = "modelopt.pytorch"  # Store the backend name as an instance attribute
         self._logger = tlt_logger
+        self._backend_kwargs = backend_kwargs or {}
+        self._config: Optional[ModelQuantizationConfig] = None
 
     def prepare(self, model: nn.Module, config: ModelQuantizationConfig) -> nn.Module:
         """Validate inputs and return the model unchanged.
@@ -96,20 +97,18 @@ class ModelOptBackend(QuantizerBase, Calibratable):
         torch.nn.Module
             The input model unchanged.
         """
-        if not isinstance(model, nn.Module):
-            raise TypeError("model must be an instance of torch.nn.Module")
+        validate_model(model)
         if not isinstance(config, ModelQuantizationConfig):
             raise TypeError("config must be an instance of ModelQuantizationConfig")
-        # Accept both enum and string for mode; normalize to a lower-case string
+
+        # Validate mode using centralized validation
         mode_value = (
-            config.mode.name.lower() if isinstance(config.mode, QuantizationMode) else str(config.mode).lower()
+            config.mode.value if isinstance(config.mode, QuantizationMode) else str(config.mode).lower()
         )
-        if mode_value not in SUPPORTED_MODES:
-            raise ValueError(
-                f"Unsupported mode '{config.mode}' for backend '{self.backend_name}'. "
-                f"Supported modes: {sorted(SUPPORTED_MODES)}"
-            )
-        self._logger.debug("ModelOptBackend.prepare: input validation complete; returning model unchanged")
+        validate_backend_mode_compatibility(self.backend_name, mode_value, SUPPORTED_MODES)
+
+        # Store config for use in calibrate
+        self._config = config
         return model
 
     def calibrate(self, model: nn.Module, data_loader) -> None:
@@ -123,8 +122,49 @@ class ModelOptBackend(QuantizerBase, Calibratable):
             Iterator producing inputs. Each batch can be a tensor, a tuple where the first
             element is the tensor, or a dict with key "input".
         """
-        if not isinstance(model, nn.Module):
-            raise TypeError("model must be an instance of torch.nn.Module")
+        validate_model(model)
+
+        # Get device from config
+        device_str = getattr(self._config, 'device', 'cuda') if self._config else 'cuda'
+
+        # Handle device validation and fallback
+        if device_str == 'trt':
+            self._logger.warning(
+                "TensorRT (TRT) device is not supported for ModelOpt PyTorch calibration. "
+                "Falling back to CUDA for calibration. TensorRT will be used during inference/export."
+            )
+            device_str = 'cuda'
+
+        # Validate and set device with automatic CPU fallback for CUDA
+        if device_str.startswith('cuda'):
+            if not torch.cuda.is_available():
+                self._logger.warning(
+                    f"CUDA device '{device_str}' requested but CUDA is not available. "
+                    f"Falling back to CPU for calibration."
+                )
+                device = torch.device('cpu')
+            else:
+                try:
+                    device = torch.device(device_str)
+                    # Verify the specific GPU is available if specified
+                    if ':' in device_str:
+                        try:
+                            gpu_id = int(device_str.split(':')[1])
+                        except ValueError:
+                            raise ValueError(f"Invalid GPU ID in device string '{device_str}'")
+                        if gpu_id >= torch.cuda.device_count():
+                            self._logger.warning(
+                                f"GPU {gpu_id} specified but only {torch.cuda.device_count()} GPU(s) available. "
+                                f"Falling back to default CUDA device."
+                            )
+                            device = torch.device('cuda:0')
+                except Exception as e:
+                    self._logger.warning(f"Invalid device '{device_str}': {e}. Falling back to CPU.")
+                    device = torch.device('cpu')
+        else:
+            device = torch.device(device_str)
+
+        self._logger.info(f"Using device '{device}' for calibration")
 
         def _extract_input(batch):
             if torch.is_tensor(batch):
@@ -148,14 +188,12 @@ class ModelOptBackend(QuantizerBase, Calibratable):
                     "Weight only quantization will not be affected. "
                     "Disregard this warning if you are running evaluation, inference, or other non-quantization tasks."
                 )
-            m.eval().cuda()
+            m.eval().to(device)
             with torch.no_grad():
                 for batch in tqdm(data_loader, desc="Calibrating model"):
-                    x = _extract_input(batch).cuda()
+                    x = _extract_input(batch).to(device)
                     m(x)
-                    # break
         self._forward_loop = forward_loop
-        self._logger.debug("Calibration forward loop has been set")
 
     def quantize(self, model: nn.Module, config: ModelQuantizationConfig) -> nn.Module:
         """Quantize a model using ModelOpt APIs.
@@ -176,8 +214,7 @@ class ModelOptBackend(QuantizerBase, Calibratable):
         torch.nn.Module
             Quantized model.
         """
-        if not isinstance(model, nn.Module):
-            raise TypeError("model must be an instance of torch.nn.Module")
+        validate_model(model)
         if not isinstance(config, ModelQuantizationConfig):
             raise TypeError("config must be an instance of ModelQuantizationConfig")
 
@@ -196,9 +233,7 @@ class ModelOptBackend(QuantizerBase, Calibratable):
         else:
             forward_loop = self._forward_loop
 
-        self._logger.info("Invoking ModelOpt quantization")
         quantized_model = mtq.quantize(model, modelopt_cfg, forward_loop)
-        self._logger.info("ModelOpt quantization complete")
         return quantized_model
 
     def save_model(self, model: nn.Module, path: str) -> None:
@@ -210,12 +245,30 @@ class ModelOptBackend(QuantizerBase, Calibratable):
             Quantized model to save.
         path : str
             Directory where the model is saved as ``quantized_model_modelopt.pth``.
-        """
-        # Save the quantized model as a Lightning checkpoint of the original module
 
+        Raises
+        ------
+        TypeError
+            If model is not a torch.nn.Module or path is not a string.
+        ValueError
+            If path is empty.
+        """
+        validate_model(model)
+        if not isinstance(path, str):
+            raise TypeError("path must be a string")
+        if not path:
+            raise ValueError("path cannot be empty")
+
+        os.makedirs(path, exist_ok=True)
         quantized_model_path = os.path.join(path, f"quantized_model_{self.backend_name}.pth")
-        mto.save(model, quantized_model_path)
-        self._logger.info(f"Quantized model saved to: {quantized_model_path}")
+
+        try:
+            mto.save(model, quantized_model_path)
+            self._logger.info(f"Quantized model saved to: {quantized_model_path}")
+        except Exception as e:
+            error_msg = f"Failed to save model to {quantized_model_path}: {e}"
+            self._logger.error(error_msg)
+            raise RuntimeError(error_msg) from e
 
 
 __all__ = [

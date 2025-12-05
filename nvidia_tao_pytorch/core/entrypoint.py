@@ -27,10 +27,10 @@ from time import time
 import yaml
 from contextlib import contextmanager
 
-from nvidia_tao_pytorch.core.telemetry.nvml_utils import get_device_details
 from nvidia_tao_pytorch.core.tlt_logging import logging
-from nvidia_tao_pytorch.core.telemetry.telemetry import send_telemetry_data
 from nvidia_tao_pytorch.core.distributed.validator import validate_configs
+from nvidia_tao_core.telemetry.nvml import get_device_details
+from nvidia_tao_core.telemetry.telemetry import send_telemetry_data
 
 LIGHTNING_EXCLUDED_NETWORKS = [
     "bevfusion",
@@ -64,12 +64,16 @@ def get_subtasks(package):
         }
         modules[task] = module_details
 
-    # Add new command for copying specs.
-    # modules["download_specs"] = {
-    #     "source_data_dir": os.path.join(os.path.dirname(module_path[0]), "experiment_specs"),
-    #     "runner_path": os.path.abspath(importlib.import_module(download_specs.__name__).__file__),
-    #     "workflow": package.__name__.split(".")[0]
-    # }
+    # Add download_specs command as a common subtask for all networks
+    try:
+        from nvidia_tao_pytorch.core.utils import default_specs
+        modules["default_specs"] = {
+            "module_name": "nvidia_tao_pytorch.core.utils.default_specs",
+            "runner_path": os.path.abspath(default_specs.__file__),
+        }
+    except ImportError as e:
+        logging.warning(f"Could not load default_specs: {e}")
+
     return modules
 
 
@@ -121,35 +125,47 @@ def launch(args, unknown_args, subtasks, network=None):
         subtasks: list of subtasks for a given task.
         network (str): name of the network running.
     """
-    # Make sure the user provides spec file.
-    if args["experiment_spec_file"] is None:
-        print(
-            "ERROR: The subtask `{}` requires the following argument: -e/--experiment_spec_file".format(
-                args["subtask"]
+    # default_specs doesn't require an experiment spec file
+    if args["subtask"] != "default_specs":
+        # Make sure the user provides spec file.
+        if args["experiment_spec_file"] is None:
+            print(
+                "ERROR: The subtask `{}` requires the following argument: -e/--experiment_spec_file".format(
+                    args["subtask"]
+                )
             )
-        )
-        exit(1)
+            exit(1)
 
-    # Make sure the file exists!
-    if not os.path.exists(args["experiment_spec_file"]):
-        print(
-            "ERROR: The indicated experiment spec file `{}` doesn't exist!".format(
-                args["experiment_spec_file"]
+        # Make sure the file exists!
+        if not os.path.exists(args["experiment_spec_file"]):
+            print(
+                "ERROR: The indicated experiment spec file `{}` doesn't exist!".format(
+                    args["experiment_spec_file"]
+                )
             )
-        )
-        exit(1)
+            exit(1)
 
     script_args = ""
-    # Split spec file_path into config path and config name.
-    path, name = os.path.split(args["experiment_spec_file"])
-    if path != "":
-        script_args += " --config-path " + os.path.realpath(path)
-    script_args += " --config-name " + name
 
-    # This enables a results_dir arg to be passed from the microservice side,
-    # but there is no --results_dir cmdline arg. Instead, the spec field must be used
-    if "results_dir" in args:
-        script_args += " results_dir=" + args["results_dir"]
+    # Handle default_specs separately - it doesn't use experiment_spec_file
+    if args["subtask"] == "default_specs":
+        # Add module_name argument (the network name)
+        if network:
+            script_args += f" module_name={network}"
+        # Pass results_dir if provided
+        if "results_dir" in args:
+            script_args += " results_dir=" + args["results_dir"]
+    else:
+        # Split spec file_path into config path and config name.
+        path, name = os.path.split(args["experiment_spec_file"])
+        if path != "":
+            script_args += " --config-path " + os.path.realpath(path)
+        script_args += " --config-name " + name
+
+        # This enables a results_dir arg to be passed from the microservice side,
+        # but there is no --results_dir cmdline arg. Instead, the spec field must be used
+        if "results_dir" in args:
+            script_args += " results_dir=" + args["results_dir"]
 
     # Pass unknown args to call
     unknown_args_as_str = " " + " ".join(unknown_args)

@@ -44,6 +44,15 @@ def polygons_to_bitmask(polygons: List[np.ndarray], height: int, width: int) -> 
     return mask_util.decode(rle).astype(bool)
 
 
+def clean_caption(caption: str) -> str:
+    """Normalize caption by removing trailing periods and normalizing separators."""
+    caption = caption.strip()
+    if caption.endswith('.'):
+        caption = caption[:-1]
+    sentences = [s.strip() for s in caption.split('.') if s.strip()]
+    return ' . '.join(sentences) + ' .'
+
+
 class ODVGDataset(VisionDataset):
     """Object Detection Visual Genome Dataset."""
 
@@ -73,10 +82,14 @@ class ODVGDataset(VisionDataset):
         super().__init__(root, transforms, transform, target_transform)
         self.root = root
         self.dataset_mode = "OD" if label_map_anno else "VG"
-        self.max_labels = max_labels
         self.has_mask = has_mask
+        self.max_labels = max_labels
+        self.cap_lists = None
+        self.captions = None
+
         if self.dataset_mode == "OD":
             self.load_label_map(label_map_anno)
+
         self._load_metas(anno)
         self.get_dataset_info()
 
@@ -130,6 +143,92 @@ class ODVGDataset(VisionDataset):
         segms = torch.stack([torch.from_numpy(np.ascontiguousarray(x)) for x in segms])
         return segms
 
+    def prepare_vg_annotations(self, anno, instances, h, w):
+        """Prepare boxes, masks, captions, and classes for VG samples."""
+        # Handle empty samples
+        if anno.get('empty', False):
+            boxes = torch.zeros((1, 4))
+            segms = torch.zeros((1, h, w))
+            caption = clean_caption(anno['expression'] if 'expression' in anno else anno['caption'])
+            caption_list = [caption]
+            uni_caption_list = list(dict.fromkeys(caption_list))
+            label_map = {cap: idx for idx, cap in enumerate(uni_caption_list)}
+            classes = [label_map[cap] for cap in caption_list]
+            classes = torch.tensor(classes, dtype=torch.int64)
+            positive_tokens = []
+
+            return boxes, classes, segms, caption, caption_list, positive_tokens
+
+        # Non-empty sample: prepare boxes
+        boxes = [obj["bbox"] for obj in instances]
+        segms = None
+
+        # Prepare masks if available
+        if self.has_mask:
+            masks = [obj["mask"] for obj in instances]
+            assert len(boxes) == len(masks), "Mismatch between boxes and masks"
+            segms = self.prepare_masks(masks, h, w) if len(boxes) > 0 else torch.zeros((1, h, w))
+            if len(boxes) == 0:
+                boxes = torch.zeros((1, 4))
+
+        # Prepare captions & labels
+        if "caption" in anno:
+            caption_list = [obj["phrase"] for obj in instances] if instances else []
+            if caption_list:
+                # Combine elements for shuffling
+                combined = (zip(segms, boxes, caption_list) if self.has_mask
+                            else zip(boxes, caption_list))
+                combined = list(combined)
+                random.shuffle(combined)
+
+                # Unpack back
+                if self.has_mask:
+                    segms, boxes, caption_list = map(
+                        lambda x: torch.stack(x) if isinstance(x[0], torch.Tensor) else list(x),
+                        zip(*combined),
+                    )
+                else:
+                    boxes, caption_list = map(list, zip(*combined))
+
+            # Deduplicate captions and assign class ids
+            uni_caption_list = list(dict.fromkeys(caption_list))  # preserves order
+            label_map = {cap: idx for idx, cap in enumerate(uni_caption_list)}
+            classes = [label_map[cap] for cap in caption_list]
+            caption = ' . '.join(uni_caption_list) + ' .'
+            caption_list = uni_caption_list
+            positive_tokens = []
+
+        else:
+            caption = clean_caption(anno['expression'])
+            positive_tokens = anno.get('tokens_positive', [])
+            caption_list = [obj["phrase"] for obj in instances] if "phrase" in instances[0] else [caption]
+
+            if len(caption_list) > 1:
+                combined = (zip(segms, boxes, caption_list) if self.has_mask
+                            else zip(boxes, caption_list))
+                combined = list(combined)
+                random.shuffle(combined)
+
+                if self.has_mask:
+                    segms, boxes, caption_list = map(
+                        lambda x: torch.stack(x) if isinstance(x[0], torch.Tensor) else list(x),
+                        zip(*combined),
+                    )
+                else:
+                    boxes, caption_list = map(list, zip(*combined))
+
+                uni_caption_list = list(dict.fromkeys(caption_list))
+                label_map = {cap: idx for idx, cap in enumerate(uni_caption_list)}
+                classes = [label_map[cap] for cap in caption_list]
+                caption_list = uni_caption_list
+            else:
+                caption_list = [caption]
+                classes = [0] * len(boxes)
+
+        boxes, classes, segms = self.preprocess_boxes(boxes, classes, segms, w, h)
+
+        return boxes, classes, segms, caption, caption_list, positive_tokens
+
     def __getitem__(self, index: int):
         """return image / target."""
         meta = self.metas[index]
@@ -147,10 +246,7 @@ class ODVGDataset(VisionDataset):
             if self.has_mask:
                 masks = [obj["mask"] for obj in instances]
                 assert len(boxes) == len(masks), "The number of boxes and masks don't match."
-                if len(boxes) == 0:
-                    segms = torch.zeros((0, h, w))
-                else:
-                    segms = self.prepare_masks(masks, h, w)
+                segms = self.prepare_masks(masks, h, w) if len(boxes) > 0 else torch.zeros((0, h, w))
 
             # generate vg_labels
             # pos bbox labels
@@ -176,45 +272,38 @@ class ODVGDataset(VisionDataset):
             classes = [caption_dict[self.label_map[str(obj["label"])]] for obj in instances]
 
             boxes, classes, segms = self.preprocess_boxes(boxes, classes, segms, w, h)
+            positive_tokens = []
 
         elif self.dataset_mode == "VG":
             anno = meta["grounding"]
-            instances = [obj for obj in anno["regions"]]
-            boxes = [obj["bbox"] for obj in instances]
-            segms = None
-            if self.has_mask:
-                masks = [obj["mask"] for obj in instances]
-                assert len(boxes) == len(masks), "The number of boxes and masks don't match."
-                if len(boxes) == 0:
-                    segms = torch.zeros((0, h, w))
-                else:
-                    segms = self.prepare_masks(masks, h, w)
+            instances = anno["regions"]
+            boxes, classes, segms, caption, caption_list, positive_tokens = (
+                self.prepare_vg_annotations(anno, instances, h, w)
+            )
 
-            caption_list = [obj["phrase"] for obj in instances]
-            c = list(zip(boxes, caption_list))
-            random.shuffle(c)
-            boxes[:], caption_list[:] = zip(*c)
-            uni_caption_list = list(set(caption_list))
-            label_map = {}
-            for idx in range(len(uni_caption_list)):
-                label_map[uni_caption_list[idx]] = idx
-            classes = [label_map[cap] for cap in caption_list]
-            caption = ' . '.join(uni_caption_list) + ' .'
-            caption_list = uni_caption_list
+        # Build target dictionary
+        target = {
+            "size": torch.as_tensor([h, w]),
+            "orig_size": torch.as_tensor([h, w]),
+            "image_id": torch.as_tensor([meta['image_id']]),
+            "empty": len(boxes) == 0,
+            "cap_list": caption_list,
+            "caption": caption,
+            "caption_id": anno['expression_id'] if 'expression_id' in anno else -1,
+            "sent_id": anno['sent_id'] if 'sent_id' in anno else -1,
+            "boxes": boxes,
+            "labels": classes,
+            "img_name": rel_path,
+        }
 
-            boxes, classes, segms = self.preprocess_boxes(boxes, classes, segms, w, h)
-
-        target = {}
-        target["size"] = torch.as_tensor([int(h), int(w)])
-        target["cap_list"] = caption_list
-        target["caption"] = caption
-        target["boxes"] = boxes
-        target["labels"] = classes
+        target['positive_tokens'] = positive_tokens
         if self.has_mask:
             target["masks"] = segms
 
         if self.transforms is not None:
             image, target = self.transforms(image, target)
+        if self.has_mask and target["masks"].sum() == 0:
+            target["empty"] = True
 
         return image, target
 

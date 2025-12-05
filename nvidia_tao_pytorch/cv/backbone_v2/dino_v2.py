@@ -90,12 +90,12 @@ class DINOV2(VisionTransformer):
     Attributes:
         patch_embed: Patch embedding layer
         cls_token: Classification token
-        register_tokens: Register tokens for enhanced representation
+        reg_token: Register tokens for enhanced representation
         pos_embed: Positional embeddings
         blocks: Transformer blocks
         norm: Final normalization layer
         head: Classification head
-        num_register_tokens: Number of register tokens
+        num_reg_tokens: Number of register tokens
 
     References:
     - [DINOv2: Learning Robust Visual Features without Supervision](https://arxiv.org/abs/2304.07193)
@@ -106,7 +106,7 @@ class DINOV2(VisionTransformer):
         ...     embed_dim=1024,
         ...     depth=24,
         ...     num_heads=16,
-        ...     register_tokens=4,
+        ...     reg_tokens=4,
         ...     num_classes=1000
         ... )
         >>> x = torch.randn(1, 3, 518, 518)
@@ -148,7 +148,6 @@ class DINOV2(VisionTransformer):
             norm_layer (callable, optional): Normalization layer. Defaults to nn.LayerNorm.
             act_layer (callable, optional): MLP activation layer. Defaults to nn.GELU.
             block_fn (callable, optional): Transformer block layer. Defaults to None.
-            register_tokens (int, optional): Number of register tokens to be added. Defaults to 0.
             activation_checkpoint (bool, optional): Whether to use activation checkpointing. Defaults to False.
             freeze_at (list, optional): List of keys corresponding to the stages or layers to freeze.
                 If None, no specific layers are frozen. If "all", the entire model is frozen.
@@ -162,14 +161,28 @@ class DINOV2(VisionTransformer):
             and self-supervised learning capabilities. Register tokens provide additional
             representation capacity for improved feature learning.
         """
-        register_tokens = kwargs.pop("register_tokens", 0)
-
         super().__init__(*args, **kwargs)  # VisionTransformer initialization.
 
-        # Add register tokens.
-        self.num_register_tokens = register_tokens
-        if register_tokens > 0:
-            self.register_tokens = nn.Parameter(torch.randn(1, register_tokens, self.embed_dim))
+        # CAUTION: NVDINOv2 excludes `reg_token` from the `pos_embed`. This
+        # differs from the TIMM implementation. We follow the NVDINOv2 design
+        # here by applying the `pos_embed` only to the patch and class tokens.
+        if self.num_reg_tokens > 0:
+            embed_len = self.patch_embed.num_patches
+            if self.has_class_token:
+                embed_len += 1
+            self.pos_embed = nn.Parameter(torch.randn(1, embed_len, self.embed_dim) * .02)
+            self.num_prefix_tokens -= self.num_reg_tokens
+
+    def load_state_dict(self, state_dict, **kwargs):
+        """Copy parameters and buffers from state_dict into this module and its descendants.
+
+        Args:
+            state_dict (dict): a dict containing parameters and persistent buffers.
+            **kwargs: Additional arguments passed to `nn.Module.load_state_dict`.
+        """
+        if "register_tokens" in state_dict:
+            state_dict["reg_token"] = state_dict.pop("register_tokens")
+        return super().load_state_dict(state_dict, **kwargs)
 
     def _pos_embed(self, x):
         """Add positional embeddings to the input tokens.
@@ -194,8 +207,8 @@ class DINOV2(VisionTransformer):
         # add positional encoding to each token
         x = x + self._interpolate_pos_encoding(x, w, h)
         # add register tokens
-        if self.num_register_tokens > 0:
-            x = torch.cat((x, self.register_tokens.expand(B, -1, -1)), dim=1)
+        if self.num_reg_tokens > 0:
+            x = torch.cat((x, self.reg_token.expand(B, -1, -1)), dim=1)
         return self.pos_drop(x)
 
     def forward_pre_logits(self, x):
@@ -397,6 +410,6 @@ def vit_giant_patch14_reg4_dinov2_swiglu(**kwargs):
         mlp_ratio=8192 / 1536,
         embed_layer=partial(PatchEmbed, strict_img_size=False),
         global_pool="token",
-        register_tokens=4,
+        reg_tokens=4,
         **kwargs,
     )

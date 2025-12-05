@@ -68,6 +68,12 @@ class SegFormerPlModel(TAOLightningModule):
         self.running_metric = MeanIoUMeter(n_class=self.n_class)
         self.batch_size = self.dataset_config.batch_size
 
+        # label transform indicates whether the label is normalized to [0, 1] or [0, 255]
+        # if norm, then the label is normalized to [0, 1]
+        # if not norm, then the label is in [0, 255]
+        # used in visualize function
+        self.label_transform = self.dataset_config.label_transform
+
         # #  training log
         self.epoch_acc = 0
         self.max_num_epochs = self.train_config.num_epochs
@@ -223,12 +229,6 @@ class SegFormerPlModel(TAOLightningModule):
 
         self.running_metric.update_cm(pr=pr.cpu(), gt=target.cpu())  # current_score
 
-    def _visualize_pred(self, i):
-        """Helper function to visualize predictions"""
-        pred = torch.argmax(self.final_pred[i].unsqueeze(0), dim=1, keepdim=True)
-        pred_vis = pred * 255
-        return pred_vis
-
     def _visualize_pred_multi(self, i):
         """Helper function to visualize predictions for multi class segmentation"""
         pred = torch.argmax(self.final_pred[i].unsqueeze(0), dim=1, keepdim=True)
@@ -251,24 +251,24 @@ class SegFormerPlModel(TAOLightningModule):
                     mode='bilinear',
                     align_corners=False
                 )
-                vis_input = utils_vis.make_numpy_grid(utils_vis.de_norm(vis_input, mean=self.dataset_config["augmentation"]["mean"], std=self.dataset_config["augmentation"]["std"]))
+                vis_input = utils_vis.make_numpy_grid(
+                    utils_vis.de_norm(
+                        vis_input, mean=self.dataset_config["augmentation"]["mean"], std=self.dataset_config["augmentation"]["std"]
+                    ),
+                    already_img=True
+                )
 
-                if self.n_class > 2:
-                    # print("Visualising multiple classes")
-                    vis_pred, _ = utils_vis.make_numpy_grid(
-                        self._visualize_pred_multi(i),
-                        num_class=self.n_class,
-                        gt=self.batch['mask'][i].unsqueeze(0),
-                        color_map=self.color_map
-                    )
-                    vis_gt = utils_vis.make_numpy_grid(
-                        self.batch['mask'][i].unsqueeze(0),
-                        num_class=self.n_class,
-                        color_map=self.color_map
-                    )
-                else:
-                    vis_pred = utils_vis.make_numpy_grid(self._visualize_pred(i))
-                    vis_gt = utils_vis.make_numpy_grid(self.batch['mask'][i].unsqueeze(0))
+                vis_pred, _ = utils_vis.make_numpy_grid(
+                    self._visualize_pred_multi(i),
+                    gt=self.batch['mask'][i].unsqueeze(0),
+                    color_map=self.color_map,
+                    label_transform=self.label_transform
+                )
+                vis_gt = utils_vis.make_numpy_grid(
+                    self.batch['mask'][i].unsqueeze(0),
+                    color_map=self.color_map,
+                    label_transform=self.label_transform
+                )
 
                 # Combining horizontally
                 line_width = 10  # width of the black line in pixels
@@ -301,16 +301,18 @@ class SegFormerPlModel(TAOLightningModule):
         """
         if np.mod(batch_idx, vis_afer_n_batches) == 0:
             for i in range(len(self.batch['img'])):
-                vis_input = utils_vis.make_numpy_grid(utils_vis.de_norm(self.batch['img'][i].unsqueeze(0), mean=self.dataset_config["augmentation"]["mean"], std=self.dataset_config["augmentation"]["std"]))
+                vis_input = utils_vis.make_numpy_grid(
+                    utils_vis.de_norm(
+                        self.batch['img'][i].unsqueeze(0), mean=self.dataset_config["augmentation"]["mean"], std=self.dataset_config["augmentation"]["std"]
+                    ),
+                    already_img=True
+                )
 
-                if self.n_class > 2:
-                    # print("Visualising multiple classes")
-                    vis_pred = utils_vis.make_numpy_grid(
-                        self._visualize_pred_multi(i),
-                        num_class=self.n_class, color_map=self.color_map
-                    )
-                else:
-                    vis_pred = utils_vis.make_numpy_grid(self._visualize_pred(i))
+                vis_pred = utils_vis.make_numpy_grid(
+                    self._visualize_pred_multi(i),
+                    color_map=self.color_map,
+                    label_transform=self.label_transform
+                )
 
                 # Combining horizontally
                 line_width = 10  # width of the black line in pixels
@@ -412,6 +414,7 @@ class SegFormerPlModel(TAOLightningModule):
         if not self.trainer.sanity_checking:
             scores, mean_scores = self._collect_epoch_states()  # logs all evaluation metrics
             self.log("val_acc", scores['acc'], on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+            self.log("val_miou", scores['miou'], on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
         self._clear_cache()
 
         average_val_loss = self.trainer.logged_metrics["val_loss"].item()

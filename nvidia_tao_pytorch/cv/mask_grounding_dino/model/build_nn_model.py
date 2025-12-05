@@ -21,6 +21,7 @@ from nvidia_tao_pytorch.cv.dino.model.backbone import Joiner
 
 from nvidia_tao_pytorch.cv.grounding_dino.model.backbone import Backbone
 from nvidia_tao_pytorch.cv.mask_grounding_dino.model.transformer import Transformer
+from nvidia_tao_pytorch.cv.mask_grounding_dino.model.rela import ReLA
 from nvidia_tao_pytorch.cv.mask_grounding_dino.model.mask_groundingdino import MaskGroundingDINO
 
 
@@ -73,6 +74,7 @@ class MaskGDINOModel(nn.Module):
                  class_embed_bias=False,
                  max_text_len=256,
                  has_mask=True,
+                 num_region_queries=100,
                  ):
         """Initialize Mask Grounding DINO Model.
 
@@ -111,6 +113,7 @@ class MaskGDINOModel(nn.Module):
             two_stage_class_embed_share (bool): whether to share embedding for two stage classification.
             pe_temperatureH (int): the temperature applied to the height dimension of Positional Sine Embedding.
             pe_temperatureW (int): the temperature applied to the width dimension of Positional Sine Embedding.
+            num_region_queries (int): number of region queries for ReLA.
         """
         super(__class__, self).__init__()  # pylint:disable=undefined-variable
 
@@ -172,11 +175,29 @@ class MaskGDINOModel(nn.Module):
             fusion_droppath=fusion_droppath,
         )
 
+        # build rela
+        if num_region_queries > 0:
+            rela = ReLA(
+                num_queries=num_region_queries,
+                hidden_dim=hidden_dim,
+                nheads=nheads,
+                dim_feedforward=dim_feedforward,
+                dec_layers=dec_layers,
+                pre_norm=pre_norm,
+                rla_weight=0.1,
+                num_feature_levels=3,
+                mask_dim=hidden_dim,
+                export=export,
+            )
+        else:
+            rela = None
+
         # build mask groundingdino model
         self.model = MaskGroundingDINO(
             joined_backbone,
             position_embedding,
             transformer,
+            rela=rela,
             num_queries=num_queries,
             aux_loss=aux_loss,
             iter_update=True,
@@ -259,6 +280,8 @@ def build_model(experiment_config,
     log_scale = model_config.log_scale
     class_embed_bias = model_config.class_embed_bias
 
+    num_region_queries = model_config.num_region_queries
+
     model = MaskGDINOModel(
         hidden_dim=hidden_dim,
         pretrained_backbone_path=pretrained_backbone,
@@ -293,5 +316,6 @@ def build_model(experiment_config,
         max_text_len=max_text_len,
         log_scale=log_scale,
         class_embed_bias=class_embed_bias,
-        has_mask=has_mask)
+        has_mask=has_mask,
+        num_region_queries=num_region_queries)
     return model

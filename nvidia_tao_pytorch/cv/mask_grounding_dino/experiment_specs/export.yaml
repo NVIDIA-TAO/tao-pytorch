@@ -15,3 +15,4 @@ model:
   num_queries: 900
   dim_feedforward: 2048
   aux_loss: False
+  num_region_queries: ??? # use for ReLA, 0 to ignore rela

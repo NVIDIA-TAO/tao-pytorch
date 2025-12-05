@@ -35,7 +35,7 @@ from nvidia_tao_pytorch.cv.rtdetr.dataloader.pl_od_data_module import ODDataModu
 spec_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-# Load experiment specification, additially using schema for validation/retrieving the default values.
+# Load experiment specification, additionally using schema for validation/retrieving the default values.
 # --config_path and --config_name will be provided by the entrypoint script.
 @hydra_runner(
     config_path=os.path.join(spec_root, "experiment_specs"),
@@ -59,15 +59,18 @@ def main(cfg: ExperimentConfig) -> None:
 
     # Build the Lightning model and extract the underlying nn.Module
     logger.debug("Loading RT-DETR checkpoint")
-    pl_model = RTDETRPlModel.load_from_checkpoint(
-        cfg.quantize.model_path,
-        map_location="cpu",
-        experiment_spec=cfg,
-    )
-    orig_model = pl_model.model
+    if not cfg.quantize.model_path.endswith(".onnx"):
+        pl_model = RTDETRPlModel.load_from_checkpoint(
+            cfg.quantize.model_path,
+            map_location="cpu",
+            experiment_spec=cfg,
+        )
+        orig_model = pl_model.model
+    else:
+        orig_model = None  # ModelOpt ONNX backend loads the model from the file.
 
     # Prepare calibration dataloader via DataModule
-    if cfg.quantize.mode != "weight_only_ptq":
+    if cfg.quantize.mode != "weight_only_ptq" and cfg.dataset.quant_calibration_data_sources is not None:
         dm = ODDataModule(cfg.dataset)
         dm.setup(stage="calibration")
         calibration_loader = dm.calib_dataloader()

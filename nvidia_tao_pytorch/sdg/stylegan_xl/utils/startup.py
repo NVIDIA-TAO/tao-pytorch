@@ -20,7 +20,7 @@ import torch
 import os
 import tempfile
 
-from nvidia_tao_core.cloud_handlers import utils
+from nvidia_tao_core.microservices.handlers.cloud_handlers import utils
 from pytorch_lightning.utilities.rank_zero import rank_zero_only
 from nvidia_tao_pytorch.core.distributed.comm import synchronize
 
@@ -62,7 +62,7 @@ def download_and_convert_pretrained_modules():
             TAO_STYLEGAN_HF_URL = os.getenv("TAO_STYLEGAN_HF_URL", "https://github.com/autonomousvision/stylegan-xl.git")
             TAO_STYLEGAN_INCEPTION_URL = os.getenv("TAO_STYLEGAN_INCEPTION_URL", "https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan3/versions/1/files/metrics/inception-2015-12-05.pkl")
 
-            utils.download_huggingface_dataset(TAO_STYLEGAN_HF_URL, tmp_path, token=False)
+            utils.download_from_git_link(TAO_STYLEGAN_HF_URL, tmp_path)
             utils.download_from_https_link(TAO_STYLEGAN_INCEPTION_URL, tmp_path)
 
             InceptionV3_file_path = os.path.join(tmp_path, "inception-2015-12-05.pkl")

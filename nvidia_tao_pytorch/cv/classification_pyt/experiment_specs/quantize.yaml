@@ -38,13 +38,11 @@ model:
       type: CrossEntropyLoss
 
 quantize:
-  backend: modelopt
+  backend: modelopt.pytorch
   mode: static_ptq
   algorithm: max
   model_path:  ???
   results_dir: ${results_dir}
-  default_layer_dtype: native
-  default_activation_dtype: native
 
   # Global FP8 E4M3 for all modules (weights + activations)
   layers:

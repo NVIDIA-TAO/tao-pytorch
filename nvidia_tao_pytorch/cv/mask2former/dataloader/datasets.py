@@ -16,6 +16,7 @@ from fvcore.transforms.transform import PadTransform
 import torch
 from torch.utils.data import Dataset
 import torchvision.transforms.functional as F
+from nvidia_tao_pytorch.core.utilities import PIL_SUPPORTED_FORMATS
 from nvidia_tao_pytorch.cv.mask2former.dataloader.augmentations import (
     RandomHorizontalFlip, RandomCrop, ResizeShortestEdge,
     ColorAugSSDTransform,
@@ -574,7 +575,11 @@ class PredictDataset(BaseDataset):
                  cfg=None):
         """Init dataset for prediction."""
         super().__init__(cfg)
-        self.img_list = sorted(glob.glob(self.cfg.test.img_dir + '/*.jpg'))
+        self.img_list = sorted([
+            file
+            for ext in PIL_SUPPORTED_FORMATS
+            for file in glob.glob(self.cfg.test.img_dir + f"/*{ext}")
+        ])
 
     def image_preprocess(self, img):
         """Preprocess image."""

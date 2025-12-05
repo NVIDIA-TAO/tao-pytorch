@@ -2,10 +2,19 @@ results_dir: ???
 evaluate:
   num_gpus: 1
   checkpoint: ???
+  conf_threshold: 0.3
+  ioi_threshold: 0.5
+  nms_threshold: 0.2
 dataset:
   test_data_sources:
     image_dir: ???
-    json_file: ???
+    json_file: ???  # COCO-like detection dataset of RefCOCO like grounding dataset (ID must be contiguous and start from 0)
+    data_type: ???  # OD or VG
+  augmentation:
+    fixed_random_crop: ???  # can be skip to use dèault value
+    random_resize_max_size: ??? # can be skip to use dèault value
+    test_random_resize: ???  # can be skip to use dèault value
+  max_labels: ???  # use for COCO-like detection dataset, otherwise should be 0
   batch_size: 2
   workers: 8
 model:
