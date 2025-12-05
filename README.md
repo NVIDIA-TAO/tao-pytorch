@@ -167,10 +167,26 @@ There will be situations where developers would be required to update the third 
 
 The base dev docker is defined in `$NV_TAO_PYTORCH_TOP/docker/Dockerfile`. The python packages required for the TAO dev is defined in `$NV_TAO_PYTORCH_TOP/docker/requirements-pip.txt` and the third party apt packages are defined in `$NV_TAO_PYTORCH_TOP/docker/requirements-apt.txt`. Once you have made the required change, please update the base docker using the build script in the same directory.
 
+The build script supports building for different platforms (x86_64/AMD64 and ARM64). By default, it builds for `linux/amd64` (x86_64).
+
+**Cross-platform builds:** When building for a different architecture than your host (e.g., ARM64 on x86_64), the script automatically detects and configures QEMU emulation. The QEMU setup persists on your system and is reused for future builds.
+
 ```sh
-git clone https://github.com/NVIDIA/tao-core.git
 cd $NV_TAO_PYTORCH_TOP/docker
-./build.sh --build
+# Build for x86_64/AMD64 (default platform)
+./build.sh --build --x86
+
+# Build for ARM64 (automatically sets up QEMU if on x86_64 host)
+./build.sh --build --arm
+
+# Build for both platforms (requires --push flag)
+./build.sh --build --multiplatform --push
+```
+
+For more build options and help, run:
+
+```sh
+./build.sh --help
 ```
 
 #### <a name='Testthenewlybuiltbasedocker'></a>Test the newly built base docker
@@ -188,8 +204,14 @@ Once you are sufficiently confident about the newly built base docker, please do
 1. Push the newly built base docker to the registry
 
     ```sh
-    bash $NV_TAO_PYTORCH_TOP/docker/build.sh --build --push
+    # Push for x86_64/AMD64 platform
+    bash $NV_TAO_PYTORCH_TOP/docker/build.sh --build --push --x86
+    
+    # Or push multi-platform build (x86_64 and ARM64)
+    bash $NV_TAO_PYTORCH_TOP/docker/build.sh --build --push --multiplatform
     ```
+    
+    **Note:** Multi-platform builds automatically push to the registry due to Docker buildx limitations. Single platform builds can be built locally without the `--push` flag for testing.
 
 2. The above step produces a digest file associated with the docker. This is a unique identifier for the docker. So please note this, and update all references of the old digest in the repository with the new digest. You may find the old digest in the `$NV_TAO_PYTORCH_TOP/docker/manifest.json`.
 
@@ -198,7 +220,8 @@ Push you final updated changes to the repository so that other developers can le
 Please note that if for some reason you would like to force build the docker without using a cache from the previous docker, you may do so by using the `--force` option.
 
 ```sh
-bash $NV_TAO_PYTORCH_TOP/docker/build.sh --build --push --force
+# Force rebuild without cache
+bash $NV_TAO_PYTORCH_TOP/docker/build.sh --build --push --force --x86
 ```
 
 ## <a name='Buildingareleasecontainer'></a>Building a release container
@@ -209,8 +232,8 @@ The TAO docker is built on top of the TAO Pytorch base dev docker, by building a
 git lfs install
 git lfs pull
 source scripts/envsetup.sh
-cd $NV_TAO_PYTORCH_TOP/release/docker
-./deploy.sh --build --wheel
+cd $NV_TAO_PYTORCH_TOP
+./release/docker/deploy.sh --build --wheel
 ```
 
 In order to build a new docker, please edit the `deploy.sh` file in `$NV_TAO_PYTORCH_TOP/release/docker` to update the patch version and re-run the steps above.

@@ -18,7 +18,7 @@ from typing import Any, Mapping, Union
 
 import torch
 from safetensors.torch import load_file
-from torch.serialization import FILE_LIKE
+from torch.serialization import FileLike
 
 from nvidia_tao_pytorch.core.cookbooks.tlt_pytorch_cookbook import TLTPyTorchCookbook
 from nvidia_tao_pytorch.core.utilities import patch_decrypt_checkpoint
@@ -130,7 +130,7 @@ class StateDictAdapter:
         return state_dict
 
 
-def load_pretrained_weights(path_or_checkpoint: Union[FILE_LIKE, Mapping[str, Any]],
+def load_pretrained_weights(path_or_checkpoint: Union[FileLike, Mapping[str, Any]],
                             map_location="cpu",
                             weights_only=False,
                             ptm_adapter=None,

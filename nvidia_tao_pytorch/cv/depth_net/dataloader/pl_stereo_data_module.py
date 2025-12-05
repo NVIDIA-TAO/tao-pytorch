@@ -50,7 +50,9 @@ class StereoDepthNetDataModule(pl.LightningDataModule):
             pin_memory=self.train_dataset_config["pin_memory"],
             batch_size=self.train_dataset_config["batch_size"],
             sampler=self.train_sampler,
-            drop_last=True
+            drop_last=True,
+            multiprocessing_context='spawn' if self.train_dataset_config["workers"] > 0 else None,
+            persistent_workers=self.train_dataset_config["workers"] > 0
         )
         return train_loader
 
@@ -66,7 +68,8 @@ class StereoDepthNetDataModule(pl.LightningDataModule):
             pin_memory=self.val_dataset_config["pin_memory"],
             batch_size=self.val_dataset_config["batch_size"],
             drop_last=False,
-            sampler=self.val_sampler
+            sampler=self.val_sampler,
+            multiprocessing_context='spawn' if self.val_dataset_config["workers"] > 0 else None
         )
         return val_loader
 
@@ -83,6 +86,7 @@ class StereoDepthNetDataModule(pl.LightningDataModule):
             batch_size=self.infer_dataset_config["batch_size"],
             drop_last=False,
             shuffle=False,
+            multiprocessing_context='spawn' if self.infer_dataset_config["workers"] > 0 else None
         )
         return pred_loader
 
@@ -98,7 +102,8 @@ class StereoDepthNetDataModule(pl.LightningDataModule):
             pin_memory=self.test_dataset_config["pin_memory"],
             batch_size=self.test_dataset_config["batch_size"],
             drop_last=False,
-            shuffle=False
+            shuffle=False,
+            multiprocessing_context='spawn' if self.test_dataset_config["workers"] > 0 else None
         )
         return test_loader
 

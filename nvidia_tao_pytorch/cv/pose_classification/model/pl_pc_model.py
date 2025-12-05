@@ -88,13 +88,11 @@ class PoseClassificationModel(TAOLightningModule):
             lr_scheduler = ReduceLROnPlateau(optim, 'min',
                                              patience=self.train_config['optim']['patience'],
                                              min_lr=self.train_config['optim']['min_lr'],
-                                             factor=self.train_config['optim']["lr_decay"],
-                                             verbose=True)
+                                             factor=self.train_config['optim']["lr_decay"])
         elif scheduler_type == "MultiStep":
             lr_scheduler = MultiStepLR(optimizer=optim,
                                        milestones=self.train_config['optim']["lr_steps"],
-                                       gamma=self.train_config['optim']["lr_decay"],
-                                       verbose=True)
+                                       gamma=self.train_config['optim']["lr_decay"])
         else:
             raise NotImplementedError("Only [AutoReduce, MultiStep] schedulers are supported")
 

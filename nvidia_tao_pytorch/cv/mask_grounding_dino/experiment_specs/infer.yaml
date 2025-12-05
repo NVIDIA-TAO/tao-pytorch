@@ -3,13 +3,21 @@ inference:
   num_gpus: 1
   checkpoint: ???
   conf_threshold: 0.3
+  ioi_threshold: 0.5
+  text_threshold: 0.3
+  nms_threshold: 0.2
   color_map:
     "dog": green
 dataset:
   infer_data_sources:
-    image_dir: 
-      - ???
-    captions: ["dog"]
+    image_dir: ???
+    # captions: ["dog"]  # use for OD dataset, otherwise should be ignored
+    json_file: ???  # RefCOCO-like grounding dataset using expression for VG, otherwise should be ignored
+    data_type: ???  # OD or VG
+  augmentation:
+    fixed_random_crop: ???  # can be skip to use dèault value
+    random_resize_max_size: ??? # can be skip to use dèault value
+    test_random_resize: ???  # can be skip to use dèault value
   batch_size: 2
   workers: 8
 model:
@@ -20,3 +28,4 @@ model:
   num_queries: 900
   dropout_ratio: 0.0
   dim_feedforward: 2048
+  has_mask: true

@@ -72,8 +72,7 @@ class CenterPosePlModel(TAOLightningModule):
         optimizer = torch.optim.Adam(self.model.parameters(), self.experiment_spec.train.optim.lr)
         lr_scheduler = MultiStepLR(optimizer=optimizer,
                                    milestones=self.experiment_spec.train.optim.lr_steps,
-                                   gamma=self.experiment_spec.train.optim.lr_decay,
-                                   verbose=True)
+                                   gamma=self.experiment_spec.train.optim.lr_decay)
 
         return {
             "optimizer": optimizer,

@@ -1,4 +1,4 @@
-# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -23,6 +23,7 @@ import torch
 from torch.utils.data import DataLoader
 from nvidia_tao_pytorch.cv.oneformer.dataloader.datasets import COCOUnifiedDataset
 from nvidia_tao_pytorch.core.distributed.comm import is_dist_avail_and_initialized
+from nvidia_tao_pytorch.cv.oneformer.dataloader.datasets import OneFormerPredictDataset
 
 logger = logging.getLogger(__name__)
 
@@ -144,12 +145,8 @@ class SemSegmDataModule(pl.LightningDataModule):
 
     def predict_dataloader(self):
         """Create prediction dataloader."""
-        dataset_predict = COCOUnifiedDataset(
-            ann_path=self.data_cfg.dataset.test.annotations,
-            img_dir=self.data_cfg.dataset.test.images,
-            panoptic_dir=self.data_cfg.dataset.test.panoptic,
-            cfg=self.data_cfg,
-            is_training=False,
+        dataset_predict = OneFormerPredictDataset(
+            cfg=self.data_cfg
         )
 
         predict_sampler = None

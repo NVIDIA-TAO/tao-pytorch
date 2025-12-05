@@ -17,7 +17,7 @@
 from typing import Any, Dict, Sequence
 
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import Callback, ModelCheckpoint
+from pytorch_lightning.callbacks import Callback, LearningRateMonitor, ModelCheckpoint
 
 from nvidia_tao_pytorch.core.callbacks.loggers import TAOStatusLogger
 from nvidia_tao_pytorch.core.callbacks.model_checkpoint import TAOExceptionCheckpoint
@@ -119,7 +119,26 @@ class TAOLightningModule(pl.LightningModule):
         TAOExceptionCheckpoint.CHECKPOINT_NAME_LAST = ModelCheckpoint.CHECKPOINT_NAME_LAST
         exception_checkpoint_callback = TAOExceptionCheckpoint(dirpath=results_dir)
 
-        return [status_logger_callback, checkpoint_callback, exception_checkpoint_callback]
+        callbacks = [status_logger_callback, checkpoint_callback, exception_checkpoint_callback]
+
+        # top-K ModelCheckpoing(only append when it is set in config)
+        checkpointer_cfg = self.experiment_spec["train"].get("checkpointer", None)
+        if checkpointer_cfg and checkpointer_cfg.get("enable_topk", False):
+            callbacks.append(ModelCheckpoint(
+                dirpath=checkpointer_cfg.get("dirpath", "./checkpoints"),
+                filename=checkpointer_cfg.get("filename", "topk_epoch{epoch:03d}-m{val_miou:.4f}"),
+                monitor=checkpointer_cfg.get("monitor", "val_miou"),
+                mode=checkpointer_cfg.get("mode", "max"),
+                save_top_k=checkpointer_cfg.get("save_top_k", 3),
+                save_last=checkpointer_cfg.get("save_last", True),
+                auto_insert_metric_name=checkpointer_cfg.get("auto_insert_metric_name", False),
+            ))
+
+        # LearningRateMonitor(only append when it is set in config)
+        if self.experiment_spec["train"].get("enable_lr_monitor", False):
+            callbacks.append(LearningRateMonitor(logging_interval='step'))
+
+        return callbacks
 
     def _dataloader_batch_check(self, dataloader, task):
         """

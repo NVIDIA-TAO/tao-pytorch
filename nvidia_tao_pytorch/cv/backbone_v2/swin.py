@@ -205,7 +205,6 @@ class SwinTransformer(BackboneBase):
         self.num_layers = len(depths)
         self.embed_dim = embed_dim
         self.ape = ape
-
         self.num_features = int(embed_dim * 2 ** (self.num_layers - 1))
         self.patch_norm = patch_norm
         self.out_indices = out_indices

@@ -40,7 +40,6 @@ def build_lr_scheduler(optimizer, scheduler_type, train_config, trainer):
             - optim.lr_decay: Learning rate decay factor (gamma)
             - optim.lr_step_size: Step size for StepLR
             - num_epochs: Number of training epochs (for LambdaLR)
-            - verbose: Verbosity flag for scheduler
         data_loader_length (int, optional): Length of the training data loader. Required
             for LambdaLR scheduler. Defaults to None.
 
@@ -67,7 +66,6 @@ def build_lr_scheduler(optimizer, scheduler_type, train_config, trainer):
         lr_scheduler = LambdaLR(
             optimizer=optimizer,
             lr_lambda=lambda x: 1 - x / (train_config['num_epochs'] * len(trainer.datamodule.train_dataloader())),
-            verbose=train_config.verbose
         )
     elif scheduler_type == "OneCycleLR":
         lr_scheduler = OneCycleLR(
@@ -87,7 +85,6 @@ def build_lr_scheduler(optimizer, scheduler_type, train_config, trainer):
             T_max=trainer.estimated_stepping_batches,
             eta_min=train_config["optim"]["min_lr"],
             last_epoch=-1,
-            verbose=train_config.verbose,
         )
     else:
         raise NotImplementedError("LR Scheduler {} is not implemented".format(scheduler_type))

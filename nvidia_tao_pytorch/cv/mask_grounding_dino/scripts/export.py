@@ -96,7 +96,9 @@ def run_export(experiment_config):
         os.makedirs(output_root)
 
     input_names = ["inputs", "input_ids", "attention_mask", "position_ids", "token_type_ids", "text_token_mask"]
-    output_names = ["pred_logits", "pred_boxes", "pred_masks"]
+    output_names = ['pred_logits', 'pred_boxes', 'pred_masks']
+    if experiment_config.model.num_region_queries > 0:
+        output_names.extend(['no_targets', 'union_mask_logits'])
 
     caption = "the running dog ."
     if serialize_nvdsinfer:
@@ -115,7 +117,7 @@ def run_export(experiment_config):
         map_location='cpu' if on_cpu else 'cuda',
         experiment_spec=experiment_config,
         export=True,
-        cap_lists=["the running dog"])
+        cap_lists=None)
     model = pl_model.model
     model.eval()
     if not on_cpu:

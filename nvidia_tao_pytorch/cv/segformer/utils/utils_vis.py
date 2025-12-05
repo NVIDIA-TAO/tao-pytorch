@@ -77,7 +77,7 @@ def get_color_mapping(dataset_name, num_classes=None, color_mapping_custom=None)
     return output_color_mapping
 
 
-def make_numpy_grid(tensor_data, pad_value=0, padding=0, num_class=2, gt=None, color_map=None):
+def make_numpy_grid(tensor_data, pad_value=0, padding=0, already_img=False, gt=None, color_map=None, label_transform=None):
     """
     Convert a batch of PyTorch tensors into a numpy grid for visualization.
 
@@ -85,12 +85,11 @@ def make_numpy_grid(tensor_data, pad_value=0, padding=0, num_class=2, gt=None, c
         tensor_data (torch.Tensor): The input batch of PyTorch tensors.
         pad_value (int, optional): The padding value for the grid (default is 0).
         padding (int, optional): The padding between grid cells (default is 0).
-        num_class (int, optional): The number of classes (default is 2).
+        already_img (bool, optional): Whether the input tensor_data is already an image (default is False), no need to color map.
         gt (torch.Tensor or np.ndarray, optional): The ground truth segmentation (default is None).
-        dataset_name (str, optional): The name of the dataset.
         color_map (dict, optional): Custom color mapping provided as a dictionary with class indices as keys and RGB tuples as values (default is None).
             For binary segmentation, black and white color coding is used.
-
+        label_transform (str, optional): The label transform method (default is None). if norm, the color map will be normalized to [0, 1]
     Returns:
         np.ndarray: The numpy grid for visualization.
         np.ndarray (optional): The numpy grid showing mismatches between ground truth and predicted segmentation (only for multi-class segmentation).
@@ -99,7 +98,7 @@ def make_numpy_grid(tensor_data, pad_value=0, padding=0, num_class=2, gt=None, c
     tensor_data = tensor_data.detach()
     vis = utils.make_grid(tensor_data, pad_value=pad_value, padding=padding)
     vis = np.array(vis.cpu()).transpose((1, 2, 0))
-    if num_class > 2:
+    if not already_img:
         # multi-class visualisation
         vis_multi = vis[:, :, 0]
 
@@ -110,13 +109,16 @@ def make_numpy_grid(tensor_data, pad_value=0, padding=0, num_class=2, gt=None, c
             gt = np.array(gt.cpu()).transpose((1, 2, 0))[:, :, 0]
     if vis.shape[2] == 1:
         vis = np.stack([vis, vis, vis], axis=-1)
-    if num_class > 2:
+    if not already_img:
         color_coded = np.ones(np.shape(vis))
         # Can take custom color map/randomly generate color map for custom datasets
         assert color_map is not None, 'Provide a color map for output visualization'
         for key, value in color_map.items():
             color_coded[vis_multi == int(key)] = value
-        color_coded = color_coded / 255
+
+        if label_transform != 'norm':
+            color_coded = color_coded / 255
+
         color_coded = color_coded.astype(float)
 
         # Code for visualising FN/FP (gt!=pred)

@@ -11,6 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# Original implementation: https://github.com/lyuwenyu/RT-DETR
+# Licensed under the Apache License 2.0
+# Copyright (c) 2023 lyuwenyu. All Rights Reserved.
 
 """ Object Detection Dataset Class and Related Functions """
 

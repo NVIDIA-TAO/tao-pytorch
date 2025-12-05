@@ -17,10 +17,18 @@ dataset:
       json_file: ???  # COCO-like detection dataset
       label_map: ???
     - image_dir: ???
-      json_file: ???  # RefCOCO-like grounding dataset
+      json_file: ???  # RefCOCO-like grounding dataset using expression and phrase or positive tokens
+    - image_dir: ???
+      json_file: ???  # RefCOCO-like grounding dataset using only phrase
   val_data_sources:
     image_dir: ???
     json_file: ???  # COCO-like detection dataset (ID must be contiguous and start from 0)
+    data_type: ???  # OD or VG
+  augmentation:
+    fixed_random_crop: ???  # can be skip to use dèault value
+    random_resize_max_size: ??? # can be skip to use dèault value
+    test_random_resize: ???  # can be skip to use dèault value
+  max_labels: ???  # use for COCO-like detection dataset
   batch_size: 8
   workers: 16
 model:
@@ -32,3 +40,5 @@ model:
   num_queries: 900
   dropout_ratio: 0.0
   dim_feedforward: 2048
+  num_region_queries: ???  # 0 if not using ReLA, otherwise, the number of region queries
+  loss_types: ???   # ["labels", "boxes", "masks", "rela"] if using ReLA, otherwise, ignore "rela"

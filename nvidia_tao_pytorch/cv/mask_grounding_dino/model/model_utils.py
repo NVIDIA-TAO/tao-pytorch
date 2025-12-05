@@ -197,11 +197,14 @@ class MaskHeadConv(nn.Module):
         # fused_x = self.gn2(fused_x)
         fused_x = F.relu(fused_x)
 
+        outputs = {
+            'fused_x': fused_x,
+            'fused_x_fpn': fused_x_fpn
+        }
         if self.use_raft:
             up_masks = self.up_mask_layer(fused_x_fpn)  # weights used for upsampling the coarse mask predictions
-            return fused_x, up_masks
-        else:
-            return fused_x
+            outputs['up_masks'] = up_masks
+        return outputs
 
 
 class NestedTensor(object):

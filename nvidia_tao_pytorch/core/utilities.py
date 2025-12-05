@@ -26,6 +26,33 @@ from nvidia_tao_pytorch.core.connectors.checkpoint_connector import decrypt_chec
 # Define 1MB for filesize calculation.
 MB = 1 << 20
 
+# PIL/Pillow supported image formats
+PIL_SUPPORTED_FORMATS = [
+    '.bmp',    # Windows Bitmap
+    '.dib',    # Windows Bitmap
+    '.eps',    # Encapsulated Postscript
+    '.gif',    # Graphics Interchange Format
+    '.icns',   # Mac OS Icon
+    '.ico',    # Windows Icon
+    '.im',     # IM Format
+    '.jpeg',   # JPEG
+    '.jpg',    # JPEG
+    '.jpe',    # JPEG
+    '.msp',    # Windows Paint
+    '.pcx',    # Paintbrush
+    '.png',    # Portable Network Graphics
+    '.ppm',    # Portable Pixmap
+    '.pgm',    # Portable Graymap
+    '.pbm',    # Portable Bitmap
+    '.pnm',    # Portable Anymap
+    '.sgi',    # SGI Image
+    '.tga',    # Truevision Targa
+    '.tif',    # Tagged Image File Format
+    '.tiff',   # Tagged Image File Format
+    '.webp',   # WebP
+    '.xbm',    # X Bitmap
+]
+
 
 def get_num_trainable_elements(model):
     """Get number of trainable model elements.

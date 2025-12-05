@@ -1,4 +1,4 @@
-# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import random
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -25,19 +26,21 @@ from panopticapi.utils import rgb2id
 from PIL import Image, ImageOps
 from PIL.Image import Resampling
 from torch.utils.data import Dataset
+import glob
 
-from nvidia_tao_pytorch.cv.oneformer.utils.d2.structures import Instances  # pylint: disable=import-error
-from .augmentations import (
-    RandomRotation,
-    GaussianBlur,
-    RandomErasing,
-)
+from nvidia_tao_pytorch.core.utilities import PIL_SUPPORTED_FORMATS
+from nvidia_tao_pytorch.cv.mask2former.utils.d2.structures import Instances  # pylint: disable=import-error
 from nvidia_tao_pytorch.cv.mask2former.dataloader.augmentations import (
     RandomHorizontalFlip,
     RandomCrop,
     ResizeShortestEdge,
     ColorAugSSDTransform,
     apply_transform,
+)
+from nvidia_tao_pytorch.cv.oneformer.dataloader.augmentations import (
+    RandomRotation,
+    GaussianBlur,
+    RandomErasing,
 )
 logger = logging.getLogger(__name__)
 
@@ -471,13 +474,13 @@ class COCOUnifiedDataset(Dataset):  # pylint: disable=too-many-instance-attribut
             instances, texts, sem_seg = self._get_semantic_dict(
                 pan_segm, image_shape, segments_info, num_class_obj
             )
-        elif prob_task < self.semantic_prob + self.instance_prob:
-            task = "The task is semantic"
+        elif prob_task < self.instance_prob + self.semantic_prob:
+            task = "The task is instance"
             instances, texts, sem_seg = self._get_instance_dict(
                 pan_segm, image_shape, segments_info, num_class_obj
             )
         else:
-            task = "The task is semantic"
+            task = "The task is panoptic"
             instances, texts, sem_seg = self._get_panoptic_dict(
                 pan_segm, image_shape, segments_info, num_class_obj
             )
@@ -522,4 +525,111 @@ class COCOUnifiedDataset(Dataset):  # pylint: disable=too-many-instance-attribut
         out["file_names"] = file_names
         out["image_ids"] = image_ids
 
+        return out
+
+
+class OneFormerPredictDataset(Dataset):
+    """Dataset for prediction only."""
+
+    def __init__(self, cfg=None):
+        """Init dataset for prediction."""
+        super().__init__()
+        self.cfg = cfg
+        self.img_list = sorted([
+            file
+            for ext in PIL_SUPPORTED_FORMATS
+            for file in glob.glob(self.cfg.inference.images_dir + f"/*{ext}")
+        ])
+        self.mode = self.cfg.inference.mode.lower()
+        self.padding_constant = 2**5
+        self.pixel_mean = np.array(cfg.dataset.pixel_mean)
+        self.pixel_std = np.array(cfg.dataset.pixel_std)
+
+    def __len__(self):
+        """Dataset length."""
+        return len(self.img_list)
+
+    def image_preprocess(self, img):
+        """Preprocess image."""
+        img_height, img_width = img.shape[0], img.shape[1]
+        resize = ResizeShortestEdge(
+            img.shape[:2],
+            self.cfg.dataset.augmentation.test_min_size,
+            self.cfg.dataset.augmentation.test_max_size)
+        img = resize.apply_image(img)
+        # fixed padding
+        dh, dw = self.get_padding_offset(img.shape[:2])
+        if dh > 0 or dw > 0:
+            pad = PadTransform(0, 0, dw, dh, pad_value=0, seg_pad_value=0)
+            img = pad.apply_image(img)
+        img = self.normalize(img)
+
+        info = {'padding': (dh, dw),
+                'image_size': (img_height, img_width)}
+        input_tensor = torch.from_numpy(img).float()
+        return input_tensor, info
+
+    def round2nearest_multiple(self, x, p):
+        """Round value to nearest multiple."""
+        return ((x - 1) // p + 1) * p
+
+    def get_padding_offset(self, orig_size, target_size=None):
+        """Calculate padding offset for resizing."""
+        h, w = target_size or orig_size
+        new_h = int(self.round2nearest_multiple(h, self.padding_constant))
+        new_w = int(self.round2nearest_multiple(w, self.padding_constant))
+        return new_h - orig_size[0], new_w - orig_size[1]
+
+    def normalize(self, img):
+        """Normalize image using dataset statistics."""
+        img = np.float32(img)
+        img = (img - self.pixel_mean) / self.pixel_std
+        return img.transpose((2, 0, 1))
+
+    def get_image(self, file_name, root_dir=None, target_size=None):
+        """Load image."""
+        root_dir = root_dir or ""
+        image = Image.open(os.path.join(root_dir, file_name)).convert('RGB')
+        image = ImageOps.exif_transpose(image)
+        if target_size:
+            image = image.resize(target_size)
+        image = np.array(image)
+        return image
+
+    def __getitem__(self, idx):
+        """Per item."""
+        filename = self.img_list[idx]
+        img = self.get_image(filename, target_size=self.cfg.inference.image_size)
+        # img_height, img_width, _ = img.shape
+        img_tensor, info = self.image_preprocess(img)
+        info['filename'] = Path(filename).stem
+        data = {}
+        data['raw_image'] = img
+        data['image'] = img_tensor
+        data['info'] = info
+        if self.mode == "semantic":
+            data['task'] = "The task is semantic"
+        elif self.mode == "instance":
+            data['task'] = "The task is instance"
+        elif self.mode == "panoptic":
+            data['task'] = "The task is panoptic"
+        return data
+
+    def collate_fn(self, batch):
+        """Collate items in a batch."""
+        out = {}
+        images = []
+        info = []
+        raw_images = []
+        tasks = []
+        for item in batch:
+            images.append(item['image'])
+            info.append(item['info'])
+            raw_images.append(item['raw_image'])
+            tasks.append(item['task'])
+
+        out['images'] = torch.stack(images)
+        out['info'] = info
+        out['raw_images'] = raw_images
+        out['tasks'] = tasks
         return out

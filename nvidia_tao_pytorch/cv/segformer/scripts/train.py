@@ -62,8 +62,9 @@ def run_experiment(experiment_config, key):
     if len(trainer_kwargs['devices']) > 1:
         strategy = 'ddp_find_unused_parameters_true'
 
-    from pytorch_lightning.callbacks import LearningRateMonitor
-    lr_monitor = LearningRateMonitor(logging_interval='step')
+    trainer_kwargs.pop("enable_checkpointing", None)
+    trainer_kwargs["enable_checkpointing"] = True
+
     trainer = Trainer(
         **trainer_kwargs,
         num_nodes=num_nodes,
@@ -71,7 +72,6 @@ def run_experiment(experiment_config, key):
         precision=precision,
         use_distributed_sampler=False,
         sync_batchnorm=True,  # SegFormer head has BatchNorm.
-        callbacks=[lr_monitor],
     )
 
     trainer.fit(model, dm, ckpt_path=resume_ckpt)

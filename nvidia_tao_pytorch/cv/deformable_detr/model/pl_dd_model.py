@@ -142,13 +142,11 @@ class DeformableDETRModel(TAOLightningModule):
         if scheduler_type == "MultiStep":
             lr_scheduler = MultiStepLR(optimizer=optim,
                                        milestones=self.train_config['optim']["lr_steps"],
-                                       gamma=self.train_config['optim']["lr_decay"],
-                                       verbose=self.train_config.verbose)
+                                       gamma=self.train_config['optim']["lr_decay"])
         elif scheduler_type == "StepLR":
             lr_scheduler = StepLR(optimizer=optim,
                                   step_size=self.train_config['optim']["lr_step_size"],
-                                  gamma=self.train_config['optim']["lr_decay"],
-                                  verbose=self.train_config.verbose)
+                                  gamma=self.train_config['optim']["lr_decay"])
         else:
             raise NotImplementedError("LR Scheduler {} is not implemented".format(scheduler_type))
 

@@ -27,23 +27,27 @@ Notes
 
 from __future__ import annotations
 
-from typing import Dict
 import copy
-
-import torch.nn as nn
-import torch
 import os
+from typing import Any, Dict, Optional
 
-from ...quantizer_base import QuantizerBase
-from ...registry import register_backend
-from ...constants import QuantizationMode
-from ...utils import match_layer
-from ...validation import assert_supported_dtype
-from nvidia_tao_pytorch.core.tlt_logging import logger as tlt_logger
+import torch
+import torch.nn as nn
+
 from nvidia_tao_core.config.common.quantization.default_config import (
-    ModelQuantizationConfig,
     LayerQuantizationConfig,
+    ModelQuantizationConfig,
 )
+from nvidia_tao_pytorch.core.quantization.constants import QuantizationMode
+from nvidia_tao_pytorch.core.quantization.quantizer_base import PyTorchQuantizerBase
+from nvidia_tao_pytorch.core.quantization.registry import register_backend
+from nvidia_tao_pytorch.core.quantization.utils import match_layer
+from nvidia_tao_pytorch.core.quantization.validation import (
+    assert_supported_dtype,
+    validate_backend_mode_compatibility,
+    validate_model,
+)
+from nvidia_tao_pytorch.core.tlt_logging import logger as tlt_logger
 
 
 try:  # pragma: no cover - import error path is tested via unit test patching
@@ -62,7 +66,7 @@ except Exception as exc:  # pragma: no cover - will be simulated in tests
 
 
 # Only support weight-only PTQ in this backend
-SUPPORTED_MODES = {QuantizationMode.WEIGHT_ONLY_PTQ.name.lower()}
+SUPPORTED_MODES = {QuantizationMode.WEIGHT_ONLY_PTQ.value}
 
 
 def _select_weightonly_cfg(dtype: str):
@@ -172,17 +176,47 @@ def _build_module_fqn_to_cfg(
 
 
 @register_backend("torchao")
-class TorchAOBackend(QuantizerBase):
+class TorchAOBackend(PyTorchQuantizerBase):
     """TorchAO weight-only PTQ backend.
 
     This backend constructs a per-module weight-only quantization configuration
     for TorchAO and invokes ``quantize_`` to perform in-place quantization on a
     deep-copied model instance.
+
+    Parameters
+    ----------
+    backend_kwargs : dict, optional
+        Additional keyword arguments to pass to the TorchAO backend.
+        These parameters will be merged with the TorchAO configuration
+        before calling TorchAO quantization.
+
+    Attributes
+    ----------
+    backend_name : str
+        Name identifier for this backend ("torchao").
+    _logger : Logger
+        TAO logging instance for this backend.
+    _backend_kwargs : dict
+        Additional backend-specific parameters.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, backend_kwargs: Optional[Dict[str, Any]] = None) -> None:
+        """Initialize the TorchAO backend.
+
+        Parameters
+        ----------
+        backend_kwargs : dict, optional
+            Additional keyword arguments to pass to the TorchAO backend.
+            These parameters will be merged with the TorchAO configuration
+            before calling TorchAO quantization.
+
+        Returns
+        -------
+        None
+        """
         self._logger = tlt_logger
         self.backend_name = "torchao"
+        self._backend_kwargs = backend_kwargs or {}
 
     def prepare(self, model: nn.Module, config: ModelQuantizationConfig) -> nn.Module:
         """Validate inputs and return the model unchanged.
@@ -199,38 +233,24 @@ class TorchAOBackend(QuantizerBase):
         torch.nn.Module
             The input model unchanged.
         """
-        if not isinstance(model, nn.Module):
-            raise TypeError("model must be an instance of torch.nn.Module")
+        validate_model(model)
         if not isinstance(config, ModelQuantizationConfig):
             raise TypeError("config must be an instance of ModelQuantizationConfig")
 
-        # Validate mode
+        # Validate mode using centralized validation
         mode_value = (
-            config.mode.name.lower() if isinstance(config.mode, QuantizationMode) else str(config.mode).lower()
+            config.mode.value if isinstance(config.mode, QuantizationMode) else str(config.mode).lower()
         )
-        if mode_value not in SUPPORTED_MODES:
-            raise ValueError(
-                f"Unsupported mode '{config.mode}' for backend '{self.backend_name}'. "
-                f"Supported modes: {sorted(SUPPORTED_MODES)}"
-            )
+        validate_backend_mode_compatibility(self.backend_name, mode_value, SUPPORTED_MODES)
 
-        # Warn if default dtypes are set to non-native values, which are not supported/used currently.
-        default_layer_dtype = str(getattr(config, "default_layer_dtype", "native")).lower()
-        default_activation_dtype = str(getattr(config, "default_activation_dtype", "native")).lower()
-        if default_layer_dtype != "native" or default_activation_dtype != "native":
-            self._logger.warning(
-                "Non-native default_layer_dtype/default_activation_dtype is currently not supported "
-                "by the torchao backend and will be ignored."
-            )
-
-        self._logger.debug("TorchAOBackend.prepare: validation complete; returning model unchanged")
         return model
 
     def quantize(self, model: nn.Module, config: ModelQuantizationConfig) -> nn.Module:
         """Quantize a model using TorchAO weight-only APIs.
 
         Translates the TAO configuration into an ``AOPerModuleConfig`` mapping
-        and invokes ``torchao.quantization.quantize_``.
+        and invokes ``torchao.quantization.quantize_``. Additional backend-specific
+        parameters from backend_kwargs are merged with the TorchAO configuration.
 
         Parameters
         ----------
@@ -243,28 +263,25 @@ class TorchAOBackend(QuantizerBase):
         -------
         torch.nn.Module
             Quantized model (a deep copy of the input model).
+
+        Notes
+        -----
+        The backend_kwargs are passed directly to the TorchAO quantize_ function.
+        Any parameters in backend_kwargs will be forwarded to the underlying TorchAO call.
         """
-        if not isinstance(model, nn.Module):
-            raise TypeError("model must be an instance of torch.nn.Module")
+        validate_model(model)
         if not isinstance(config, ModelQuantizationConfig):
             raise TypeError("config must be an instance of ModelQuantizationConfig")
 
-        # Warn if default dtypes are set to non-native values, which are not supported/used currently.
-        default_layer_dtype = str(getattr(config, "default_layer_dtype", "native")).lower()
-        default_activation_dtype = str(getattr(config, "default_activation_dtype", "native")).lower()
-        if default_layer_dtype != "native" or default_activation_dtype != "native":
-            self._logger.warning(
-                "Non-native default_layer_dtype/default_activation_dtype is currently not supported "
-                "by the torchao backend and will be ignored."
-            )
-
         module_map = _build_module_fqn_to_cfg(model, config)
 
+        # Create AOPerModuleConfig with module mapping
         ao_cfg = AOPerModuleConfig(module_fqn_to_config=module_map)
 
         quantized_model = copy.deepcopy(model)
-        quantize_(quantized_model, ao_cfg)
-        self._logger.info("TorchAO quantization complete")
+
+        quantize_(quantized_model, ao_cfg, **self._backend_kwargs)
+
         return quantized_model
 
     def save_model(self, model: nn.Module, path: str) -> None:
@@ -277,8 +294,7 @@ class TorchAOBackend(QuantizerBase):
         path : str
             Directory where the model is saved as ``quantized_model_torchao.pth``.
         """
-        if not isinstance(model, nn.Module):
-            raise TypeError("model must be an instance of torch.nn.Module")
+        validate_model(model)
         if not isinstance(path, str) or not path:
             raise TypeError("path must be a non-empty string")
 
@@ -287,7 +303,7 @@ class TorchAOBackend(QuantizerBase):
 
         # Save state_dict for portability
         torch.save(model.state_dict(), save_path)
-        self._logger.info("Quantized model state_dict saved to: %s", save_path)
+        self._logger.info("Quantized model saved to: %s", save_path)
 
 
 __all__ = ["TorchAOBackend"]

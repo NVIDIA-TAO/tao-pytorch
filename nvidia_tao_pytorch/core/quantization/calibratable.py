@@ -27,7 +27,7 @@ class Calibratable(ABC):
     """
 
     @abstractmethod
-    def calibrate(self, model: nn.Module, data_loader: DataLoader):
+    def calibrate(self, model: nn.Module, data_loader: DataLoader) -> None:
         """Collect statistics or perform PTQ-style calibration.
 
         Parameters
@@ -37,9 +37,9 @@ class Calibratable(ABC):
         data_loader : torch.utils.data.DataLoader
             Data loader providing calibration data.
 
-        Raises
-        ------
-        NotImplementedError
-            Always, unless implemented by a subclass.
+        Returns
+        -------
+        None
+            This method modifies the model or backend state in-place.
         """
-        raise NotImplementedError("Calling abstract method - calibrate. Subclass must implement this method.")
+        raise NotImplementedError("Subclasses must implement calibrate()")

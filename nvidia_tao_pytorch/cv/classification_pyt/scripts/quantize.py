@@ -56,16 +56,19 @@ def main(cfg: ExperimentConfig) -> None:
     logger.info("Starting classification quantization")
 
     # Build the Lightning model and extract the underlying nn.Module
-    logger.debug("Loading classification checkpoint")
-    pl_model = ClassifierPlModel.load_from_checkpoint(
-        cfg.quantize.model_path,
-        map_location="cpu",
-        experiment_spec=cfg,
-    )
-    orig_model = pl_model.model
+    if cfg.quantize.model_path.endswith(".onnx") or cfg.quantize.model_path.endswith(".pb"):
+        orig_model = None  # ModelOpt ONNX backend expects model to be None. Modelopt works with onnx files.
+    else:
+        logger.debug("Loading classification pytorch checkpoint")
+        pl_model = ClassifierPlModel.load_from_checkpoint(
+            cfg.quantize.model_path,
+            map_location="cpu",
+            experiment_spec=cfg,
+        )
+        orig_model = pl_model.model
 
     # Prepare calibration dataloader via DataModule
-    if cfg.quantize.mode != "weight_only_ptq":
+    if cfg.quantize.mode != "weight_only_ptq" and cfg.dataset.quant_calibration_dataset is not None:
         dm = CLDataModule(cfg.dataset)
         dm.setup(stage="calibration")
         calibration_loader = dm.calib_dataloader()

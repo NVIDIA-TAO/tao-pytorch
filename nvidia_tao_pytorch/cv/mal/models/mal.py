@@ -13,6 +13,7 @@ import os
 import cv2
 import numpy as np
 from typing import Any, Mapping, List
+from contextlib import contextmanager
 
 from pycocotools.coco import COCO
 from pycocotools.mask import encode
@@ -121,7 +122,22 @@ def load_state_dict(self, state_dict: Mapping[str, Any],
     return _IncompatibleKeys(missing_keys, unexpected_keys)
 
 
-nn.modules.Module.load_state_dict = load_state_dict
+# Note: Do not monkeypatch globally on import. Use the scoped context manager below when needed.
+
+
+@contextmanager
+def patch_module_load_state_dict():
+    """Temporarily patch torch.nn.Module.load_state_dict to accept a prefix.
+
+    This ensures the monkeypatch is scoped to a context and does not leak
+    globally on import.
+    """
+    original = nn.modules.Module.load_state_dict
+    nn.modules.Module.load_state_dict = load_state_dict
+    try:
+        yield
+    finally:
+        nn.modules.Module.load_state_dict = original
 
 
 class MeanField(nn.Module):
@@ -280,19 +296,22 @@ class MALStudentNetwork(pl.LightningModule):
             has_roi = any('roi_head' in k for k in state_dict.keys())
             has_mask = any('mask_head' in k for k in state_dict.keys())
             prefix = 'backbone.' if 'fan' in cfg.model.arch else ''
-            msg = self.backbone.load_state_dict(state_dict, strict=False, prefix='student.backbone.' if is_pretrained else prefix)
-            logging.info(f"incompatible keys: {msg.missing_keys}")
+            with patch_module_load_state_dict():
+                msg = self.backbone.load_state_dict(state_dict, strict=False, prefix='student.backbone.' if is_pretrained else prefix)
+                logging.info(f"incompatible keys: {msg.missing_keys}")
 
         # K head
         self.roi_head = RoIHead(in_channels, cfg=cfg)
         if has_roi:
             print('Loading ROI head weights...')
-            self.roi_head.load_state_dict(state_dict, strict=False, prefix='student.roi_head.')
+            with patch_module_load_state_dict():
+                self.roi_head.load_state_dict(state_dict, strict=False, prefix='student.roi_head.')
         # V head
         self.mask_head = MaskHead(in_channels, cfg=cfg)
         if has_mask:
             print('Loading mask head weights...')
-            self.mask_head.load_state_dict(state_dict, strict=False, prefix='student.mask_head.')
+            with patch_module_load_state_dict():
+                self.mask_head.load_state_dict(state_dict, strict=False, prefix='student.mask_head.')
         # make student sharded on multiple gpus
         self.configure_sharded_model()
 
