@@ -1,0 +1,43 @@
+results_dir: ???
+
+train:
+  seed: 47
+  num_epochs: 50
+  num_nodes: 1
+  num_gpus: 1
+
+model:
+  backbone: depth_anything_v2
+
+quantize:
+  backend: modelopt.pytorch
+  mode: static_ptq
+  algorithm: max
+  model_path: ???
+  results_dir: ${results_dir}
+
+  # Global FP8 E4M3 for all modules (weights + activations)
+  layers:
+    - module_name: '*'
+      weights:
+        dtype: fp8_e4m3fn
+      activations:
+        dtype: fp8_e4m3fn
+
+  # Disable for specific modules/patterns and classes
+  skip_names:
+    - '*lm_head*'
+    - '*block_sparse_moe.gate*'
+    - '*router*'
+    - '*output_layer*'
+    - 'output.*'
+    - 'BatchNorm1d'
+    - 'BatchNorm2d'
+    - 'BatchNorm3d'
+    - 'LeakyReLU'
+    - '*head*'
+
+dataset:
+  # Dataset used exclusively for quantization calibration
+  quant_calibration_dataset:
+    images_dir: ???

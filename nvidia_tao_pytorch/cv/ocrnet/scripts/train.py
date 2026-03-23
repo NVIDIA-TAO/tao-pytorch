@@ -49,9 +49,12 @@ def run_experiment(experiment_spec: ExperimentConfig):
     if len(trainer_kwargs['devices']) > 1:
         distributed_strategy = experiment_spec.train.distributed_strategy
 
+    use_distributed_sampler = experiment_spec.train.use_distributed_sampler
+
     trainer = Trainer(**trainer_kwargs,
                       strategy=distributed_strategy,
                       num_sanity_val_steps=0,
+                      use_distributed_sampler=use_distributed_sampler,
                       gradient_clip_val=clip_grad)
 
     trainer.fit(ocrnet_model, dm, ckpt_path=resume_ckpt)

@@ -22,12 +22,12 @@ from nvidia_tao_pytorch.core.decorators.workflow import monitor_status
 from nvidia_tao_pytorch.core.hydra.hydra_runner import hydra_runner
 import nvidia_tao_pytorch.core.loggers.api_logging as status_logging
 from nvidia_tao_core.config.segformer.default_config import ExperimentConfig
-from nvidia_tao_pytorch.cv.segformer.utils.onnx_export import ONNXExporter
-from nvidia_tao_pytorch.cv.segformer.utils.config import MMSegmentationConfig
+from nvidia_tao_pytorch.cv.segformer_old.utils.onnx_export import ONNXExporter
+from nvidia_tao_pytorch.cv.segformer_old.utils.config import MMSegmentationConfig
 
 # Triggers build of custom modules
-from nvidia_tao_pytorch.cv.segformer.model import * # noqa pylint: disable=W0401, W0614
-from nvidia_tao_pytorch.cv.segformer.dataloader import * # noqa pylint: disable=W0401, W0614
+from nvidia_tao_pytorch.cv.segformer_old.model import * # noqa pylint: disable=W0401, W0614
+from nvidia_tao_pytorch.cv.segformer_old.dataloader import * # noqa pylint: disable=W0401, W0614
 
 from mmengine.config import Config
 from mmengine.logging import print_log

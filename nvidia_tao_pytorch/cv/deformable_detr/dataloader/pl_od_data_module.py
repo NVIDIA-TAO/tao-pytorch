@@ -29,7 +29,17 @@ from nvidia_tao_pytorch.core.distributed.comm import (get_world_size, get_global
 
 
 class ODDataModule(pl.LightningDataModule):
-    """Lightning DataModule for Object Detection."""
+    """Lightning DataModule for Object Detection.
+
+    Supported stages (for ``setup(stage=...)``):
+    * ``fit``        – build training & validation datasets
+    * ``test``       – build evaluation dataset
+    * ``predict``    – build inference dataset
+    * ``calibration``– build calibration dataset used for post-training quantization
+
+    The :pyfunc:`calib_dataloader` method returns the DataLoader created for the
+    calibration stage.
+    """
 
     def __init__(self, dataset_config, subtask_config=None):
         """ Lightning DataModule Initialization.
@@ -47,6 +57,8 @@ class ODDataModule(pl.LightningDataModule):
         self.num_classes = dataset_config["num_classes"]
         self.pin_memory = dataset_config["pin_memory"]
         self.subtask_config = subtask_config
+        # Placeholder for calibration dataset
+        self.calib_dataset = None
 
     def setup(self, stage: Optional[str] = None):
         """ Prepares for each dataloader
@@ -87,6 +99,25 @@ class ODDataModule(pl.LightningDataModule):
             classmap = pred_data_sources.get("classmap", "")
             pred_transforms = build_transforms(self.augmentation_config, subtask_config=self.subtask_config, dataset_mode='infer')
             self.pred_dataset = ODPredictDataset(pred_list, classmap, transforms=pred_transforms)
+
+        # Prepare calibration dataset
+        if stage in ("calibration", None):
+            calib_sources = self.dataset_config.get("quant_calibration_data_sources", None)
+            image_dir = getattr(calib_sources, "image_dir", None) if calib_sources else None
+            json_file = getattr(calib_sources, "json_file", None) if calib_sources else None
+            if image_dir is None and isinstance(calib_sources, dict):
+                image_dir = calib_sources.get("image_dir", "")
+                json_file = calib_sources.get("json_file", "")
+
+            if image_dir:
+                calib_transform = build_transforms(self.augmentation_config, dataset_mode='eval')
+                self.calib_dataset = ODDataset(
+                    dataset_dir=image_dir,
+                    json_file=json_file or "",
+                    transforms=calib_transform,
+                )
+            elif stage == "calibration":
+                raise ValueError("quant_calibration_data_sources.image_dir must be provided for calibration stage.")
 
     def train_dataloader(self):
         """Build the dataloader for training.
@@ -188,3 +219,18 @@ class ODDataModule(pl.LightningDataModule):
             collate_fn=collate_fn
         )
         return predict_loader
+
+    def calib_dataloader(self):
+        """Build the dataloader for quantization calibration."""
+        if self.calib_dataset is None:
+            raise ValueError("Calibration dataset not initialized. Call setup(stage='calibration') with proper config.")
+        calib_loader = DataLoader(
+            self.calib_dataset,
+            num_workers=self.num_workers,
+            batch_size=self.batch_size,
+            shuffle=False,
+            pin_memory=self.pin_memory,
+            drop_last=False,
+            collate_fn=collate_fn,
+        )
+        return calib_loader

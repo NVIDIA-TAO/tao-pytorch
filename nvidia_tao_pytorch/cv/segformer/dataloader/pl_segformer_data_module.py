@@ -20,17 +20,16 @@ import pytorch_lightning as pl
 
 from nvidia_tao_pytorch.core.distributed.comm import is_dist_avail_and_initialized
 from nvidia_tao_pytorch.cv.segformer.dataloader.dataset import SFDataset
-from nvidia_tao_pytorch.cv.segformer.dataloader.utils import build_target_class_list, build_palette
+from nvidia_tao_pytorch.cv.segformer.dataloader.utils import (
+    build_target_class_list, build_palette
+)
 
 
 class SFDataModule(pl.LightningDataModule):
-    """
-    Lightning DataModule for SegFormer
-    """
+    """Lightning DataModule for SegFormer."""
 
     def __init__(self, dataset_config):
-        """
-        Lightning DataModule Initialization
+        """Lightning DataModule Initialization.
 
         Args:
             dataset_config (dict): Configuration for the dataset
@@ -44,8 +43,9 @@ class SFDataModule(pl.LightningDataModule):
         self.dataset = dataset_config["dataset"]
         self.augmentation = dataset_config["augmentation"]
         self.label_transform = dataset_config["label_transform"]
+        self.calib_dataset = None
 
-        # This part is from mmengine, id_color_map is used for visualization when n_class > 2
+        # This part is from mmengine, id_color_map is for visualization when n_class > 2
         target_classes = build_target_class_list(self.dataset_config)
         PALETTE, CLASSES, label_map, id_color_map = build_palette(target_classes)
         self.palette = PALETTE
@@ -54,8 +54,7 @@ class SFDataModule(pl.LightningDataModule):
         self.color_map = id_color_map
 
     def setup(self, stage: Optional[str] = None):
-        """
-        Setup the dataset
+        """Setup the dataset.
 
         Args:
             stage (str): Stage of the dataset
@@ -88,7 +87,9 @@ class SFDataModule(pl.LightningDataModule):
                     % self.dataset)
 
             if is_distributed:
-                self.train_sampler = distributed.DistributedSampler(self.train_dataset, shuffle=True)
+                self.train_sampler = distributed.DistributedSampler(
+                    self.train_dataset, shuffle=True
+                )
             else:
                 self.train_sampler = RandomSampler(self.train_dataset)
 
@@ -124,6 +125,32 @@ class SFDataModule(pl.LightningDataModule):
                     'Wrong dataset name %s (choose one from [SFDataset,])'
                     % self.dataset)
 
+        # Prepare calibration dataset when stage is 'calibration'
+        # Uses the same dataset structure as test/val (expects images in {root_dir}/images/{split})
+        if stage == 'calibration':
+            calib_cfg = self.dataset_config.get("quant_calibration_dataset", {})
+            if isinstance(calib_cfg, dict):
+                calib_root_dir = calib_cfg.get("images_dir", "")
+            else:
+                calib_root_dir = getattr(calib_cfg, "images_dir", "")
+
+            if calib_root_dir:
+                # Use test split structure - expects {calib_root_dir}/images/test/
+                self.calib_dataset = SFDataset(
+                    root_dir=calib_root_dir,
+                    augmentation=self.augmentation,
+                    split="test",
+                    img_size=self.img_size,
+                    label_transform=self.label_transform,
+                    to_tensor=True,
+                    color_map=self.color_map
+                )
+            else:
+                raise ValueError(
+                    "quant_calibration_dataset.images_dir must be provided "
+                    "for calibration stage."
+                )
+
     def train_dataloader(self):
         """Build the dataloader for training.
 
@@ -133,7 +160,9 @@ class SFDataModule(pl.LightningDataModule):
         train_loader = DataLoader(
             self.train_dataset,
             num_workers=self.num_workers,
-            batch_sampler=BatchSampler(self.train_sampler, self.batch_size, drop_last=False),
+            batch_sampler=BatchSampler(
+                self.train_sampler, self.batch_size, drop_last=False
+            ),
         )
         return train_loader
 
@@ -180,3 +209,23 @@ class SFDataModule(pl.LightningDataModule):
             pin_memory=False
         )
         return predict_loader
+
+    def calib_dataloader(self):
+        """Build the dataloader for quantization calibration.
+
+        Returns:
+            calib_loader: PyTorch DataLoader used for calibration.
+        """
+        if self.calib_dataset is None:
+            raise ValueError(
+                "Calibration dataset is not initialized. "
+                "Call setup(stage='calibration') first."
+            )
+        calib_loader = DataLoader(
+            self.calib_dataset,
+            num_workers=self.num_workers,
+            batch_size=self.batch_size,
+            shuffle=False,
+            pin_memory=False
+        )
+        return calib_loader

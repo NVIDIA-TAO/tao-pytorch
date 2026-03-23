@@ -407,14 +407,25 @@ class Mask2formerPlModule(TAOLightningModule):
         mask_pred_results = outputs["pred_masks"]  # b, num_queries, h//4, w//4
 
         pred_masks = self.batch_semantic_inference(mask_cls_results, mask_pred_results)  # nclasses, h//4, w//4
-        pred_semseg = torch.argmax(pred_masks, axis=1).cpu().numpy()  # h//4, w//4
+
+        # For binary segmentation (num_classes=1), we need to threshold the single channel
+        # instead of using argmax, which always returns 0 for single-channel input
+        if self.num_classes == 1:
+            # pred_masks has shape (b, 1, h, w), threshold at 0.5 to get binary predictions
+            pred_semseg = (pred_masks[:, 0] > 0.5).long().cpu().numpy()
+        else:
+            pred_semseg = torch.argmax(pred_masks, axis=1).cpu().numpy()  # h//4, w//4
+
+        # For single class, ground truth labels are {0, 1}, predictions are {0, 1} after thresholding
+        # For multi-class, reduce_zero_label shifts ground truth to match 0-indexed predictions
+        reduce_zero = self.num_classes > 1
 
         area_intersect, area_union, area_pred_label, area_label = \
             total_intersect_over_union(pred_semseg,
                                        segms.cpu().numpy(),
                                        self.num_classes,
                                        ignore_index=2 ** self.n_bits - 1,  # 0 for original
-                                       reduce_zero_label=True)  # False for original
+                                       reduce_zero_label=reduce_zero)  # False for original
         val_metrics = {
             'val_loss': val_loss,
             'area_intersect': area_intersect,
@@ -533,9 +544,13 @@ class Mask2formerPlModule(TAOLightningModule):
                 )
             elif self.mode == "semantic":
                 sem_seg = self.semantic_inference(mask_cls, mask_pred)
-                vis_output = visualizer.draw_sem_seg(
-                    sem_seg.argmax(dim=0).cpu()
-                )
+                # For binary segmentation (num_classes=1), threshold the single channel
+                # instead of using argmax which always returns 0
+                if self.num_classes == 1:
+                    pred_seg = (sem_seg[0] > 0.5).long().cpu()
+                else:
+                    pred_seg = sem_seg.argmax(dim=0).cpu()
+                vis_output = visualizer.draw_sem_seg(pred_seg)
             else:
                 raise ValueError(f"The provided model.mode ({self.mode}) is not supported.")
             cv2.imwrite(

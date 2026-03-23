@@ -78,11 +78,14 @@ def run_experiment(experiment_config):
             print("Setting sync batch norm")
             sync_batchnorm = True
 
+    use_distributed_sampler = experiment_config.train.use_distributed_sampler
+
     trainer = Trainer(**trainer_kwargs,
                       num_nodes=num_nodes,
                       strategy=strategy,
                       precision=precision,
                       gradient_clip_val=clip_grad_norm,
+                      use_distributed_sampler=use_distributed_sampler,
                       sync_batchnorm=sync_batchnorm,
                       fast_dev_run=is_dry_run)
 

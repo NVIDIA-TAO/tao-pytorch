@@ -123,8 +123,10 @@ class DeformableFeatureAggregation(nn.Module):
         if temporal_fusion_module is not None:
             if "embed_dims" not in temporal_fusion_module:
                 temporal_fusion_module["embed_dims"] = embed_dims
-            from nvidia_tao_pytorch.cv.sparse4d.model.plugins import build_plugin
-            self.temp_module = build_plugin(temporal_fusion_module)
+            raise NotImplementedError(
+                "temporal_fusion_module requires 'nvidia_tao_pytorch.cv.sparse4d.model.plugins' "
+                "which is not available."
+            )
         else:
             self.temp_module = None
 

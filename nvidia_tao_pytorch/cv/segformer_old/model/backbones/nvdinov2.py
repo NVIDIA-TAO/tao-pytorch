@@ -18,7 +18,7 @@
 from nvidia_tao_pytorch.core.utils.pos_embed_interpolation import (
     interpolate_pos_embed, interpolate_patch_embed
 )
-from nvidia_tao_pytorch.cv.segformer.model.backbones.vision_transformer.vit_adapter import (
+from nvidia_tao_pytorch.cv.segformer_old.model.backbones.vision_transformer.vit_adapter import (
     TIMMTransformerWrapper,
     ViTAdapter
 )

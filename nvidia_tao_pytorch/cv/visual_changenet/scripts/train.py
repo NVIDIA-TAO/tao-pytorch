@@ -40,6 +40,7 @@ def run_experiment(experiment_config, key):
     # Load pretrained model as starting point if pretrained path is provided
     pretrained_path = experiment_config.train.pretrained_model_path
     use_distributed_sampler = experiment_config.train.use_distributed_sampler
+    sync_batchnorm = experiment_config.train.sync_batchnorm
     precision = experiment_config.train.precision
 
     strategy = 'auto'
@@ -89,7 +90,7 @@ def run_experiment(experiment_config, key):
                       strategy=strategy,
                       precision=precision,
                       use_distributed_sampler=use_distributed_sampler,
-                      sync_batchnorm=len(trainer_kwargs['devices']) > 1,
+                      sync_batchnorm=sync_batchnorm,
                       )
 
     trainer.fit(model, dm, ckpt_path=resume_ckpt)

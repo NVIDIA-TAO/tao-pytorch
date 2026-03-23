@@ -91,6 +91,7 @@ class OneformerPlModule(TAOLightningModule):
                 thing_dataset_id_to_contiguous_id=metadata["thing_dataset_id_to_contiguous_id"],
                 stuff_dataset_id_to_contiguous_id=metadata["stuff_dataset_id_to_contiguous_id"],
             )
+        self.iou_per_class = self.cfg.evaluate.iou_per_class
 
     def get_metadata(self):
         """Prepare metadata for the dataset."""
@@ -647,19 +648,20 @@ class OneformerPlModule(TAOLightningModule):
         self.status_logging_dict["mIoU"] = float(miou)
         self.status_logging_dict["ACC_all"] = float(all_acc)
 
-        # class_names = self.metadata.stuff_classes
-        # for i, class_iou in enumerate(iou):
-        #     if i < len(class_names):
-        #         class_name = class_names[i].replace(" ", "_")
-        #         self.log(
-        #             f"{class_name}",
-        #             class_iou,
-        #             on_step=False,
-        #             on_epoch=True,
-        #             prog_bar=False,  # Set to False to avoid cluttering the progress bar
-        #             sync_dist=True
-        #         )
-        #         self.status_logging_dict[f"IoU_{class_name}"] = float(class_iou)
+        if self.iou_per_class:
+            class_names = self.metadata.stuff_classes
+            for i, class_iou in enumerate(iou):
+                if i < len(class_names):
+                    class_name = class_names[i].replace(" ", "_")
+                    self.log(
+                        f"{class_name}",
+                        class_iou,
+                        on_step=False,
+                        on_epoch=True,
+                        prog_bar=False,  # Set to False to avoid cluttering the progress bar
+                        sync_dist=True
+                    )
+                    self.status_logging_dict[f"IoU_{class_name}"] = float(class_iou)
 
         self.validation_step_outputs.clear()
 

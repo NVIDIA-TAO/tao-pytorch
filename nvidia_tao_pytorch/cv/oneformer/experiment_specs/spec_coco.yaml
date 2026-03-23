@@ -68,6 +68,8 @@ evaluate:
   num_gpus: 1
   gpu_ids: [0]
   results_dir: 
+  iou_per_class: true
+
 
 inference:
   mode: semantic

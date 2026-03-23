@@ -203,7 +203,6 @@ class ODVGSerializedDatasetFromList(torch.utils.data.Dataset):
                 classes = [label_map[cap] for cap in caption_list]
                 caption_list = uni_caption_list
             else:
-                caption_list = [caption]
                 classes = [0] * len(boxes)
 
         boxes, classes, segms = self.preprocess_boxes(boxes, classes, segms, w, h)

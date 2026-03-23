@@ -18,7 +18,7 @@ import os
 import copy
 from abc import abstractmethod
 from omegaconf import OmegaConf
-from nvidia_tao_pytorch.cv.segformer.dataloader.data_utils import build_palette, build_target_class_list
+from nvidia_tao_pytorch.cv.segformer_old.dataloader.data_utils import build_palette, build_target_class_list
 from mmengine.logging import print_log
 
 ROOT_DIR = os.getenv("NV_TLT_PYTORCH_TOP", os.getcwd())

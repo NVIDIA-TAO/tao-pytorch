@@ -78,7 +78,9 @@ class COCOUnifiedDataset(Dataset):  # pylint: disable=too-many-instance-attribut
     This class combines the base dataset functionalities directly for a standalone implementation.
     """
 
-    def __init__(self, ann_path, img_dir, panoptic_dir, cfg=None, is_training=False):  # pylint: disable=too-many-arguments
+    def __init__(  # pylint: disable=too-many-arguments
+        self, ann_path, img_dir, panoptic_dir, cfg=None, is_training=False
+    ):
         # --- Start of Integrated BaseDataset Logic ---
         self.cfg = cfg
         self.segm_downsampling_rate = 4
@@ -305,7 +307,9 @@ class COCOUnifiedDataset(Dataset):  # pylint: disable=too-many-instance-attribut
             instances.gt_bboxes = masks_to_boxes(instances.gt_masks)
         return instances, texts, label
 
-    def _get_panoptic_dict(self, pan_seg_gt, image_shape, segments_info, num_class_obj):  # pylint: disable=too-many-locals
+    def _get_panoptic_dict(  # pylint: disable=too-many-locals
+        self, pan_seg_gt, image_shape, segments_info, num_class_obj
+    ):
         instances = Instances(image_shape)
         classes, masks = [], []
         texts = ["a panoptic photo"] * self.num_queries
@@ -531,16 +535,27 @@ class COCOUnifiedDataset(Dataset):  # pylint: disable=too-many-instance-attribut
 class OneFormerPredictDataset(Dataset):
     """Dataset for prediction only."""
 
-    def __init__(self, cfg=None):
-        """Init dataset for prediction."""
+    def __init__(self, cfg=None, images_dir=None):
+        """Init dataset for prediction.
+
+        Args:
+            cfg: Configuration object.
+            images_dir: Optional path to images directory.
+                If provided, overrides cfg.inference.images_dir.
+        """
         super().__init__()
         self.cfg = cfg
+        # Use provided images_dir or fall back to cfg.inference.images_dir
+        self.images_dir = images_dir if images_dir else self.cfg.inference.images_dir
         self.img_list = sorted([
             file
             for ext in PIL_SUPPORTED_FORMATS
-            for file in glob.glob(self.cfg.inference.images_dir + f"/*{ext}")
+            for file in glob.glob(self.images_dir + f"/*{ext}")
         ])
-        self.mode = self.cfg.inference.mode.lower()
+        if hasattr(self.cfg, 'inference'):
+            self.mode = self.cfg.inference.mode.lower()
+        else:
+            self.mode = 'panoptic'
         self.padding_constant = 2**5
         self.pixel_mean = np.array(cfg.dataset.pixel_mean)
         self.pixel_std = np.array(cfg.dataset.pixel_std)
