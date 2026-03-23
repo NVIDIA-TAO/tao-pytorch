@@ -1,0 +1,112 @@
+results_dir: nvidia_tao_pytorch/cv/nvpanoptix3d/experiment_specs/train2d_matterport/
+dataset:
+  name: matterport
+  contiguous_id: True
+  label_map: ""
+  downsample_factor: 2
+  iso_value: 2.0
+  ignore_label: 255
+  enable_3d: False # True for 3D training, set to False for 2D training
+  enable_mp_occ: True
+  train:
+    json_path: ""
+    base_dir: ""
+    batch_size: 16
+    num_workers: 8
+  val:
+    json_path: ""
+    base_dir: ""
+    batch_size: 1
+    num_workers: 2
+  test:
+    json_path: ""
+    base_dir: ""
+    batch_size: 1
+    num_workers: 2
+  augmentation:
+    train_min_size: [240]
+    train_max_size: 960
+    test_min_size: 240
+    test_max_size: 960
+    size_divisibility: -1
+train:
+  checkpoint_2d: ""
+  results_dir: nvidia_tao_pytorch/cv/nvpanoptix3d/experiment_specs/train2d_matterport/
+  freeze: []
+  precision: fp32
+  num_gpus: 1
+  num_nodes: 1
+  checkpoint_interval_unit: step
+  checkpoint_interval: 1000
+  val_check_interval: 1
+  num_epochs: 20
+  clip_grad_norm: 0.01
+  clip_grad_norm_type: 2.0
+  clip_grad_type: "full"
+  activation_checkpoint: False
+  optim:
+    type: AdamW
+    lr: 0.0001
+    weight_decay: 0.05
+    lr_scheduler: WarmupPoly
+    max_steps: 120000
+    warmup_factor: 1.0
+    warmup_iters: 0
+    monitor_name: train_loss
+evaluate:
+  checkpoint: ""
+inference:
+  images_dir: ""
+  checkpoint: ""
+model:
+  object_mask_threshold: 0.8
+  overlap_threshold: 0.8
+  test_topk_per_image: 100
+  mode: panoptic
+  backbone:
+    backbone_type: vggt
+    pretrained_model_path: ""
+  sem_seg_head:
+    num_classes: 13
+  mask_former:
+    dropout: 0.0
+    num_object_queries: 100
+    deep_supervision: True
+    no_object_weight: 0.1
+    class_weight: 2.0
+    mask_weight: 5.0
+    dice_weight: 5.0
+    depth_weight: 5.0
+    mp_occ_weight: 5.0
+    size_divisibility: 32
+  frustum3d:
+    truncation: 3.0
+    iso_recon_value: 2.0
+    panoptic_weight: 25.0
+    completion_weights: [50.0, 25.0, 10.0]
+    surface_weight: 10.0
+    unet_output_channels: 16
+    unet_features: 16
+    use_multi_scale: False
+    grid_dimensions: 256
+    signed_channel: 3
+    frustum_dims: 256
+  projection:
+    voxel_size: 0.03
+    sign_channel: True
+export:
+  checkpoint: ""
+  onnx_file_2d: ""
+  onnx_file_3d: ""
+  max_voxels: 700000
+  on_cpu: False
+  input_channel: 3
+  input_width: 320
+  input_height: 240
+  opset_version: 17
+  batch_size: 1
+  verbose: False
+wandb:
+  enable: true
+  name: nvpanoptix3d_vggt_2d_matterport
+  tags: ["training", "nvpanoptix3d", "vggt", "2d_matterport"]

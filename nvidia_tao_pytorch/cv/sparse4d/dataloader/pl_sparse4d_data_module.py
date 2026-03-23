@@ -20,8 +20,9 @@ from typing import Optional, Dict
 import torch
 import pytorch_lightning as pl
 from torch.utils.data import DataLoader
-import logging
 import numpy as np
+
+from nvidia_tao_pytorch.core.tlt_logging import logging
 
 from nvidia_tao_pytorch.cv.sparse4d.dataloader.dataset import Omniverse3DDetTrackDataset
 from nvidia_tao_pytorch.cv.sparse4d.dataloader.sampler import GroupInBatchSampler
@@ -110,6 +111,7 @@ class Sparse4DDataModule(pl.LightningDataModule):
         self.config = config
         self.dataset_config = config.dataset
         self.train_config = config.train
+        self.calib_dataset = None
 
         # Extract dataset parameters
         self.data_root = self.dataset_config["data_root"]
@@ -212,7 +214,10 @@ class Sparse4DDataModule(pl.LightningDataModule):
                 train_dataset_cfg=self.val_dataset_cfg
             )
 
-            logging.info(f"Loaded {len(self.train_dataset)} training samples and {len(self.val_dataset)} validation samples")
+            logging.info(
+                f"Loaded {len(self.train_dataset)} training samples "
+                f"and {len(self.val_dataset)} validation samples"
+            )
 
             # exit if len is 0
             if len(self.train_dataset) == 0 or len(self.val_dataset) == 0:
@@ -234,6 +239,31 @@ class Sparse4DDataModule(pl.LightningDataModule):
             self.val_dataset = self.test_dataset
 
             logging.info(f"Loaded {len(self.test_dataset)} test samples")
+
+        if stage == 'calibration':
+            calib_cfg = self.dataset_config.get("quant_calibration_dataset", {})
+            if isinstance(calib_cfg, dict):
+                calib_images_dir = calib_cfg.get("images_dir", "")
+            else:
+                calib_images_dir = getattr(calib_cfg, "images_dir", "")
+
+            if calib_images_dir:
+                # Use test dataset for calibration with calibration images dir
+                self.calib_dataset = Omniverse3DDetTrackDataset(
+                    data_root=calib_images_dir,
+                    anno_file=self.test_anno_file,
+                    classes=self.classes,
+                    test_mode=True,
+                    augmentation=self.augmentation,
+                    tracking=True,
+                    tracking_threshold=0.2,
+                    transforms=self.test_transforms
+                )
+            else:
+                raise ValueError(
+                    "quant_calibration_dataset.images_dir must be provided "
+                    "for calibration stage."
+                )
 
     def train_dataloader(self):
         """Create training dataloader."""
@@ -300,3 +330,24 @@ class Sparse4DDataModule(pl.LightningDataModule):
             collate_fn=collate_fn,
         )
         return test_loader
+
+    def calib_dataloader(self):
+        """Build the dataloader for quantization calibration.
+
+        Returns:
+            calib_loader: PyTorch DataLoader used for calibration.
+        """
+        if self.calib_dataset is None:
+            raise ValueError(
+                "Calibration dataset is not initialized. "
+                "Call setup(stage='calibration') first."
+            )
+        sampler = torch.utils.data.SequentialSampler(self.calib_dataset)
+        batch_sampler = torch.utils.data.BatchSampler(sampler, batch_size=1, drop_last=False)
+        calib_loader = DataLoader(
+            self.calib_dataset,
+            batch_sampler=batch_sampler,
+            num_workers=self.num_workers,
+            collate_fn=collate_fn,
+        )
+        return calib_loader

@@ -67,6 +67,21 @@ class OIDataModule(pl.LightningDataModule):
             logging.info("Loading inference csv from : {}".format(infer_data_path))
             self.df_infer = pd.read_csv(infer_data_path, dtype={'object_name': str})
 
+        if stage == 'calibration':
+            calib_cfg = self.dataset_config.get("quant_calibration_dataset", {})
+            if isinstance(calib_cfg, dict):
+                calib_images_dir = calib_cfg.get("images_dir", "")
+            else:
+                calib_images_dir = getattr(calib_cfg, "images_dir", "")
+
+            if not calib_images_dir:
+                raise ValueError(
+                    "quant_calibration_dataset.images_dir must be provided "
+                    "for calibration stage."
+                )
+            logging.info("Loading calibration images from: {}".format(calib_images_dir))
+            self.calib_images_dir = calib_images_dir
+
     def train_dataloader(self):
         """Build the dataloader for training.
 
@@ -123,3 +138,18 @@ class OIDataModule(pl.LightningDataModule):
                                           data_config=self.dataset_config
                                           )
         return predict_loader
+
+    def calib_dataloader(self):
+        """Build the dataloader for quantization calibration.
+
+        Returns:
+            calib_loader: PyTorch DataLoader used for calibration.
+        """
+        from nvidia_tao_pytorch.cv.optical_inspection.dataloader.build_data_loader import (
+            build_calib_dataloader
+        )
+        calib_loader = build_calib_dataloader(
+            images_dir=self.calib_images_dir,
+            data_config=self.dataset_config
+        )
+        return calib_loader

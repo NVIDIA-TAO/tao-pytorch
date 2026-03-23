@@ -53,6 +53,9 @@ class SegFormerPlModel(TAOLightningModule):
         self.eval_config = self.experiment_spec.evaluate
         self.infer_config = self.experiment_spec.inference
 
+        # Set n_class early as it's needed by _build_criterion()
+        self.n_class = self.dataset_config.num_classes
+
         # init the model
         self._build_model(export)
         self._build_criterion()
@@ -63,8 +66,6 @@ class SegFormerPlModel(TAOLightningModule):
         self.lr_policy = self.optimizer.policy
         self.max_epochs = self.train_config.num_epochs
         self.monitor_name = self.train_config.optim.monitor_name
-
-        self.n_class = self.dataset_config.num_classes
         self.running_metric = MeanIoUMeter(n_class=self.n_class)
         self.batch_size = self.dataset_config.batch_size
 

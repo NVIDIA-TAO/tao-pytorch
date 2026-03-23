@@ -65,13 +65,16 @@ def run_experiment(experiment_config, key):
     trainer_kwargs.pop("enable_checkpointing", None)
     trainer_kwargs["enable_checkpointing"] = True
 
+    use_distributed_sampler = experiment_config.train.use_distributed_sampler
+    sync_batchnorm = experiment_config.train.sync_batchnorm
+
     trainer = Trainer(
         **trainer_kwargs,
         num_nodes=num_nodes,
         strategy=strategy,
         precision=precision,
-        use_distributed_sampler=False,
-        sync_batchnorm=True,  # SegFormer head has BatchNorm.
+        use_distributed_sampler=use_distributed_sampler,
+        sync_batchnorm=sync_batchnorm,
     )
 
     trainer.fit(model, dm, ckpt_path=resume_ckpt)

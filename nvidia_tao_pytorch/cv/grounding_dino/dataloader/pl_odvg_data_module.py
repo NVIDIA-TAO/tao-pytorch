@@ -31,7 +31,17 @@ from nvidia_tao_pytorch.cv.grounding_dino.dataloader.coco import CocoDetection, 
 
 
 class ODVGDataModule(pl.LightningDataModule):
-    """Lightning DataModule for Object Detection."""
+    """Lightning DataModule for Object Detection.
+
+    Supported stages (for ``setup(stage=...)``):
+    * ``fit``        – build training & validation datasets
+    * ``test``       – build evaluation dataset
+    * ``predict``    – build inference dataset
+    * ``calibration``– build calibration dataset used for post-training quantization
+
+    The :pyfunc:`calib_dataloader` method returns the DataLoader created for the
+    calibration stage.
+    """
 
     def __init__(self, dataset_config, subtask_config=None):
         """ Lightning DataModule Initialization.
@@ -49,6 +59,8 @@ class ODVGDataModule(pl.LightningDataModule):
         self.max_labels = dataset_config["max_labels"]
         self.pin_memory = dataset_config["pin_memory"]
         self.subtask_config = subtask_config
+        # Placeholder for calibration dataset
+        self.calib_dataset = None
 
     def setup(self, stage: Optional[str] = None):
         """ Loads in data from file and prepares PyTorch tensor datasets for each split (train, val, test).
@@ -91,6 +103,25 @@ class ODVGDataModule(pl.LightningDataModule):
                 captions = pred_data_sources["captions"]
             pred_transforms = build_transforms(self.augmentation_config, subtask_config=self.subtask_config, dataset_mode='infer')
             self.pred_dataset = ODPredictDataset(pred_list, captions, transforms=pred_transforms)
+
+        # Prepare calibration dataset
+        if stage in ("calibration", None):
+            calib_sources = self.dataset_config.get("quant_calibration_data_sources", None)
+            image_dir = getattr(calib_sources, "image_dir", None) if calib_sources else None
+            json_file = getattr(calib_sources, "json_file", None) if calib_sources else None
+            if image_dir is None and isinstance(calib_sources, dict):
+                image_dir = calib_sources.get("image_dir", "")
+                json_file = calib_sources.get("json_file", "")
+
+            if image_dir:
+                calib_transform = build_transforms(self.augmentation_config, dataset_mode='eval')
+                self.calib_dataset = CocoDetection(
+                    json_file or "",
+                    image_dir,
+                    transforms=calib_transform,
+                )
+            elif stage == "calibration":
+                raise ValueError("quant_calibration_data_sources.image_dir must be provided for calibration stage.")
 
     def train_dataloader(self):
         """Build the dataloader for training.
@@ -168,3 +199,17 @@ class ODVGDataModule(pl.LightningDataModule):
             pin_memory=self.pin_memory,
             drop_last=False,
             collate_fn=collate_fn)
+
+    def calib_dataloader(self):
+        """Build the dataloader for quantization calibration."""
+        if self.calib_dataset is None:
+            raise ValueError("Calibration dataset not initialized. Call setup(stage='calibration') with proper config.")
+        return DataLoader(
+            self.calib_dataset,
+            num_workers=self.num_workers,
+            batch_size=self.batch_size,
+            shuffle=False,
+            pin_memory=self.pin_memory,
+            drop_last=False,
+            collate_fn=collate_fn,
+        )

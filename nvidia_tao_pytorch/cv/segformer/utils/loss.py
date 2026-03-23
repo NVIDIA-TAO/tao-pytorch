@@ -211,6 +211,10 @@ class mIoULoss(nn.Module):
         # target => N x H x W
         # target_oneHot => N x Classes x H x W
 
+        # Handle size mismatch by interpolating inputs to match target size
+        if inputs.shape[-1] != target.shape[-1]:
+            inputs = F.interpolate(inputs, size=target.shape[-2:], mode='bilinear', align_corners=False)
+
         N = inputs.size()[0]
         if is_target_variable:
             target_oneHot = to_one_hot_var(target.data, self.classes).float()
@@ -250,6 +254,10 @@ class mmIoULoss(nn.Module):
         # inputs => N x Classes x H x W
         # target => N x H x W
         # target_oneHot => N x Classes x H x W
+
+        # Handle size mismatch by interpolating inputs to match target size
+        if inputs.shape[-1] != target.shape[-1]:
+            inputs = F.interpolate(inputs, size=target.shape[-2:], mode='bilinear', align_corners=False)
 
         N = inputs.size()[0]
         if is_target_variable:

@@ -316,11 +316,13 @@ def div_up(m, n):
 
 def rotate_iou_gpu_eval(box_np, query_np, criterion=-1):
     """IoU of rotated boxes."""
+    N = box_np.shape[0]
+    K = query_np.shape[0]
+    if N == 0 or K == 0:
+        return np.zeros((N, K), dtype=np.float32)
     pyc_ctx.push()
     box_np = box_np.astype(np.float32, order='C')
     query_np = query_np.astype(np.float32, order='C')
-    N = box_np.shape[0]
-    K = query_np.shape[0]
     iou_np = np.zeros((N, K), dtype=np.float32, order='C')
     threadsPerBlock = 8 * 8
     blockspergrid = (div_up(N, threadsPerBlock), div_up(K, threadsPerBlock))

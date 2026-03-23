@@ -85,7 +85,8 @@ def initialize_train_experiment(cfg, key=None):
                 results_dir=results_dir,
                 wandb_logged_in=wandb_logged_in,
                 tags=wandb_config.tags,
-                config=dict(cfg)
+                config=cfg,
+                group=wandb_config.group
             )
             loggers.append(wandb_logger)
 

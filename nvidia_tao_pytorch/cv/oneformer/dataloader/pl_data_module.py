@@ -18,6 +18,8 @@ and evaluation of OneFormer models using PyTorch Lightning framework.
 """
 
 import logging
+from typing import Optional
+
 import pytorch_lightning as pl
 import torch
 from torch.utils.data import DataLoader
@@ -34,6 +36,33 @@ class SemSegmDataModule(pl.LightningDataModule):
     def __init__(self, data_cfg):
         super().__init__()
         self.data_cfg = data_cfg
+        self.calib_dataset = None
+
+    def setup(self, stage: Optional[str] = None):
+        """Setup datasets for different stages."""
+        # Prepare calibration dataset when stage is 'calibration'
+        if stage == "calibration":
+            calib_cfg = getattr(self.data_cfg.dataset, "quant_calibration_dataset", None)
+            if calib_cfg is None:
+                if isinstance(self.data_cfg.dataset, dict):
+                    calib_cfg = self.data_cfg.dataset.get("quant_calibration_dataset", {})
+                else:
+                    calib_cfg = {}
+
+            if hasattr(calib_cfg, "images_dir"):
+                calib_images_dir = getattr(calib_cfg, "images_dir", "")
+            else:
+                calib_images_dir = calib_cfg.get("images_dir", "")
+
+            if calib_images_dir:
+                self.calib_dataset = OneFormerPredictDataset(
+                    cfg=self.data_cfg,
+                    images_dir=calib_images_dir,
+                )
+            else:
+                raise ValueError(
+                    "quant_calibration_dataset.images_dir must be provided for calibration stage."
+                )
 
     def train_dataloader(self):
         """Create training dataloader."""
@@ -174,3 +203,32 @@ class SemSegmDataModule(pl.LightningDataModule):
             sampler=predict_sampler,
         )
         return predict_loader
+
+    def calib_dataloader(self):
+        """Build the dataloader for quantization calibration.
+
+        Returns:
+            calib_loader: PyTorch DataLoader used for calibration.
+        """
+        if self.calib_dataset is None:
+            raise ValueError(
+                "Calibration dataset is not initialized. "
+                "Call setup(stage='calibration') first."
+            )
+
+        collate_fn = (
+            self.calib_dataset.collate_fn
+            if hasattr(self.calib_dataset, "collate_fn")
+            else None
+        )
+
+        calib_loader = DataLoader(
+            self.calib_dataset,
+            batch_size=self.data_cfg.dataset.val.batch_size,
+            shuffle=False,
+            collate_fn=collate_fn,
+            num_workers=self.data_cfg.dataset.val.num_workers,
+            drop_last=False,
+            pin_memory=self.data_cfg.dataset.pin_memory,
+        )
+        return calib_loader

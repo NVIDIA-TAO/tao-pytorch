@@ -259,7 +259,7 @@ def read_gt_3dvlm(file_name, normalize_depth=False, return_disparity=True):
     Returns:
         depth (np.ndarray): Depth map.
     """
-    depth = np.load(file_name)
+    depth = np.load(file_name, allow_pickle=True)
     depth = depth.astype(np.float32)
     depth *= 1000.
 

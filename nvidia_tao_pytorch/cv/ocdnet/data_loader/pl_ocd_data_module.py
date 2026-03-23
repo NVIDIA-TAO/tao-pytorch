@@ -39,6 +39,7 @@ class OCDDataModule(pl.LightningDataModule):
 
         self.train_dataset_config = self.dataset_config["train_dataset"]
         self.validate_dataset_config = self.dataset_config["validate_dataset"]
+        self.calib_dataset = None
 
     def setup(self, stage: Optional[str] = None):
         """ Prepares for each dataloader
@@ -57,6 +58,25 @@ class OCDDataModule(pl.LightningDataModule):
             height = self.experiment_spec['inference']['height']
             img_mode = self.experiment_spec['inference']['img_mode']
             self.predict_dataset = CustomImageDataset(input_path, width, height, img_mode)
+        elif stage == 'calibration':
+            calib_cfg = self.dataset_config.get("quant_calibration_dataset", {})
+            if isinstance(calib_cfg, dict):
+                calib_images_dir = calib_cfg.get("images_dir", "")
+            else:
+                calib_images_dir = getattr(calib_cfg, "images_dir", "")
+
+            if calib_images_dir:
+                width = self.experiment_spec.get('inference', {}).get('width', 1280)
+                height = self.experiment_spec.get('inference', {}).get('height', 736)
+                img_mode = self.experiment_spec.get('inference', {}).get('img_mode', 'BGR')
+                self.calib_dataset = CustomImageDataset(
+                    calib_images_dir, width, height, img_mode
+                )
+            else:
+                raise ValueError(
+                    "quant_calibration_dataset.images_dir must be provided "
+                    "for calibration stage."
+                )
 
     def train_dataloader(self):
         """Build the dataloader for training.
@@ -102,3 +122,17 @@ class OCDDataModule(pl.LightningDataModule):
         predict_loader = DataLoader(self.predict_dataset, batch_size=1)
 
         return predict_loader
+
+    def calib_dataloader(self):
+        """Build the dataloader for quantization calibration.
+
+        Returns:
+            calib_loader: PyTorch DataLoader used for calibration.
+        """
+        if self.calib_dataset is None:
+            raise ValueError(
+                "Calibration dataset is not initialized. "
+                "Call setup(stage='calibration') first."
+            )
+        calib_loader = DataLoader(self.calib_dataset, batch_size=1)
+        return calib_loader

@@ -1,4 +1,4 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -26,6 +26,7 @@ and downstream computer vision tasks such as object detection.
 Key Features:
 - Support for multiple CLIP model variants (ViT-L, ViT-H)
 - Dynamic image size support with positional encoding interpolation
+- Text encoding with canonicalization support
 - Integration with TAO backbone framework
 - Support for activation checkpointing and layer freezing
 - Multimodal capabilities for image-text understanding
@@ -33,6 +34,7 @@ Key Features:
 
 Classes:
     OpenCLIP: OpenCLIP model wrapper with TAO integration
+    WrappedTokenizer: Tokenizer wrapper with text canonicalization
 
 Functions:
     vit_l_14_siglip_clipa_224: ViT Large Patch14 SigLIP CLIPA 224 model
@@ -51,16 +53,80 @@ References:
 """
 
 import math
+import string
 import types
+from typing import List
 
 import open_clip
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from open_clip import timm_model
 from open_clip.transformer import VisionTransformer as OpenCLIPVisionTransformer
 
 from nvidia_tao_pytorch.cv.backbone_v2 import BACKBONE_REGISTRY
 from nvidia_tao_pytorch.cv.backbone_v2.backbone_base import BackboneBase
+
+
+def canonicalize_text(
+    text: str,
+    *,
+    keep_punctuation_exact_string=None,
+    trans_punctuation: dict = str.maketrans("", "", string.punctuation),
+):
+    """Return canonicalized text (lowercase and punctuation removed).
+
+    From: https://github.com/google-research/big_vision/blob/main/big_vision/evaluators/proj/image_text/prompt_engineering.py
+
+    Args:
+        text: String to be canonicalized.
+        keep_punctuation_exact_string: If provided, this exact string is kept.
+        trans_punctuation: Translation table for punctuation removal.
+
+    Returns:
+        Canonicalized text string.
+    """
+    text = text.replace("_", " ")
+    if keep_punctuation_exact_string:
+        text = keep_punctuation_exact_string.join(
+            part.translate(trans_punctuation)
+            for part in text.split(keep_punctuation_exact_string)
+        )
+    else:
+        text = text.translate(trans_punctuation)
+    text = text.lower()
+    text = " ".join(text.split())
+    return text.strip()
+
+
+class WrappedTokenizer:
+    """Tokenizer wrapper with text canonicalization.
+
+    This wrapper applies text canonicalization before tokenization to improve
+    zero-shot classification performance.
+
+    Args:
+        tokenizer: The underlying tokenizer from open_clip.
+        canonicalize: Whether to apply text canonicalization. Default: True.
+    """
+
+    def __init__(self, tokenizer, canonicalize: bool = True):
+        """Initialize the WrappedTokenizer."""
+        self._tokenizer = tokenizer
+        self._canonicalize = canonicalize
+
+    def __call__(self, text: List[str]):
+        """Tokenize text with optional canonicalization.
+
+        Args:
+            text (List[str]): List of text strings to tokenize.
+
+        Returns:
+            torch.Tensor: Tokenized text tensor of shape (B, context_length).
+        """
+        if self._canonicalize:
+            text = [canonicalize_text(t) for t in text]
+        return self._tokenizer(text)
 
 
 # Configuration dictionaries for NV-CLIP models
@@ -133,6 +199,7 @@ class OpenCLIP(BackboneBase):
 
     Key Features:
     - Dynamic image size support with positional encoding interpolation
+    - Text encoding with canonicalization support
     - Integration with TAO backbone framework
     - Support for activation checkpointing and layer freezing
     - Multimodal capabilities for image-text understanding
@@ -150,10 +217,13 @@ class OpenCLIP(BackboneBase):
             to freeze. If `None`, no specific layers are frozen. Default: `None`.
         freeze_norm (bool): If `True`, all normalization layers in the backbone will
             be frozen. Default: `False`.
+        canonicalize_text (bool): Whether to canonicalize text (lowercase, remove
+            punctuation) during tokenization. Default: `True`.
         **kwargs: Additional arguments passed to `open_clip.create_model`.
 
     Attributes:
         model: The underlying OpenCLIP model.
+        tokenizer: Tokenizer with optional text canonicalization.
         head (nn.Module): Classification head (Linear layer or Identity).
         num_features (int): Number of features from the visual encoder.
 
@@ -179,13 +249,14 @@ class OpenCLIP(BackboneBase):
         activation_checkpoint=False,
         freeze_at=None,
         freeze_norm=False,
+        canonicalize_text=True,
         **kwargs,
     ):
         """Initialize the OpenCLIP model.
 
         This method initializes the OpenCLIP model with the specified configuration.
         It registers NV-CLIP model configurations, creates the model, enables dynamic
-        image size support, and sets up the classification head.
+        image size support, and sets up the classification head and tokenizer.
 
         Args:
             in_chans (int): Number of input image channels. Must be 3 for OpenCLIP models.
@@ -199,6 +270,8 @@ class OpenCLIP(BackboneBase):
                 to freeze. If `None`, no specific layers are frozen. Default: `None`.
             freeze_norm (bool): If `True`, all normalization layers in the backbone will
                 be frozen. Default: `False`.
+            canonicalize_text (bool): Whether to canonicalize text (lowercase, remove
+                punctuation) during tokenization. Default: `True`.
             **kwargs: Additional arguments passed to `open_clip.create_model`.
 
         Raises:
@@ -216,8 +289,13 @@ class OpenCLIP(BackboneBase):
             freeze_norm=freeze_norm,
             export=export,
         )
+        self._model_name = model_name
         self._register_nvclip_configs()
         self.model = open_clip.create_model(model_name, **kwargs)
+
+        # Create tokenizer with optional canonicalization
+        base_tokenizer = open_clip.get_tokenizer(model_name)
+        self.tokenizer = WrappedTokenizer(base_tokenizer, canonicalize=canonicalize_text)
 
         # Enable dynamic image size after the model is initialized.
         if isinstance(self.model.visual, timm_model.TimmModel):
@@ -466,6 +544,45 @@ class OpenCLIP(BackboneBase):
         """
         return self.model.encode_image(x, normalize=False)
 
+    def encode_text(
+        self,
+        inputs: torch.Tensor,
+        normalize: bool = False
+    ) -> torch.Tensor:
+        """Encode text inputs using the text encoder.
+
+        Args:
+            inputs (torch.Tensor): Tokenized text tensor of shape (B, context_length).
+            normalize (bool): Whether to L2-normalize the output. Default: False.
+
+        Returns:
+            torch.Tensor: Text features of shape (B, D).
+        """
+        text_features = self.model.encode_text(inputs, normalize=False)
+
+        if normalize:
+            text_features = F.normalize(text_features, dim=-1)
+
+        return text_features
+
+    def zero_shot_postproc(self, logits: torch.Tensor) -> torch.Tensor:
+        """Apply zero-shot post-processing (logit scale and bias).
+
+        Args:
+            logits (torch.Tensor): Raw logits from image-text similarity.
+
+        Returns:
+            torch.Tensor: Processed logits with scale and bias applied.
+        """
+        logit_scale = self.model.logit_scale.to(logits.device)
+        # OpenCLIP models may or may not have logit_bias
+        if hasattr(self.model, 'logit_bias') and self.model.logit_bias is not None:
+            logit_bias = self.model.logit_bias.to(logits.device)
+            logits = logits * logit_scale.exp() + logit_bias
+        else:
+            logits = logits * logit_scale.exp()
+        return logits
+
     def forward_feature_pyramid(self, *args, **kwargs):
         """Forward pass through the backbone to extract intermediate feature maps.
 
@@ -493,6 +610,20 @@ class OpenCLIP(BackboneBase):
         x = self.model.encode_image(x, normalize=False)
         x = self.head(x)
         return x
+
+
+def get_openclip_model(model_name: str, canonicalize_text: bool = True, **kwargs):
+    """Create an OpenCLIP model.
+
+    Args:
+        model_name (str): Model name (e.g., 'ViT-L-14-SigLIP-CLIPA-336').
+        canonicalize_text (bool): Whether to canonicalize text. Default: True.
+        **kwargs: Additional arguments passed to OpenCLIP constructor.
+
+    Returns:
+        OpenCLIP: Wrapped OpenCLIP model with tokenizer.
+    """
+    return OpenCLIP(model_name=model_name, canonicalize_text=canonicalize_text, **kwargs)
 
 
 @BACKBONE_REGISTRY.register()

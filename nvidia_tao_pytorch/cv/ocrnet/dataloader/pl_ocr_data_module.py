@@ -38,6 +38,7 @@ class OCRDataModule(pl.LightningDataModule):
         self.experiment_spec = experiment_spec
         self.dataset_config = experiment_spec.dataset
         self.model_config = experiment_spec.model
+        self.calib_dataset = None
 
     def setup(self, stage: Optional[str] = None):
         """ Prepares for each dataloader
@@ -65,7 +66,9 @@ class OCRDataModule(pl.LightningDataModule):
             self.opt = translate_dataset_config(self.experiment_spec)
             self.opt.batch_size = self.experiment_spec.evaluate.batch_size
 
-            self.AlignCollate_func = AlignCollateVal(imgH=self.opt.imgH, imgW=self.opt.imgW, keep_ratio_with_pad=self.opt.PAD)
+            self.AlignCollate_func = AlignCollateVal(
+                imgH=self.opt.imgH, imgW=self.opt.imgW, keep_ratio_with_pad=self.opt.PAD
+            )
 
             if self.eval_gt_file:
                 self.dataset = RawGTDataset(self.eval_gt_file, self.eval_data_path, self.opt)
@@ -78,8 +81,35 @@ class OCRDataModule(pl.LightningDataModule):
             self.opt = translate_dataset_config(self.experiment_spec)
             self.opt.batch_size = self.experiment_spec.inference.batch_size
 
-            self.AlignCollate_func = AlignCollateVal(imgH=self.opt.imgH, imgW=self.opt.imgW, keep_ratio_with_pad=self.opt.PAD)
+            self.AlignCollate_func = AlignCollateVal(
+                imgH=self.opt.imgH, imgW=self.opt.imgW, keep_ratio_with_pad=self.opt.PAD
+            )
             self.dataset = RawDataset(root=self.infer_data_path, opt=self.opt)
+
+        elif stage == 'calibration':
+            calib_cfg = getattr(self.dataset_config, "quant_calibration_dataset", None)
+            if calib_cfg is None:
+                calib_cfg = {}
+
+            if hasattr(calib_cfg, "images_dir"):
+                calib_images_dir = getattr(calib_cfg, "images_dir", "")
+            else:
+                calib_images_dir = calib_cfg.get("images_dir", "")
+
+            if calib_images_dir:
+                self.opt = translate_dataset_config(self.experiment_spec)
+                self.opt.batch_size = getattr(
+                    self.experiment_spec.inference, "batch_size", 1
+                )
+                self.AlignCollate_func = AlignCollateVal(
+                    imgH=self.opt.imgH, imgW=self.opt.imgW, keep_ratio_with_pad=self.opt.PAD
+                )
+                self.calib_dataset = RawDataset(root=calib_images_dir, opt=self.opt)
+            else:
+                raise ValueError(
+                    "quant_calibration_dataset.images_dir must be provided "
+                    "for calibration stage."
+                )
 
     def train_dataloader(self):
         """Build the dataloader for training.
@@ -145,3 +175,21 @@ class OCRDataModule(pl.LightningDataModule):
             collate_fn=self.AlignCollate_func, pin_memory=True)
 
         return predict_loader
+
+    def calib_dataloader(self):
+        """Build the dataloader for quantization calibration.
+
+        Returns:
+            calib_loader: PyTorch DataLoader used for calibration.
+        """
+        if self.calib_dataset is None:
+            raise ValueError(
+                "Calibration dataset is not initialized. "
+                "Call setup(stage='calibration') first."
+            )
+        calib_loader = torch.utils.data.DataLoader(
+            self.calib_dataset, batch_size=self.opt.batch_size,
+            shuffle=False,
+            num_workers=int(self.opt.workers),
+            collate_fn=self.AlignCollate_func, pin_memory=True)
+        return calib_loader

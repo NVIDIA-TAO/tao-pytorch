@@ -25,26 +25,46 @@ RUN wget https://github.com/kubernetes-client/python/archive/refs/tags/v23.6.0.z
 
 COPY docker/requirements-pip.txt requirements-pip.txt
 RUN pip install --upgrade pip \
-  && pip install -r requirements-pip.txt \
+  && pip install --no-build-isolation -r requirements-pip.txt \
   && rm requirements-pip.txt
 
 
 # Set platform-specific library path using uname
 RUN ARCH_LIB_PATH="/usr/lib/$(uname -m)-linux-gnu" && \
-    echo "export LD_LIBRARY_PATH=${ARCH_LIB_PATH}:\${LD_LIBRARY_PATH}" >> /etc/bash.bashrc
+    echo "export LD_LIBRARY_PATH=\${LD_LIBRARY_PATH}:${ARCH_LIB_PATH}" >> /etc/bash.bashrc
 ENV BASH_ENV=/etc/bash.bashrc
 
 COPY docker/requirements-pip-pytorch.txt requirements-pip-pytorch.txt
-RUN pip install --ignore-installed --no-deps -r requirements-pip-pytorch.txt \
+RUN pip install --no-build-isolation --ignore-installed --no-deps -r requirements-pip-pytorch.txt \
   && rm requirements-pip-pytorch.txt
 
 COPY docker/requirements-pip-odise.txt requirements-pip-odise.txt
-RUN pip install --ignore-installed --no-deps -r requirements-pip-odise.txt \
+RUN pip install --no-build-isolation --ignore-installed --no-deps -r requirements-pip-odise.txt \
   && rm requirements-pip-odise.txt
 
 COPY docker/requirements-pip-quantization.txt requirements-pip-quantization.txt
-RUN pip install --upgrade --no-deps -r requirements-pip-quantization.txt \
+RUN pip install --no-build-isolation --upgrade --no-deps -r requirements-pip-quantization.txt \
   && rm requirements-pip-quantization.txt
+
+COPY docker/requirements-pip-nvpanoptix3d.txt requirements-pip-nvpanoptix3d.txt
+RUN pip install meson-python meson ninja \
+  && pip install --no-build-isolation --upgrade --no-deps -r requirements-pip-nvpanoptix3d.txt \
+  && rm requirements-pip-nvpanoptix3d.txt
+
+################## Install WarpConvNet ##################
+# Install PyTorch first (specify your CUDA version)
+ENV CUDA=cu130
+
+# Install core dependencies
+RUN pip install --no-deps cupy-cuda13x==13.6.0  # use cupy-cuda13x for CUDA 13.x
+# Build torch-scatter from source against the current torch/cuda stack.
+RUN FORCE_CUDA=1 pip install --no-build-isolation --no-cache-dir --no-binary=torch-scatter torch-scatter
+
+# Install patched WarpConvNet for CUDA 13.x
+RUN git clone https://github.com/daocongtuyen2x/WarpConvNet.git
+RUN cd WarpConvNet && \
+    if [ -d .git ]; then git submodule sync --recursive && git submodule update --init --recursive; fi && \
+    pip install --no-build-isolation .
 
 ################## Build onnxruntime-gpu ##################
 # We need to build onnxruntime-gpu from source because the official wheel is not available for CUDA 13.0

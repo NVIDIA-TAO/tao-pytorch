@@ -14,7 +14,7 @@
 
 """ NVCLIP Model Module """
 
-from nvidia_tao_pytorch.cv.segformer.model.backbones.vision_transformer.vit_adapter import (
+from nvidia_tao_pytorch.cv.segformer_old.model.backbones.vision_transformer.vit_adapter import (
     TIMMTransformerWrapper,
     OpenCLIPTransformerWrapper,
     ViTAdapter

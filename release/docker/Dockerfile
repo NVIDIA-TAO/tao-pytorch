@@ -1,8 +1,8 @@
 # FROM nvcr.io/nvstaging/tao/tao_pytorch_base_image@sha256:4d6c2f98bcb233a7ab7c87f187b3d5a3e1c405d1206fb2b0d3c7b410bb93e84d
 # Select base image based on architecture
 ARG TARGETARCH # provided by Docker if using BuildKit. Else pass in explicitly.
-ARG X86_DIGEST=d2a6b648152f7e38168453be38233082964193e70b154fdce16fac39e6b0d9e2
-ARG ARM64_DIGEST=ae074308d179d1353a98b9af8a478b96a175e2422e7b24312519c0f2a4cd7db8
+ARG X86_DIGEST=825b6a265486ef3ba963f48ec7c16e7a4638343541731f25138f896bcd216a50
+ARG ARM64_DIGEST=383c88d802765254e9ae5105db8f46d61b1a355e9d075e5f4d60c85b45b0bb3a
 
 FROM nvcr.io/nvstaging/tao/tao_pytorch_base_image@sha256:${ARM64_DIGEST} AS base-arm64
 FROM nvcr.io/nvstaging/tao/tao_pytorch_base_image@sha256:${X86_DIGEST} AS base-amd64
@@ -51,7 +51,7 @@ RUN cd wheels && ls ./*.whl|xargs -I'{}' python -m pip install '{}' \
 # RUN ln -s tao-converter converter
 
 ENV NVIDIA_PRODUCT_NAME "TAO Toolkit"
-ENV TAO_TOOLKIT_VERSION="6.25.11"
+ENV TAO_TOOLKIT_VERSION="6.25.10"
 ENV NVIDIA_TAO_TOOLKIT_VERSION="${TAO_TOOLKIT_VERSION}-PyTorch"
 ENV CUBLAS_WORKSPACE_CONFIG=":4096:8"
 

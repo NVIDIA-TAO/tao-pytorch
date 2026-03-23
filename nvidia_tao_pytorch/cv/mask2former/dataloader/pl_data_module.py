@@ -3,13 +3,17 @@
 """Custom LightningDataModule for Mask2former."""
 
 import logging
+from typing import Optional
 
 import pytorch_lightning as pl
 import torch
 from torch.utils.data import DataLoader
 
-from nvidia_tao_pytorch.cv.mask2former.dataloader.datasets import COCODataset, COCOPanopticDataset, ADEDataset, PredictDataset
+from nvidia_tao_pytorch.cv.mask2former.dataloader.datasets import (
+    COCODataset, COCOPanopticDataset, ADEDataset, PredictDataset
+)
 from nvidia_tao_pytorch.core.distributed.comm import is_dist_avail_and_initialized
+
 logger = logging.getLogger(__name__)
 
 
@@ -20,6 +24,33 @@ class SemSegmDataModule(pl.LightningDataModule):
         """Init."""
         super().__init__()
         self.data_cfg = data_cfg
+        self.calib_dataset = None
+
+    def setup(self, stage: Optional[str] = None):
+        """Setup the datasets for different stages."""
+        # Prepare calibration dataset when stage is 'calibration'
+        if stage == "calibration":
+            calib_cfg = getattr(self.data_cfg, "quant_calibration_dataset", None)
+            if calib_cfg is None:
+                if isinstance(self.data_cfg, dict):
+                    calib_cfg = self.data_cfg.get("quant_calibration_dataset", {})
+                else:
+                    calib_cfg = {}
+
+            if hasattr(calib_cfg, "images_dir"):
+                calib_images_dir = getattr(calib_cfg, "images_dir", "")
+            else:
+                calib_images_dir = calib_cfg.get("images_dir", "")
+
+            if calib_images_dir:
+                self.calib_dataset = PredictDataset(
+                    calib_images_dir,
+                    self.data_cfg,
+                )
+            else:
+                raise ValueError(
+                    "quant_calibration_dataset.images_dir must be provided for calibration stage."
+                )
 
     def train_dataloader(self):
         """Build the dataloader for training.
@@ -50,7 +81,9 @@ class SemSegmDataModule(pl.LightningDataModule):
                 is_training=True,
             )
         else:
-            raise NotImplementedError(f"The dataset type ({self.data_cfg.train.type}) is not supported.")
+            raise NotImplementedError(
+                f"The dataset type ({self.data_cfg.train.type}) is not supported."
+            )
 
         train_sampler = None
         if is_dist_avail_and_initialized():
@@ -99,7 +132,9 @@ class SemSegmDataModule(pl.LightningDataModule):
                 is_training=False,
             )
         else:
-            raise NotImplementedError(f"The dataset type ({self.data_cfg.val.type}) is not supported.")
+            raise NotImplementedError(
+                f"The dataset type ({self.data_cfg.val.type}) is not supported."
+            )
 
         val_sampler = None
         if is_dist_avail_and_initialized():
@@ -152,3 +187,24 @@ class SemSegmDataModule(pl.LightningDataModule):
             pin_memory=True,
             sampler=test_sampler)
         return predict_loader
+
+    def calib_dataloader(self):
+        """Build the dataloader for quantization calibration.
+
+        Returns:
+            calib_loader: PyTorch DataLoader used for calibration.
+        """
+        if self.calib_dataset is None:
+            raise ValueError(
+                "Calibration dataset is not initialized. Call setup(stage='calibration') first."
+            )
+        calib_loader = DataLoader(
+            self.calib_dataset,
+            batch_size=self.data_cfg.val.batch_size,
+            shuffle=False,
+            collate_fn=self.calib_dataset.collate_fn,
+            num_workers=self.data_cfg.val.num_workers,
+            drop_last=False,
+            pin_memory=True,
+        )
+        return calib_loader

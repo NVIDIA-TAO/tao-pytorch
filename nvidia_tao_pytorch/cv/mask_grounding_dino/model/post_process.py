@@ -22,9 +22,9 @@ from torch import nn
 import torch.nn.functional as F
 from torchvision.ops import nms
 import numpy as np
-from PIL import Image, ImageDraw, ImageOps
+from PIL import Image, ImageDraw, ImageOps, ImageColor
 
-from nvidia_tao_pytorch.cv.deformable_detr.model.post_process import get_key
+from nvidia_tao_pytorch.cv.deformable_detr.model.post_process import get_key, METAINFO
 from nvidia_tao_pytorch.cv.deformable_detr.utils import box_ops
 
 
@@ -206,7 +206,8 @@ def save_inference_prediction(
         save_masks (bool): Overlay masks if available.
         mask_alpha (float): Mask transparency (0=transparent, 1=opaque).
     """
-    color_map = color_map or {}
+    if color_map is None:
+        color_map = {c: p for c, p in zip(METAINFO['classes'], METAINFO['palette'])}
 
     for pred in predictions:
         image_path = pred["image_names"]
@@ -282,6 +283,10 @@ def save_inference_prediction(
 
                 # Draw bbox
                 color = color_map.get(label_name, (255, 0, 0))
+                if isinstance(color, str):
+                    color = ImageColor.getrgb(color)  # Converts "red" or "#ff0000" to (255, 0, 0)
+                else:
+                    color = tuple(color)  # Converts lists to tuples safely
                 draw.rectangle([int(x1), int(y1), int(x2), int(y2)],
                                outline=color, width=outline_width)
 
@@ -296,7 +301,7 @@ def save_inference_prediction(
                     if mask.ndim == 3:
                         mask = mask[0]
 
-                    mask_pil = Image.fromarray(mask * 255).resize((W, H), Image.NEAREST)
+                    mask_pil = Image.fromarray(mask * 255, mode="L").resize((W, H), Image.NEAREST)
 
                     # Convert mask to RGBA & accumulate it without destroying previous drawings
                     colored_mask = Image.new("RGBA", (W, H), (*color, int(mask_alpha * 255)))

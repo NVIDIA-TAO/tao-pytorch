@@ -26,7 +26,7 @@ from timm.layers.trace_utils import _assert
 from functools import partial
 
 from nvidia_tao_pytorch.cv.deformable_detr.model.ops.modules import MSDeformAttn
-from nvidia_tao_pytorch.cv.segformer.model.backbones.vision_transformer.adapter_modules import (
+from nvidia_tao_pytorch.cv.segformer_old.model.backbones.vision_transformer.adapter_modules import (
     SpatialPriorModule, InteractionBlock, deform_inputs
 )
 

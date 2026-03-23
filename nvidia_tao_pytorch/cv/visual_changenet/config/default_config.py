@@ -18,8 +18,8 @@ from typing import Optional, List, Dict
 from dataclasses import dataclass
 from omegaconf import MISSING
 
-from nvidia_tao_pytorch.core.common_config import EvaluateConfig, CommonExperimentConfig, InferenceConfig, TrainConfig
-from nvidia_tao_pytorch.config.types import (
+from nvidia_tao_core.config.common.common_config import EvaluateConfig, CommonExperimentConfig, InferenceConfig, TrainConfig
+from nvidia_tao_core.config.utils.types import (
     STR_FIELD,
     INT_FIELD,
     FLOAT_FIELD,
