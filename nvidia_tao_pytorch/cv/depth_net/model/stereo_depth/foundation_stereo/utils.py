@@ -1,16 +1,5 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """Model utils meant to provide helper functions for generic modules"""
 
@@ -493,21 +482,20 @@ def get_kitti_filenames(full_path):
 
 
 def get_stereodata_filenames(full_path):
-    """
-    Extracts a specific filename pattern for 'stereodataset' images from their full path.
+    """Return the input path stripped of its leading separator.
 
-    This function is tailored to a particular directory structure for the 'stereodataset'
-    where the relevant identifier is formed by the last six components of the path,
-    joined by '/'. This allows for more specific identification within that dataset.
+    Caller is expected to ``os.makedirs(os.path.dirname(target))`` before
+    writing, mirroring the mono path which recreates the directory tree
+    under the output root. This keeps outputs collision-free at any
+    nesting depth (e.g. ``<seq>/<view>/<file>``).
 
     Args:
-        full_path (str): The complete file path of a 'stereodataset' image,
-                         e.g., '/some/base/path/sequence_name/sub_dir/image_type/image_file.png'.
+        full_path (str): Absolute or relative input path.
 
     Returns:
-        str: The extracted filename string, composed of the last six path components joined by '/'.
+        str: ``full_path`` with the leading ``/`` removed.
     """
-    return '/'.join(full_path.split('/')[-1:])
+    return full_path.lstrip('/')
 
 
 def get_middlebury_filenames(full_path):
@@ -536,7 +524,7 @@ def get_middlebury_filenames(full_path):
     full_path_check = full_path.split('/')[-3:]  # check the last three path names
     for name in file_names:
         if name in full_path_check:
-            set_name = name + full_path_check[-1].split('.')[-1]  # If a known scene name is found
+            set_name = name + '.' + full_path_check[-1].split('.')[-1]  # If a known scene name is found
             break  # Once a match is found, no need to check further
 
     # If no specific Middlebury scene name was found in the path,
@@ -956,21 +944,25 @@ def correlation(feature1, feature2):
     return torch.sum(feature1 * feature2, dim=1, keepdim=True)
 
 
-def groupwise_correlation(feature1, feature2, num_groups):
+def groupwise_correlation(feature1, feature2, num_groups, normalize: bool = True):
     """
     Computes group-wise correlation between two feature maps.
 
     This method divides the channels of the feature maps into `num_groups`
     and then computes the correlation independently within each group.
-    Before computing the correlation, features within each group are L2-normalized.
-    This approach can be more computationally efficient and effective than
-    full correlation, especially for high-dimensional feature spaces.
+    When ``normalize=True`` (default), features within each group are
+    L2-normalized before the dot product (cosine similarity). When
+    ``normalize=False``, raw inner-product correlation is used — required
+    by the FFS commercial bp2 distillation, which was trained without
+    feature normalization.
 
     Args:
         feature1 (torch.Tensor): The first feature map (B, C, H, W).
         feature2 (torch.Tensor): The second feature map (B, C, H, W).
         num_groups (int): The number of groups to divide the channels into.
                           The total number of channels `C` must be divisible by `num_groups`.
+        normalize (bool, optional): When True (default) L2-normalize each
+            group before the dot product. False = raw correlation.
 
     Returns:
         torch.Tensor: The group-wise correlation cost tensor of shape (B, num_groups, H, W).
@@ -995,7 +987,10 @@ def groupwise_correlation(feature1, feature2, num_groups):
     with torch.amp.autocast('cuda', enabled=False):
         # Normalize features within each group along their channel dimension (dim=2)
         # Then, perform element-wise multiplication and sum along the channel_per_group dimension.
-        cost = (F.normalize(feature1.float(), dim=2) * F.normalize(feature2.float(), dim=2)).sum(dim=2)
+        if normalize:
+            cost = (F.normalize(feature1.float(), dim=2) * F.normalize(feature2.float(), dim=2)).sum(dim=2)
+        else:
+            cost = (feature1.float() * feature2.float()).sum(dim=2)
 
     # The output `cost` should have shape (B, num_groups, H, W).
     # The original code had this assertion commented out, but it's useful for verification.
@@ -1004,7 +999,8 @@ def groupwise_correlation(feature1, feature2, num_groups):
     return cost
 
 
-def build_gwc_volume(refimg_feature, targetimg_feature, maxdisp, num_groups, stride=1):
+def build_gwc_volume(refimg_feature, targetimg_feature, maxdisp, num_groups, stride=1,
+                     normalize: bool = True):
     """
     Builds a Group-Wise Correlation (GWC) volume for stereo matching.
 
@@ -1060,10 +1056,12 @@ def build_gwc_volume(refimg_feature, targetimg_feature, maxdisp, num_groups, str
             # `current_disp_value:` for ref_img_feature means starting from column `current_disp_value`.
             # `:-current_disp_value` for target_img_feature means ending before the last `current_disp_value` columns.
             volume[:, :, i, :, current_disp_value:] = groupwise_correlation(
-                refimg_feature[:, :, :, current_disp_value:], targetimg_feature[:, :, :, :-current_disp_value], num_groups)
+                refimg_feature[:, :, :, current_disp_value:], targetimg_feature[:, :, :, :-current_disp_value],
+                num_groups, normalize=normalize)
         else:
             # For disparity 0, calculate group-wise correlation without any shift.
-            volume[:, :, i, :, :] = groupwise_correlation(refimg_feature, targetimg_feature, num_groups)
+            volume[:, :, i, :, :] = groupwise_correlation(refimg_feature, targetimg_feature, num_groups,
+                                                          normalize=normalize)
 
     return volume.contiguous()  # Ensure the tensor is contiguous in memory
 

@@ -1,16 +1,5 @@
-# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """Export CLIP model to ONNX."""
 
@@ -33,7 +22,7 @@ from nvidia_tao_pytorch.core.hydra.hydra_runner import hydra_runner
 from nvidia_tao_pytorch.core.utilities import encrypt_onnx
 from nvidia_tao_pytorch.core.tlt_logging import logging
 
-from nvidia_tao_core.config.clip.default_config import (
+from nvidia_tao_pytorch.config.clip.default_config import (
     CLIPExperimentConfig as ExperimentConfig,
 )
 from nvidia_tao_pytorch.multimodal.clip.model.pl_clip_model import CLIPPlModel
@@ -493,7 +482,8 @@ def export_single_encoder(
             dynamic_axes=dynamic_axes,
             opset_version=opset_version,
             do_constant_folding=True,
-            verbose=export_config.verbose
+            verbose=export_config.verbose,
+            dynamo=False,
         )
 
     # If model is large, consolidate external data into a single file
@@ -668,6 +658,7 @@ def export_combined_encoder(
             opset_version=opset_version,
             do_constant_folding=True,
             verbose=export_config.verbose,
+            dynamo=False,
         )
 
     # If model is large, consolidate external data into a single file

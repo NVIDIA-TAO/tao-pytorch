@@ -1,16 +1,5 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """ResNet backbone for Sparse4D."""
 
@@ -192,6 +181,15 @@ class ResNet_FPN(ResNet):
         for i in self.return_idx:
             out.append(x[i])
         return out
+
+
+@SPARSE4D_BACKBONE_REGISTRY.register()
+def resnet_50(out_indices=[0, 1, 2, 3], **kwargs):
+    """ ResNet-50 model.
+    Args:
+        out_indices (list): List of block indices to return as feature
+    """
+    return ResNet_FPN(out_channels=[256, 512, 1024, 2048], block=Bottleneck, layers=[3, 4, 6, 3], return_idx=out_indices, **kwargs)
 
 
 @SPARSE4D_BACKBONE_REGISTRY.register()

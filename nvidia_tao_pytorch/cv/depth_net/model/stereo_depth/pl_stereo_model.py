@@ -1,16 +1,5 @@
-# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """ Main PTL model file for Stereo (FoundationStereo) Depthnet."""
 
@@ -201,7 +190,7 @@ class StereoDepthNetPlModel(TAOLightningModule):
         self.log("global_step", self.trainer.global_step, on_step=True, on_epoch=False, prog_bar=True)
 
         if (batch_idx % self.vis_step_interval) == 0:
-            concat_images, list_images = self.log_wandb_images(
+            concat_images, list_images = self.build_disparity_viz(
                 (image1, disp_gt, disp_preds, self.trainer.global_step)
             )
             if len(self.loggers) > 1:
@@ -279,7 +268,7 @@ class StereoDepthNetPlModel(TAOLightningModule):
         lrs = [param_group["lr"] for param_group in self.optimizers().optimizer.param_groups]
         self.log("val/lr", lrs[0], on_step=True, on_epoch=False, prog_bar=True)
 
-        concat_images, list_images = self.log_wandb_images(
+        concat_images, list_images = self.build_disparity_viz(
             (image1, disp_gt, [disp_pred], self.trainer.global_step)
         )
         if len(self.loggers) > 1:
@@ -311,7 +300,7 @@ class StereoDepthNetPlModel(TAOLightningModule):
                 message="Eval metrics generated.", status_level=status_logging.Status.RUNNING
             )
 
-    def log_wandb_images(self, viz_batch, inference_only=False) -> tuple[np.ndarray, list[np.ndarray]]:
+    def build_disparity_viz(self, viz_batch) -> tuple[np.ndarray, list[np.ndarray]]:
         """
         Generates and prepares images for logging to Weights & Biases or TensorBoard.
 
@@ -345,6 +334,7 @@ class StereoDepthNetPlModel(TAOLightningModule):
                 disp_pred_last = disp_pred[0].squeeze().detach().cpu().numpy()
 
             if gt is None:
+                disp_pred_last = (cm.turbo(disp_pred_last / disp_pred_last.max()) * 255.0).astype(np.uint8)
                 return disp_pred_last, None, None
 
             disp_pred_diff = torch.abs(gt.detach().cpu() - disp_pred_last)[0].squeeze()
@@ -432,12 +422,19 @@ class StereoDepthNetPlModel(TAOLightningModule):
         self.pred_evaluator.update(disp_pred, disp_gt)
         for i in range(batch_size):
             viz_batch = (image1[i], disp_gt[i], disp_pred[i], batch_idx)
-            concat_images, _ = self.log_wandb_images(viz_batch, inference_only=True)
+            concat_images, _ = self.build_disparity_viz(viz_batch)
             index = get_dataset_index(image_names[i], self.dataset_config["infer_dataset"])
 
             file_name = get_filename_from_path(
                 image_names[i],
                 self.dataset_config["infer_dataset"]["data_sources"][index]['dataset_name'])
+
+            # Emit raw .pfm when save_raw_pfm=True (mirrors test_step).
+            if self.experiment_spec["inference"]["save_raw_pfm"]:
+                pfm_name = '.'.join(file_name.split('.')[:-1]) + '.pfm'
+                target_pfm = os.path.join(self.experiment_spec.results_dir, pfm_name)
+                os.makedirs(os.path.dirname(target_pfm), exist_ok=True)
+                write_pfm(target_pfm, disp_pred[i].squeeze().detach().cpu().numpy())
 
             pred_results.append({"output_pred": concat_images, "image_name": file_name})
         return pred_results
@@ -456,7 +453,9 @@ class StereoDepthNetPlModel(TAOLightningModule):
         """
         output_dir = self.experiment_spec.results_dir
         for i in range(len(outputs)):
-            write_image(outputs[i]["output_pred"], os.path.join(output_dir, outputs[i]["image_name"]))
+            target = os.path.join(output_dir, outputs[i]["image_name"])
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            write_image(outputs[i]["output_pred"], target)
 
     def on_predict_epoch_end(self):
         """
@@ -515,8 +514,9 @@ class StereoDepthNetPlModel(TAOLightningModule):
                 image_names[0],
                 self.dataset_config["infer_dataset"]["data_sources"][index]['dataset_name'])
             filename = '.'.join(filename.split('.')[:-1]) + '.pfm'
-            write_pfm(os.path.join(self.experiment_spec["results_dir"], filename),
-                      disp_pred[0].squeeze().detach().cpu().numpy())
+            target = os.path.join(self.experiment_spec["results_dir"], filename)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            write_pfm(target, disp_pred[0].squeeze().detach().cpu().numpy())
 
     def on_test_epoch_end(self):
         """
@@ -530,6 +530,8 @@ class StereoDepthNetPlModel(TAOLightningModule):
 
         if not self.trainer.sanity_checking:
             self.status_logging_dict = {}
+            for name, metric in results_metric.items():
+                self.status_logging_dict[f"val/{name}"] = metric
             status_logging.get_status_logger().kpi = self.status_logging_dict
             status_logging.get_status_logger().write(
                 message="Test metrics generated.",

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 ADE20K_150_CATEGORIES = [
     {"color": [120, 120, 120], "id": 0, "isthing": 0, "name": "wall"},
     {"color": [180, 120, 120], "id": 1, "isthing": 0, "name": "building"},

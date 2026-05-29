@@ -1,16 +1,6 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """OneFormer unified COCO dataset with advanced augmentations."""
 
 import json
@@ -109,9 +99,34 @@ class COCOUnifiedDataset(Dataset):  # pylint: disable=too-many-instance-attribut
                 self.target_size = self.target_size * 2
         # --- End of Integrated BaseDataset Logic ---
 
-        self.ann_path = ann_path
-        self.img_dir = img_dir
-        self.panoptic_dir = panoptic_dir
+        if isinstance(ann_path, str):
+            self.ann_paths = [ann_path]
+        else:
+            self.ann_paths = list(ann_path)
+
+        n_datasets = len(self.ann_paths)
+
+        if not img_dir:
+            self.img_dirs = [""] * n_datasets
+        elif isinstance(img_dir, str):
+            self.img_dirs = [img_dir]
+        else:
+            self.img_dirs = list(img_dir)
+
+        if isinstance(panoptic_dir, str):
+            self.panoptic_dirs = [panoptic_dir]
+        else:
+            self.panoptic_dirs = list(panoptic_dir)
+
+        if len(self.img_dirs) == 1 and n_datasets > 1:
+            self.img_dirs = self.img_dirs * n_datasets
+        if len(self.panoptic_dirs) == 1 and n_datasets > 1:
+            self.panoptic_dirs = self.panoptic_dirs * n_datasets
+        assert len(self.ann_paths) == len(self.img_dirs) == len(self.panoptic_dirs), (
+            f"annotations ({len(self.ann_paths)}), images ({len(self.img_dirs)}), "
+            f"and panoptic ({len(self.panoptic_dirs)}) must have the same number of entries"
+        )
+
         self.is_training = is_training
 
         self.contiguous_id = cfg.dataset.contiguous_id
@@ -172,10 +187,48 @@ class COCOUnifiedDataset(Dataset):  # pylint: disable=too-many-instance-attribut
         return new_h - orig_size[0], new_w - orig_size[1]
 
     def load_json(self):
-        """Load annotation data from JSON file."""
-        with open(self.ann_path, "r", encoding="utf-8") as f:
-            self.raw_annot = json.load(f)
-        self.id2img = {img["id"]: img for img in self.raw_annot["images"]}
+        """Load annotation data from one or more JSON files.
+
+        When multiple annotation files are provided, annotations from all
+        files are concatenated into a single flat list. A parallel
+        ``dataset_indices`` list records which source dataset each
+        annotation belongs to so the correct image/panoptic directory
+        can be resolved at item-access time.
+        """
+        self.all_annotations = []
+        self.all_id2img = []
+        self.dataset_indices = []
+        merged_categories = None
+
+        for ds_idx, ann_path in enumerate(self.ann_paths):
+            with open(ann_path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+
+            id2img = {img["id"]: img for img in raw["images"]}
+            self.all_id2img.append(id2img)
+
+            num_anns = len(raw["annotations"])
+            self.all_annotations.extend(raw["annotations"])
+            self.dataset_indices.extend([ds_idx] * num_anns)
+
+            if merged_categories is None:
+                merged_categories = raw["categories"]
+            else:
+                existing_ids = {c["id"] for c in merged_categories}
+                for cat in raw["categories"]:
+                    if cat["id"] not in existing_ids:
+                        merged_categories.append(cat)
+                        existing_ids.add(cat["id"])
+
+            logger.info(
+                "Loaded %d annotations from %s (dataset %d/%d)",
+                num_anns, ann_path, ds_idx + 1, len(self.ann_paths),
+            )
+
+        self.raw_annot = {
+            "categories": merged_categories or [],
+            "annotations": self.all_annotations,
+        }
 
     def get_category_mapping(self):
         """Get category mapping for dataset."""
@@ -356,7 +409,7 @@ class COCOUnifiedDataset(Dataset):  # pylint: disable=too-many-instance-attribut
 
     def __len__(self):
         """Return length of dataset."""
-        return len(self.raw_annot["annotations"])
+        return len(self.all_annotations)
 
     def __getitem__(self, idx):
         """Get item from dataset by index."""
@@ -425,17 +478,20 @@ class COCOUnifiedDataset(Dataset):  # pylint: disable=too-many-instance-attribut
         return item1
 
     def _get_single_item(self, idx):  # pylint: disable=too-many-locals
-        ann = self.raw_annot["annotations"][idx]
-        img_info = self.id2img[ann["image_id"]]
+        ann = self.all_annotations[idx]
+        ds_idx = self.dataset_indices[idx]
+        img_info = self.all_id2img[ds_idx][ann["image_id"]]
+        img_dir = self.img_dirs[ds_idx]
+        panoptic_dir = self.panoptic_dirs[ds_idx]
 
+        img_file = img_info.get("img_path", os.path.join(img_dir, img_info["file_name"]))
         img = self.get_image(
-            img_info["file_name"],
-            root_dir=self.img_dir,
+            img_file,
             target_size=self.target_size if not self.is_training else None,
         )
         pan_seg_rgb = self.get_mask(
             ann["file_name"],
-            self.panoptic_dir,
+            panoptic_dir,
             mode="RGB",
             target_size=self.target_size if not self.is_training else None,
         )

@@ -1,0 +1,35 @@
+# syntax=docker/dockerfile:1.7
+# Build torch-scatter wheel from source against the base image's torch.
+# Output: /wheels/torch_scatter-*.whl in a FROM scratch final image.
+
+ARG PYTORCH_BASE_IMAGE
+FROM ${PYTORCH_BASE_IMAGE} AS builder
+
+ARG TORCH_SCATTER_VERSION=2.1.2
+ARG GPU_ARCHS="75 80 86 90 90a 100 110 120"
+ARG TORCH_CUDA_ARCH_LIST="7.5 8.0 8.6 9.0 9.0a 10.0 11.0 12.0+PTX"
+ARG MAX_JOBS_CAP=8
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+        cmake ninja-build build-essential git python3-dev
+
+ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} \
+    FORCE_CUDA=1
+
+WORKDIR /workspace
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    set -eu; \
+    parallel=$(nproc); \
+    if [ "$parallel" -gt ${MAX_JOBS_CAP} ]; then parallel=${MAX_JOBS_CAP}; fi; \
+    echo "torch-scatter MAX_JOBS=$parallel"; \
+    MAX_JOBS=${parallel} pip wheel \
+        --no-build-isolation \
+        --no-binary=torch-scatter \
+        --wheel-dir /wheels \
+        torch-scatter==${TORCH_SCATTER_VERSION}
+
+FROM scratch
+COPY --from=builder /wheels /wheels

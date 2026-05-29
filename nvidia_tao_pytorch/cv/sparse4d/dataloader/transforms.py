@@ -1,24 +1,32 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """Transforms for Sparse4D dataset."""
 
+import time
 import numpy as np
 import torch
 from PIL import Image
 from typing import Dict
 import h5py
+
+_H5_MAX_RETRIES = 10
+_H5_RETRY_DELAY = 0.1
+
+
+def _read_h5(h5_path, dataset_key, max_retries=_H5_MAX_RETRIES):
+    """Read a dataset from an HDF5 file with retry logic for transient I/O errors."""
+    for attempt in range(max_retries):
+        try:
+            with h5py.File(h5_path, "r") as f:
+                return f[dataset_key][:]
+        except KeyError:
+            raise
+        except Exception:
+            if attempt >= max_retries - 1:
+                raise
+            time.sleep(_H5_RETRY_DELAY * (attempt + 1))
+    raise RuntimeError(f"_read_h5: exhausted {max_retries} retries for {h5_path}:{dataset_key}")
 
 
 class LoadMultiViewImageFromFiles:
@@ -50,11 +58,16 @@ class LoadMultiViewImageFromFiles:
         if self.h5_file:
             img = []
             for name in filename:
-                with h5py.File(name[0], "r") as f:
-                    img.append(f[name[1]][:])
+                if isinstance(name, (tuple, list)):
+                    try:
+                        img.append(_read_h5(name[0], name[1]))
+                    except Exception as e:
+                        raise RuntimeError(f"Error loading {name[0]} {name[1]}: {e}") from e
+                else:
+                    img.append(np.array(Image.open(name).convert('RGB')))
             img = np.stack(img, axis=-1)
         else:
-            img = np.stack([Image.open(name).convert('RGB') for name in filename], axis=-1)
+            img = np.stack([np.array(Image.open(name).convert('RGB')) for name in filename], axis=-1)
 
         if self.to_float32:
             img = img.astype(np.float32)
@@ -101,25 +114,37 @@ class LoadDepthMap:
 
         filename = results["depth_map_filename"]
         # Load depth maps (shape: h, w, num_views)
-        depth_maps = []
+        depths = []
 
         if self.h5_file:
-            depths = []
             for name in filename:
-                with h5py.File(name[0], "r") as f:
-                    depths.append(f[name[1]][:])
+                if name is None:
+                    depths.append(np.ones(self.default_shape) * -1)
+                elif isinstance(name, (tuple, list)):
+                    try:
+                        depths.append(_read_h5(name[0], name[1]))
+                    except KeyError:
+                        if "CT1_distill__" in name[0]:
+                            alt_h5_path = name[0].replace("CT1_distill__", "")
+                            depths.append(_read_h5(alt_h5_path, name[1]))
+                        else:
+                            raise KeyError(f"Depth key '{name[1]}' not found in {name[0]}")
+                    except Exception as e:
+                        raise RuntimeError(f"Error loading {name[0]} {name[1]}: {e}") from e
+                else:
+                    depth = Image.open(name)
+                    depths.append(np.array(depth))
             depths = np.stack(depths, axis=-1)
         else:
             for name in filename:
-                # Open depth map as grayscale image
                 if name is None:
                     depth = np.ones(self.default_shape) * -1
                 else:
                     depth = Image.open(name)
                     depth = np.array(depth)
-                depth_maps.append(depth)
+                depths.append(depth)
 
-            depths = np.stack(depth_maps, axis=-1)
+            depths = np.stack(depths, axis=-1)
         depths = depths.astype(np.float32)
         depths /= 1000.  # Convert from mm to m
         depths = np.clip(depths, 0.1, self.max_depth)

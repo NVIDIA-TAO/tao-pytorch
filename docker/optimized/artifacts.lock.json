@@ -1,0 +1,31 @@
+{
+  "artifacts_repo": "nvcr.io/nvstaging/tao/tao_pytorch_artifacts",
+  "base_digest": "sha256:3c90e38f5ec51e51d1c73bd7eb3d83674a254f451147c5cadc4344314258a112",
+  "base_image": "nvcr.io/nvidia/pytorch:26.03-py3",
+  "components": {
+    "ort": {
+      "build_arg": "ONNXRUNTIME_VERSION",
+      "dockerfile": "docker/optimized/artifacts/Dockerfile.ort",
+      "image": "nvcr.io/nvstaging/tao/tao_pytorch_artifacts:ort-422cc2202a1a2764",
+      "lockhash": "422cc2202a1a2764",
+      "pin": "1.25.1"
+    },
+    "torch_scatter": {
+      "build_arg": "TORCH_SCATTER_VERSION",
+      "dockerfile": "docker/optimized/artifacts/Dockerfile.torch-scatter",
+      "image": "nvcr.io/nvstaging/tao/tao_pytorch_artifacts:torch_scatter-d7f4166fa8cc7fee",
+      "lockhash": "d7f4166fa8cc7fee",
+      "pin": "2.1.2"
+    },
+    "warpconvnet": {
+      "build_arg": "WARPCONVNET_COMMIT",
+      "dockerfile": "docker/optimized/artifacts/Dockerfile.warpconvnet",
+      "image": "nvcr.io/nvstaging/tao/tao_pytorch_artifacts:warpconvnet-1818b140617da837",
+      "lockhash": "1818b140617da837",
+      "pin": "b784cc414270e57567cbaf6ee8297f7b12a4f2fd",
+      "repo": "https://github.com/daocongtuyen2x/WarpConvNet.git"
+    }
+  },
+  "gpu_archs": "75 80 86 90 90a 100 110 120",
+  "torch_cuda_arch_list": "7.5 8.0 8.6 9.0 9.0a 10.0 11.0 12.0+PTX"
+}

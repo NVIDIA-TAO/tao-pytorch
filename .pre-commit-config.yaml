@@ -1,0 +1,10 @@
+repos:
+  - repo: local
+    hooks:
+      - id: update-readme-supported-commands
+        name: Update README supported commands
+        description: Regenerate the supported-commands table in README.md from setup.py entrypoints.
+        entry: python3 tools/update_readme_supported_commands.py
+        language: system
+        pass_filenames: false
+        files: ^(setup\.py|tools/update_readme_supported_commands\.py|nvidia_tao_pytorch/.+/scripts/.+\.py|README\.md)$

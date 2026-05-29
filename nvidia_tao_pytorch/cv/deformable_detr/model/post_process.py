@@ -1,16 +1,5 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """ Post processing for inference. """
 import os
@@ -76,7 +65,7 @@ def check_key(my_dict, key):
     return bool(key in my_dict.keys())
 
 
-def save_inference_prediction(predictions, output_dir, conf_threshold, label_map, color_map, is_internal=False, outline_width=3):
+def save_inference_prediction(predictions, output_dir, conf_threshold, label_map, color_map, is_internal=False, outline_width=3, save_annotated_images=True):
     """Save the annotated images and label file to the output directory.
 
     Args:
@@ -87,6 +76,9 @@ def save_inference_prediction(predictions, output_dir, conf_threshold, label_map
         color_map(Dict): Dictonary for the color mapping to annotate the bounding box per class.
         is_internal(Bool) : To save the inference results in format of output_dir/sequence/image_name.
         outline_width (int): Bbox outline width (default: 3)
+        save_annotated_images (bool): If True, also draw boxes on the source image and save
+            an annotated JPEG. When False, only the KITTI label file is written, which avoids
+            the cost of decoding/re-encoding source images (default: True).
     """
     # If not explicitly specified, use COCO classes as default color scheme.
     if color_map is None:
@@ -126,18 +118,23 @@ def save_inference_prediction(predictions, output_dir, conf_threshold, label_map
         if not os.path.exists(output_label_root):
             os.makedirs(output_label_root, exist_ok=True)
 
-        if not os.path.exists(output_annotate_root):
-            os.makedirs(output_annotate_root, exist_ok=True)
+        if save_annotated_images:
+            if not os.path.exists(output_annotate_root):
+                os.makedirs(output_annotate_root, exist_ok=True)
 
-        if image_name.startswith("h5://"):
-            pil_input, _ = read_h5_image_from_path(image_name)
+            if image_name.startswith("h5://"):
+                pil_input, _ = read_h5_image_from_path(image_name)
+            else:
+                pil_input = Image.open(image_name).convert("RGB")
+
+            pil_input = ImageOps.exif_transpose(pil_input)
+            W, H = pil_input.size
+
+            im1 = ImageDraw.Draw(pil_input)
         else:
-            pil_input = Image.open(image_name).convert("RGB")
-
-        pil_input = ImageOps.exif_transpose(pil_input)
-        W, H = pil_input.size
-
-        im1 = ImageDraw.Draw(pil_input)
+            pil_input = None
+            im1 = None
+            W = H = 0
 
         with open(output_label_name, 'w') as f:
             pred_boxes = pred_boxes.tolist()
@@ -166,7 +163,7 @@ def save_inference_prediction(predictions, output_dir, conf_threshold, label_map
                 label_string = label_head + bbox_string + label_tail
                 f.write(label_string)
 
-                if check_key(color_map, class_name):
+                if save_annotated_images and check_key(color_map, class_name):
                     x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
                     if is_internal:
                         # Don't put class name
@@ -194,7 +191,8 @@ def save_inference_prediction(predictions, output_dir, conf_threshold, label_map
                             pred_color = pred_color.resize((W, H), resample=Image.NEAREST)
                             pil_input.paste(pred_color, (0, 0), Image.fromarray(masks_filt[k]).convert("L").resize((W, H), resample=Image.NEAREST))
 
-        pil_input.save(output_image_name)
+        if save_annotated_images:
+            pil_input.save(output_image_name)
         f.closed
 
 
@@ -250,17 +248,72 @@ def threshold_predictions(predictions, conf_threshold):
     return filtered_predictions
 
 
+def _soft_nms(boxes, scores, method='linear', iou_threshold=0.8,
+              sigma=0.5, score_threshold=0.001):
+    """Soft-NMS on a single-class set of detections.
+
+    Args:
+        boxes (Tensor[N, 4]): xyxy boxes.
+        scores (Tensor[N]): confidence scores.
+        method (str): 'linear' or 'gaussian'.
+        iou_threshold (float): IoU threshold for the linear method;
+            boxes with IoU <= threshold are not suppressed.
+        sigma (float): Gaussian decay parameter (only used for 'gaussian').
+        score_threshold (float): discard detections whose score falls below this.
+
+    Returns:
+        keep (Tensor): indices of kept detections (into the original input).
+        keep_scores (Tensor): decayed scores for the kept detections.
+    """
+    idxs = torch.argsort(scores, descending=True)
+    boxes = boxes[idxs]
+    scores = scores[idxs].clone()
+    keep = []
+    keep_scores = []
+    while len(scores) > 0:
+        keep.append(idxs[0])
+        keep_scores.append(scores[0])
+        if len(scores) == 1:
+            break
+        cur_box = boxes[0:1]
+        rest_boxes = boxes[1:]
+        ious = box_ops.box_iou(cur_box, rest_boxes)[0].squeeze(0)
+        if method == 'gaussian':
+            decay = torch.exp(-(ious ** 2) / sigma)
+        else:
+            decay = torch.where(ious > iou_threshold, 1 - ious, torch.ones_like(ious))
+        scores[1:] *= decay
+        mask = scores[1:] > score_threshold
+        idxs = idxs[1:][mask]
+        boxes = rest_boxes[mask]
+        scores = scores[1:][mask]
+    if keep:
+        return torch.stack(keep), torch.stack(keep_scores)
+    return (torch.zeros(0, dtype=torch.long, device=boxes.device),
+            torch.zeros(0, device=boxes.device))
+
+
 class PostProcess(nn.Module):
     """This module converts the model's output into the format expected by the coco api."""
 
-    def __init__(self, num_select=100) -> None:
+    def __init__(self, num_select=100, soft_nms_enabled=False,
+                 soft_nms_method='linear', soft_nms_iou_threshold=0.8,
+                 soft_nms_sigma=0.5) -> None:
         """PostProcess constructor.
 
         Args:
-            num_select (int): top K predictions to select from
+            num_select (int): top K predictions to select from (also caps detections after NMS).
+            soft_nms_enabled (bool): apply per-class soft-NMS after top-K selection.
+            soft_nms_method (str): 'linear' or 'gaussian'.
+            soft_nms_iou_threshold (float): IoU threshold for the linear method.
+            soft_nms_sigma (float): sigma for Gaussian decay (gaussian method only).
         """
         super().__init__()
         self.num_select = num_select
+        self.soft_nms_enabled = soft_nms_enabled
+        self.soft_nms_method = soft_nms_method
+        self.soft_nms_iou_threshold = soft_nms_iou_threshold
+        self.soft_nms_sigma = soft_nms_sigma
 
     @torch.no_grad()
     def forward(self, outputs, target_sizes, image_names):
@@ -293,7 +346,38 @@ class PostProcess(nn.Module):
         img_h, img_w = target_sizes.unbind(1)
         scale_fct = torch.stack([img_w, img_h, img_w, img_h], dim=1)
         boxes = boxes * scale_fct[:, None, :]
-        results = [{'scores': s, 'labels': l, 'boxes': b, 'image_names': n, 'image_size': i}
-                   for s, l, b, n, i in zip(scores, labels, boxes, image_names, target_sizes)]
+
+        if self.soft_nms_enabled:
+            results = []
+            for s, l, b, n, i in zip(scores, labels, boxes, image_names, target_sizes):
+                keep_ids = []
+                decayed_scores = []
+                for cls_id in l.unique():
+                    cls_mask = l == cls_id
+                    cls_keep, cls_scores = _soft_nms(
+                        b[cls_mask], s[cls_mask],
+                        method=self.soft_nms_method,
+                        iou_threshold=self.soft_nms_iou_threshold,
+                        sigma=self.soft_nms_sigma,
+                    )
+                    global_indices = cls_mask.nonzero(as_tuple=False).squeeze(1)
+                    keep_ids.append(global_indices[cls_keep])
+                    decayed_scores.append(cls_scores)
+                if keep_ids:
+                    keep_ids = torch.cat(keep_ids)
+                    decayed_scores = torch.cat(decayed_scores)
+                    order = decayed_scores.argsort(descending=True)
+                    keep_ids = keep_ids[order[:self.num_select]]
+                    decayed_scores = decayed_scores[order[:self.num_select]]
+                else:
+                    keep_ids = torch.zeros(0, dtype=torch.long, device=s.device)
+                    decayed_scores = torch.zeros(0, device=s.device)
+                results.append({
+                    'scores': decayed_scores, 'labels': l[keep_ids],
+                    'boxes': b[keep_ids], 'image_names': n, 'image_size': i,
+                })
+        else:
+            results = [{'scores': s, 'labels': l, 'boxes': b, 'image_names': n, 'image_size': i}
+                       for s, l, b, n, i in zip(scores, labels, boxes, image_names, target_sizes)]
 
         return results

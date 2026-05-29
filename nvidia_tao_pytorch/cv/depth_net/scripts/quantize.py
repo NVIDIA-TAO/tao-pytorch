@@ -1,16 +1,5 @@
-# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """Quantize a DepthNet model using the configured backend.
 
@@ -25,9 +14,9 @@ from nvidia_tao_pytorch.core.decorators.workflow import monitor_status
 from nvidia_tao_pytorch.core.hydra.hydra_runner import hydra_runner
 from nvidia_tao_pytorch.core.tlt_logging import obfuscate_logs, logging
 
-from nvidia_tao_core.config.depth_net.default_config import ExperimentConfig
+from nvidia_tao_pytorch.config.depth_net.default_config import ExperimentConfig
 from nvidia_tao_pytorch.core.quantization import ModelQuantizer
-from nvidia_tao_pytorch.cv.depth_net.model.build_pl_model import build_pl_model
+from nvidia_tao_pytorch.cv.depth_net.model.build_pl_model import get_pl_module
 from nvidia_tao_pytorch.cv.depth_net.dataloader.pl_mono_data_module import MonoDepthNetDataModule
 
 
@@ -58,8 +47,11 @@ def main(cfg: ExperimentConfig) -> None:
     # Build the Lightning model and extract the underlying nn.Module
     logging.debug("Loading DepthNet checkpoint")
     if not cfg.quantize.model_path.endswith(".onnx"):
-        pl_model = build_pl_model(cfg)
-        pl_model.load_state_dict_from_checkpoint(cfg.quantize.model_path)
+        pl_model = get_pl_module(cfg).load_from_checkpoint(
+            cfg.quantize.model_path,
+            map_location="cpu",
+            experiment_spec=cfg,
+        )
         orig_model = pl_model.model
     else:
         orig_model = None  # ModelOpt ONNX backend loads the model from the file.

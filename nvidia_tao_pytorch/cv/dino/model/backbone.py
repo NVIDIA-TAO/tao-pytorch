@@ -1,16 +1,5 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """ Backbone modules. """
 
@@ -30,6 +19,7 @@ from nvidia_tao_pytorch.core.utils.pos_embed_interpolation import (
 from nvidia_tao_pytorch.core.utils.ptm_utils import load_pretrained_weights
 
 from nvidia_tao_pytorch.cv.backbone_v2.resnet import resnet_34, resnet_50
+from nvidia_tao_pytorch.cv.backbone_v2.vit_codetr import vit_large_codetr
 from nvidia_tao_pytorch.cv.dino.model.fan import fan_model_dict
 from nvidia_tao_pytorch.cv.dino.model.vision_transformer.vit_adapter import vit_model_dict
 from nvidia_tao_pytorch.cv.dino.model.utils import dino_parser, ptm_adapter
@@ -37,6 +27,11 @@ from nvidia_tao_pytorch.cv.grounding_dino.model.swin_transformer import swin_mod
 from nvidia_tao_pytorch.cv.rtdetr.model.backbone.efficientvit import (
     efficientvit_b0, efficientvit_b1, efficientvit_b2, efficientvit_b3
 )
+
+# ViTDet backbones that include SFP neck and produce all feature levels.
+_VITDET_MODEL_DICT = {
+    'vit_large_codetr': vit_large_codetr,
+}
 
 efficientvit_model_dict = {
     'efficientvit_b0': efficientvit_b0,
@@ -148,6 +143,7 @@ class Backbone(BackboneBase):
         supported_arch = list(fan_model_dict.keys()) + \
             list(vit_model_dict.keys()) + \
             list(swin_model_dict.keys()) + \
+            list(_VITDET_MODEL_DICT.keys()) + \
             ["resnet_34", "resnet_50"] + \
             ['efficientvit_b0', 'efficientvit_b1', 'efficientvit_b2', 'efficientvit_b3']
         # TODO: use core utils to load pretrained weights
@@ -199,6 +195,11 @@ class Backbone(BackboneBase):
                 export=export
             )
             num_channels = np.array(backbone.out_channels)[return_interm_indices - 1]
+        elif name in _VITDET_MODEL_DICT:
+            backbone = _VITDET_MODEL_DICT[name](
+                activation_checkpoint=activation_checkpoint,
+            )
+            num_channels = np.array(backbone.num_features)
         elif name.startswith('vit'):
             if name not in vit_model_dict:
                 raise NotImplementedError(f"{name} is not supported ViT-Adapter backbone. "

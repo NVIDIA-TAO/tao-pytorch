@@ -1,16 +1,5 @@
-# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """Quantize an OCRNet model using the configured backend.
 
@@ -25,10 +14,12 @@ from nvidia_tao_pytorch.core.decorators.workflow import monitor_status
 from nvidia_tao_pytorch.core.hydra.hydra_runner import hydra_runner
 from nvidia_tao_pytorch.core.tlt_logging import obfuscate_logs, logging
 
-from nvidia_tao_core.config.ocrnet.default_config import ExperimentConfig
+from nvidia_tao_pytorch.config.ocrnet.default_config import ExperimentConfig
 from nvidia_tao_pytorch.core.quantization import ModelQuantizer
 from nvidia_tao_pytorch.cv.ocrnet.model.pl_ocrnet import OCRNetModel
+from nvidia_tao_pytorch.cv.ocrnet.model.model import Model
 from nvidia_tao_pytorch.cv.ocrnet.dataloader.pl_ocr_data_module import OCRDataModule
+from nvidia_tao_pytorch.cv.ocrnet.utils.utils import load_checkpoint
 
 
 spec_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -58,11 +49,26 @@ def main(cfg: ExperimentConfig) -> None:
     # Build the Lightning model and extract the underlying nn.Module
     logging.debug("Loading OCRNet checkpoint")
     if not cfg.quantize.model_path.endswith(".onnx"):
-        pl_model = OCRNetModel.load_from_checkpoint(
+        dm = OCRDataModule(cfg)
+        pl_model = OCRNetModel(cfg, dm)
+        checkpoint = load_checkpoint(
             cfg.quantize.model_path,
-            map_location="cpu",
-            experiment_spec=cfg,
+            key=cfg.encryption_key,
+            to_cpu=True,
         )
+        if isinstance(checkpoint, Model):
+            pl_model.model.load_state_dict(checkpoint.state_dict(), strict=True)
+        elif isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+            state_dict = {
+                k.replace("model.", "", 1): v
+                for k, v in checkpoint["state_dict"].items()
+                if k.startswith("model.")
+            }
+            pl_model.model.load_state_dict(state_dict, strict=False)
+        elif hasattr(checkpoint, "state_dict"):
+            pl_model.model.load_state_dict(checkpoint.state_dict(), strict=True)
+        else:
+            pl_model.model.load_state_dict(checkpoint, strict=True)
         orig_model = pl_model.model
     else:
         orig_model = None  # ModelOpt ONNX backend loads the model from the file.

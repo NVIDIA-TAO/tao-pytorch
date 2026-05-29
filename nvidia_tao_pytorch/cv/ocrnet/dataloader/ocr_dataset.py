@@ -1,16 +1,5 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """OCRNet dataset."""
 
@@ -203,6 +192,22 @@ class LmdbDataset(Dataset):
     def __len__(self):
         """Number of samples."""
         return self.nSamples
+
+    def __del__(self):
+        """Close the lmdb environment so the path becomes reusable.
+
+        lmdb 2.x maintains a process-wide registry of opened paths and
+        rejects a second `lmdb.open(<same path>)` while an Environment is
+        alive. Releasing the env on GC keeps test cleanup and re-instantiation
+        cheap; without this, paramtrized tests sharing a fixture path raise
+        "already open in this process" on the second open.
+        """
+        env = getattr(self, "env", None)
+        if env is not None:
+            try:
+                env.close()
+            except Exception:
+                pass
 
     def __getitem__(self, index):
         """Generate single sample."""

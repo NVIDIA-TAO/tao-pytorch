@@ -1,4 +1,7 @@
 # Copyright (c) Facebook, Inc. and its affiliates.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """D2 catalog utils."""
 import copy
 import logging

@@ -62,3 +62,7 @@ tests/test_data/
 pointcloud/pointpillars/output/
 pointcloud/build/
 pointcloud/pointpillars/dist/
+
+# data folders
+data/
+work_dirs/

@@ -1,16 +1,6 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """PyTorch Lightning data module for OneFormer unified segmentation.
 
 This module provides data loading and preparation functionality for training
@@ -18,6 +8,7 @@ and evaluation of OneFormer models using PyTorch Lightning framework.
 """
 
 import logging
+from pathlib import Path
 from typing import Optional
 
 import pytorch_lightning as pl
@@ -28,6 +19,26 @@ from nvidia_tao_pytorch.core.distributed.comm import is_dist_avail_and_initializ
 from nvidia_tao_pytorch.cv.oneformer.dataloader.datasets import OneFormerPredictDataset
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_to_list(val, n=None):
+    """Normalize a config value (str, list, or None) to a plain Python list."""
+    if not val:
+        return [""] * (n or 1)
+    if isinstance(val, str):
+        return [val]
+    return list(val)
+
+
+def _derive_dataset_names(ann_paths):
+    """Derive short human-readable names from annotation file paths."""
+    names = []
+    for p in ann_paths:
+        parts = Path(p).parts
+        names.append(parts[-2] if len(parts) >= 2 else str(p))
+    if len(names) != len(set(names)):
+        names = [f"dataset_{i}" for i in range(len(names))]
+    return names
 
 
 class SemSegmDataModule(pl.LightningDataModule):
@@ -100,77 +111,78 @@ class SemSegmDataModule(pl.LightningDataModule):
         )
         return train_loader
 
-    def val_dataloader(self):
-        """Create validation dataloader."""
-        dataset_val = COCOUnifiedDataset(
-            ann_path=self.data_cfg.dataset.val.annotations,
-            img_dir=self.data_cfg.dataset.val.images,
-            panoptic_dir=self.data_cfg.dataset.val.panoptic,
-            cfg=self.data_cfg,
-            is_training=False,
-        )
+    def _build_eval_loaders(self, split_cfg):
+        """Build one DataLoader per annotation file for a val/test split.
 
-        val_sampler = None
-        if is_dist_avail_and_initialized():
-            val_sampler = torch.utils.data.distributed.DistributedSampler(
-                dataset_val, shuffle=False
+        Returns a single DataLoader when there is only one annotation,
+        or a list of DataLoaders when there are multiple.  Also returns
+        a parallel list of human-readable dataset names.
+        """
+        ann_paths = _normalize_to_list(split_cfg.annotations)
+        n = len(ann_paths)
+        img_dirs = _normalize_to_list(split_cfg.images, n)
+        panoptic_dirs = _normalize_to_list(split_cfg.panoptic, n)
+        if len(img_dirs) == 1 and n > 1:
+            img_dirs = img_dirs * n
+        if len(panoptic_dirs) == 1 and n > 1:
+            panoptic_dirs = panoptic_dirs * n
+
+        loaders = []
+        for ann_path, img_dir, panoptic_dir in zip(ann_paths, img_dirs, panoptic_dirs):
+            ds = COCOUnifiedDataset(
+                ann_path=ann_path,
+                img_dir=img_dir,
+                panoptic_dir=panoptic_dir,
+                cfg=self.data_cfg,
+                is_training=False,
             )
+
+            if is_dist_avail_and_initialized():
+                sampler = torch.utils.data.distributed.DistributedSampler(ds, shuffle=False)
+            else:
+                sampler = torch.utils.data.SequentialSampler(ds)
+
+            collate_fn = ds.collate_fn if hasattr(ds, "collate_fn") else ds.dataset.collate_fn
+
+            loaders.append(DataLoader(
+                ds,
+                batch_size=split_cfg.batch_size,
+                shuffle=False,
+                collate_fn=collate_fn,
+                num_workers=split_cfg.num_workers,
+                drop_last=False,
+                pin_memory=self.data_cfg.dataset.pin_memory,
+                sampler=sampler,
+            ))
+
+        try:
+            cfg_names = split_cfg.names
+        except Exception:
+            cfg_names = None
+        if cfg_names is not None:
+            names = _normalize_to_list(cfg_names)
+            assert len(names) == n, (
+                f"dataset.names has {len(names)} entries but {n} annotation files were given"
+            )
+            logger.info("Using configured dataset names: %s", names)
         else:
-            val_sampler = torch.utils.data.SequentialSampler(dataset_val)
+            names = _derive_dataset_names(ann_paths)
+            logger.info("Using auto-derived dataset names: %s", names)
+        return loaders, names
 
-        collate_fn = (
-            dataset_val.collate_fn
-            if hasattr(dataset_val, "collate_fn")
-            else dataset_val.dataset.collate_fn
+    def val_dataloader(self):
+        """Create validation dataloader(s) -- one per annotation file."""
+        loaders, self.val_dataset_names = self._build_eval_loaders(
+            self.data_cfg.dataset.val
         )
-
-        val_loader = DataLoader(
-            dataset_val,
-            batch_size=self.data_cfg.dataset.val.batch_size,
-            shuffle=False,
-            collate_fn=collate_fn,
-            num_workers=self.data_cfg.dataset.val.num_workers,
-            drop_last=False,
-            pin_memory=self.data_cfg.dataset.pin_memory,
-            sampler=val_sampler,
-        )
-        return val_loader
+        return loaders if len(loaders) > 1 else loaders[0]
 
     def test_dataloader(self):
-        """Create test dataloader."""
-        dataset_test = COCOUnifiedDataset(
-            ann_path=self.data_cfg.dataset.test.annotations,
-            img_dir=self.data_cfg.dataset.test.images,
-            panoptic_dir=self.data_cfg.dataset.test.panoptic,
-            cfg=self.data_cfg,
-            is_training=False,
+        """Create test dataloader(s) -- one per annotation file."""
+        loaders, self.test_dataset_names = self._build_eval_loaders(
+            self.data_cfg.dataset.test
         )
-
-        test_sampler = None
-        if is_dist_avail_and_initialized():
-            test_sampler = torch.utils.data.distributed.DistributedSampler(
-                dataset_test, shuffle=False
-            )
-        else:
-            test_sampler = torch.utils.data.SequentialSampler(dataset_test)
-
-        collate_fn = (
-            dataset_test.collate_fn
-            if hasattr(dataset_test, "collate_fn")
-            else dataset_test.dataset.collate_fn
-        )
-
-        test_loader = DataLoader(
-            dataset_test,
-            batch_size=self.data_cfg.dataset.test.batch_size,
-            shuffle=False,
-            collate_fn=collate_fn,
-            num_workers=self.data_cfg.dataset.test.num_workers,
-            drop_last=False,
-            pin_memory=self.data_cfg.dataset.pin_memory,
-            sampler=test_sampler,
-        )
-        return test_loader
+        return loaders if len(loaders) > 1 else loaders[0]
 
     def predict_dataloader(self):
         """Create prediction dataloader."""

@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="420" viewBox="0 0 980 420" role="img" aria-labelledby="title desc">
+  <title id="title">TAO PyTorch command runtime flow</title>
+  <desc id="desc">A TAO console command flows through setup entrypoints, the shared launcher, task scripts, Hydra config, and model, data, or export logic.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#4b5563"/>
+    </marker>
+    <style>
+      .box { fill: #f8fafc; stroke: #334155; stroke-width: 1.5; rx: 10; }
+      .core { fill: #e0f2fe; stroke: #0369a1; stroke-width: 1.7; rx: 10; }
+      .task { fill: #ecfdf5; stroke: #047857; stroke-width: 1.7; rx: 10; }
+      .out { fill: #fff7ed; stroke: #c2410c; stroke-width: 1.7; rx: 10; }
+      .label { font: 600 15px Arial, sans-serif; fill: #111827; }
+      .small { font: 12px Arial, sans-serif; fill: #374151; }
+      .path { stroke: #4b5563; stroke-width: 2; fill: none; marker-end: url(#arrow); }
+      .note { font: 12px Arial, sans-serif; fill: #475569; }
+    </style>
+  </defs>
+
+  <text x="490" y="32" text-anchor="middle" class="label">TAO PyTorch Runtime Flow</text>
+
+  <rect x="35" y="82" width="150" height="74" class="box"/>
+  <text x="110" y="112" text-anchor="middle" class="label">User command</text>
+  <text x="110" y="134" text-anchor="middle" class="small">depth_net export</text>
+
+  <rect x="225" y="82" width="150" height="74" class="box"/>
+  <text x="300" y="112" text-anchor="middle" class="label">setup.py</text>
+  <text x="300" y="134" text-anchor="middle" class="small">console_scripts</text>
+
+  <rect x="415" y="82" width="160" height="74" class="core"/>
+  <text x="495" y="106" text-anchor="middle" class="label">task entrypoint</text>
+  <text x="495" y="128" text-anchor="middle" class="small">get_subtasks</text>
+  <text x="495" y="145" text-anchor="middle" class="small">command parser</text>
+
+  <rect x="615" y="82" width="170" height="74" class="core"/>
+  <text x="700" y="106" text-anchor="middle" class="label">core.launch</text>
+  <text x="700" y="128" text-anchor="middle" class="small">GPU env, spec path</text>
+  <text x="700" y="145" text-anchor="middle" class="small">telemetry, subprocess</text>
+
+  <rect x="825" y="82" width="120" height="74" class="task"/>
+  <text x="885" y="112" text-anchor="middle" class="label">script</text>
+  <text x="885" y="134" text-anchor="middle" class="small">export.py</text>
+
+  <rect x="125" y="250" width="160" height="74" class="core"/>
+  <text x="205" y="276" text-anchor="middle" class="label">Hydra runner</text>
+  <text x="205" y="298" text-anchor="middle" class="small">schema + YAML</text>
+
+  <rect x="345" y="250" width="170" height="74" class="task"/>
+  <text x="430" y="276" text-anchor="middle" class="label">run_experiment</text>
+  <text x="430" y="298" text-anchor="middle" class="small">task-specific logic</text>
+
+  <rect x="575" y="230" width="150" height="64" class="out"/>
+  <text x="650" y="255" text-anchor="middle" class="label">train/eval</text>
+  <text x="650" y="276" text-anchor="middle" class="small">Trainer + PL module</text>
+
+  <rect x="575" y="316" width="150" height="64" class="out"/>
+  <text x="650" y="341" text-anchor="middle" class="label">export/infer</text>
+  <text x="650" y="362" text-anchor="middle" class="small">ONNX, outputs</text>
+
+  <rect x="785" y="270" width="150" height="74" class="out"/>
+  <text x="860" y="296" text-anchor="middle" class="label">artifacts</text>
+  <text x="860" y="318" text-anchor="middle" class="small">logs, checkpoints</text>
+  <text x="860" y="335" text-anchor="middle" class="small">models, results</text>
+
+  <path d="M185 119 H225" class="path"/>
+  <path d="M375 119 H415" class="path"/>
+  <path d="M575 119 H615" class="path"/>
+  <path d="M785 119 H825" class="path"/>
+  <path d="M885 156 V205 H205 V250" class="path"/>
+  <path d="M285 287 H345" class="path"/>
+  <path d="M515 287 H545 V262 H575" class="path"/>
+  <path d="M515 287 H545 V348 H575" class="path"/>
+  <path d="M725 262 H755 V307 H785" class="path"/>
+  <path d="M725 348 H755 V307 H785" class="path"/>
+
+  <text x="490" y="395" text-anchor="middle" class="note">The shared launcher handles command discovery, config handoff, GPU normalization, subprocess output, and telemetry.</text>
+</svg>

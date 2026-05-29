@@ -1,10 +1,10 @@
 # ODISE
 diffdist==0.1
-flake8-comprehensions==3.16.0
+flake8-comprehensions==3.17.0
 fvcore==0.1.5.post20221221
 iopath==0.1.9  # needs to be <0.1.10 for detectron2==0.6
-kornia==0.8.0
-kornia-rs==0.1.8
+kornia==0.8.2
+kornia-rs==0.1.10
 taming-transformers-rom1504==0.0.6
 yacs==0.1.8
 git+https://github.com/facebookresearch/detectron2.git

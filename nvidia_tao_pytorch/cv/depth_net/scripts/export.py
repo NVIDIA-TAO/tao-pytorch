@@ -1,16 +1,5 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """Script to export a DepthNet model to ONNX format."""
 
@@ -23,11 +12,101 @@ from nvidia_tao_pytorch.core.hydra.hydra_runner import hydra_runner
 from nvidia_tao_pytorch.core.tlt_logging import logging
 from nvidia_tao_pytorch.core.cookbooks.tlt_pytorch_cookbook import TLTPyTorchCookbook
 from nvidia_tao_pytorch.cv.depth_net.model.build_pl_model import get_pl_module
-from nvidia_tao_core.config.depth_net.default_config import ExperimentConfig
-from nvidia_tao_pytorch.ssl.mae.scripts.export import create_onnx_model
+from nvidia_tao_pytorch.config.depth_net.default_config import ExperimentConfig
 
 spec_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 AUTOCAST = torch.amp.autocast
+
+
+def _create_mono_onnx_model(
+    model,
+    input_shape,
+    input_batch_size,
+    output_path,
+    input_names,
+    output_names,
+    opset_version=17,
+    on_cpu=False,
+    dynamic_axis=False,
+    dynamic_hw=False,
+):
+    """Export mono depth model to ONNX with optional dynamic batch and H/W axes.
+
+    Local fork of `nvidia_tao_pytorch.ssl.mae.scripts.export.create_onnx_model`
+    so other models keep batch-only dynamic axes.
+
+    Args:
+        model (nn.Module): mono depth model to trace.
+        input_shape (list[int]): [C, H, W] of single sample.
+        input_batch_size (int): batch dim of dummy input.
+        output_path (str): destination ONNX path.
+        input_names (list[str]): ONNX input tensor names.
+        output_names (list[str]): ONNX output tensor names.
+        opset_version (int): ONNX opset target.
+        on_cpu (bool): True traces on CPU; False on CUDA.
+        dynamic_axis (bool): True marks batch axis dynamic.
+        dynamic_hw (bool): True additionally marks H/W axes dynamic.
+
+    Returns:
+        None. Writes ONNX file at output_path.
+    """
+    model.eval()
+    if not on_cpu:
+        model.cuda()
+    model.float()
+
+    if input_shape[0] not in [1, 3]:
+        raise ValueError(
+            f"Invalid input channel: {input_shape[0]}. Only 1 or 3 are supported."
+        )
+
+    if os.path.exists(output_path):
+        raise ValueError(
+            f"Default onnx file {output_path} already exists"
+        )
+
+    if on_cpu:
+        dummy_input = torch.ones(input_batch_size, *input_shape, device='cpu').float()
+    else:
+        dummy_input = torch.ones(input_batch_size, *input_shape, device='cuda').float()
+
+    dynamic_axes = None
+    if dynamic_axis or dynamic_hw:
+        dynamic_axes = {}
+        for input_name in input_names:
+            axes = {}
+            if dynamic_axis:
+                axes[0] = 'batch_size'
+            if dynamic_hw:
+                axes[2] = 'height'
+                axes[3] = 'width'
+            dynamic_axes[input_name] = axes
+        # Mono depth output is 3D (B, H, W) — see RelativeDepthAnythingV2.forward
+        # `depth.squeeze(1)` at dpt.py:380. So height is axis 1, width axis 2.
+        for output_name in output_names:
+            out_axes = {}
+            if dynamic_axis:
+                out_axes[0] = 'batch_size'
+            if dynamic_hw:
+                out_axes[1] = 'height'
+                out_axes[2] = 'width'
+            dynamic_axes[output_name] = out_axes
+
+    torch.onnx.export(
+        model,
+        dummy_input,
+        output_path,
+        export_params=True,
+        opset_version=opset_version,
+        do_constant_folding=True,
+        input_names=input_names,
+        output_names=output_names,
+        dynamic_axes=dynamic_axes,
+    )
+
+    logging.info("Verifying ONNX model")
+    onnx_model = onnx.load(output_path)
+    onnx.checker.check_model(onnx_model)
 
 
 # Load experiment specification, additially using schema for validation/retrieving the default values.
@@ -69,7 +148,8 @@ def mono_onnx_export(model,
                      on_cpu,
                      opset_version,
                      valid_iters=22,
-                     dynamic_axis=False):
+                     dynamic_axis=True,
+                     dynamic_hw=False):
     """
     Exports a monocular depth estimation model to the ONNX format.
 
@@ -104,8 +184,25 @@ def mono_onnx_export(model,
     """
     input_names = ['images']
     output_names = ['outputs']
+    # Mono export covers RelativeDepthAnything and MetricDepthAnything, both
+    # of which use a DINOv2 ViT-L backbone whose positional embedding
+    # interpolation captures the trace-time patch count as a Python int.
+    # torch.onnx.export bakes that int as a constant, so a dynamic-H/W engine
+    # would silently produce a wrong-shape pos-embed at runtime. Ignore the
+    # request with a warning and fall back to static H/W.
+    if dynamic_hw:
+        import warnings
+        warnings.warn(
+            "dynamic_hw=True is unsafe for mono export: the DINOv2 backbone "
+            "constant-folds the trace patch count into the positional "
+            "embedding, so a dynamic-H/W engine would silently produce a "
+            "wrong-shape pos-embed at runtime. Falling back to static H/W. "
+            "Use dynamic_hw=True only with FastFoundationStereo.",
+            stacklevel=2,
+        )
+        dynamic_hw = False
     try:
-        create_onnx_model(
+        _create_mono_onnx_model(
             model,
             input_shape,
             input_batch_size,
@@ -114,6 +211,7 @@ def mono_onnx_export(model,
             output_names,
             on_cpu=on_cpu,
             dynamic_axis=dynamic_axis,
+            dynamic_hw=dynamic_hw,
             opset_version=opset_version,
         )
         logging.info("ONNX model saved to {output_file}".format(output_file=output_file))
@@ -129,15 +227,28 @@ def stereo_onnx_export(model,
                        on_cpu,
                        opset_version,
                        valid_iters=22,
-                       dynamic_axis=True):
+                       dynamic_axis=False,
+                       dynamic_hw=False):
     """
     Exports a stereo depth estimation model to the ONNX format.
 
-    This function prepares a dummy input tensor and then uses `torch.onnx.export` to
-    convert the PyTorch model into an ONNX representation. The exported model
-    includes dynamic axes for batch size, height, and width, making it
-    flexible for different input sizes at inference time. After export, it
+    This function prepares dummy input tensors and then uses `torch.onnx.export` to
+    convert the PyTorch model into an ONNX representation. After export, it
     verifies the integrity of the generated ONNX file using `onnx.checker.check_model`.
+
+    Two independent flags control which axes are dynamic:
+
+    * `dynamic_axis=True` marks the batch axis dynamic. Set via
+      `export.batch_size: -1` in the spec.
+    * `dynamic_hw=True` additionally marks the height and width axes
+      dynamic. Set via `export.dynamic_hw: true`.
+
+    `dynamic_hw=True` is safe only for FastFoundationStereo (EdgeNeXt-only
+    backbone, no positional embeddings). For FoundationStereo and the mono
+    path the DINOv2 backbone constant-folds the trace patch count into
+    pos-embed shape arithmetic, and a dynamic-H/W engine built from such
+    an ONNX silently produces a wrong-shape pos-embed at runtime; this
+    helper warns and falls back to static H/W in that case.
 
     Args:
         model (torch.nn.Module): The PyTorch stereo depth estimation model to be exported.
@@ -148,31 +259,27 @@ def stereo_onnx_export(model,
                                      Example: `[3, 256, 256]` for a color image
                                      of size 256x256.
         input_batch_size (int): The batch size to be used for the dummy input.
-                                This value is used to set the first dimension of the
-                                input tensors, but the exported ONNX model will have
-                                a dynamic batch size.
+                                With `dynamic_axis=True` the exported ONNX accepts
+                                any batch size at runtime.
         output_file (str): The path to the output ONNX file (e.g., 'model.onnx').
         on_cpu (bool): If True, the dummy input tensors will be created on the CPU.
                        If False, they will be created on the GPU (CUDA).
         opset_version (int): The ONNX operator set version to use for the export.
                              A higher version may support more recent operations.
+        valid_iters (int): Number of GRU refinement iterations baked into the
+                           exported graph.
+        dynamic_axis (bool): If True, mark the batch axis as dynamic.
+        dynamic_hw (bool): If True, additionally mark the height and width
+                           axes as dynamic. Honored only for
+                           FastFoundationStereo; emits a warning and falls
+                           back to static H/W otherwise.
 
     Raises:
         Exception: If the ONNX export or the subsequent model check fails,
                    an exception is raised, providing details about the error.
-
-    Notes:
-        - The function uses `AUTOCAST('cuda', enabled=True)` to ensure the dummy
-          inputs are created with mixed-precision if available, which can
-          be important for models trained with `torch.autocast`.
-        - The `dynamic_axes` argument is crucial for creating a model that
-          can handle variable-sized inputs, which is a common requirement for
-          computer vision models. It maps the dimensions of the input/output
-          tensors to descriptive names like 'batch_size', 'height', and 'width'.
-        - The dummy input arguments (`args=(dummy_input1, dummy_input2, 4, ...)`
-          are specific to the model's forward method. This structure should be
-          modified if the model's signature changes.
     """
+    import warnings
+
     input_names = ['left_image', 'right_image', 'iters',
                    'flow_init', 'test_mode', 'low_mem', 'init_disp']
     output_names = ["disparity"]
@@ -185,13 +292,35 @@ def stereo_onnx_export(model,
         else:
             dummy_input1 = torch.rand(input_shape, device='cuda')
             dummy_input2 = torch.rand(input_shape, device='cuda')
+    # Honor dynamic_hw only for FastFoundationStereo. The mono path and
+    # FoundationStereo share a DINOv2 backbone whose positional embedding
+    # uses the trace-time patch count as a Python int — torch.onnx.export
+    # bakes that int as a constant, so a dynamic-H/W engine then mismatches
+    # the runtime patch tokens. FastFoundationStereo uses EdgeNeXt only,
+    # which is fully convolutional and has no pos-embed.
+    model_class = type(model).__name__
+    if dynamic_hw and model_class != 'FastFoundationStereo':
+        warnings.warn(
+            f"dynamic_hw=True is unsafe for model class {model_class!r}: the "
+            "DINOv2 backbone constant-folds the trace patch count into the "
+            "positional embedding, so a dynamic-H/W engine would silently "
+            "produce a wrong-shape pos-embed at runtime. Falling back to "
+            "static H/W. Use dynamic_hw=True only with FastFoundationStereo.",
+            stacklevel=2,
+        )
+        dynamic_hw = False
+
     try:
-        # Only use dynamic_axes if dynamic_axis is True
-        axes_config = None
+        axes_config = {}
         if dynamic_axis:
-            axes_config = {'left_image': {0: 'batch_size', 2: 'height', 3: 'width'},
-                           'right_image': {0: 'batch_size', 2: 'height', 3: 'width'},
-                           'disparity': {0: 'batch_size'}}
+            for t in input_names[:2] + output_names:
+                axes_config.setdefault(t, {})[0] = 'batch_size'
+        if dynamic_hw:
+            for t in input_names[:2] + output_names:
+                axes_config.setdefault(t, {})[2] = 'height'
+                axes_config.setdefault(t, {})[3] = 'width'
+        if not axes_config:
+            axes_config = None
 
         torch.onnx.export(model,
                           args=(dummy_input1, dummy_input2, valid_iters, None, True, False, None),
@@ -201,7 +330,8 @@ def stereo_onnx_export(model,
                           output_names=output_names,
                           do_constant_folding=True,
                           verbose=True,
-                          dynamic_axes=axes_config)
+                          dynamic_axes=axes_config,
+                          dynamo=False)
 
         # Verify ONNX exported correctly.
         loaded_model = onnx.load(output_file)
@@ -224,7 +354,8 @@ def onnx_model_export(model_type):
     onnx_export_method = {
         'metricdepthanything': mono_onnx_export,
         'relativedepthanything': mono_onnx_export,
-        'foundationstereo': stereo_onnx_export}
+        'foundationstereo': stereo_onnx_export,
+        'fastfoundationstereo': stereo_onnx_export}
 
     if model_type.lower() not in onnx_export_method:
         raise (NotImplementedError(f'{model_type} does not have onnx export implemented!'))
@@ -297,8 +428,18 @@ def run_export(experiment_config: ExperimentConfig) -> None:
         input_batch_size = batch_size
         dynamic_axis = False
 
+    # Optional dynamic H/W on the mono ONNX. Read via OmegaConf .get with a
+    # False default so existing specs (and the schema) remain unchanged;
+    # activate via the spec field `export.dynamic_hw: True` (or via Hydra
+    # override `+export.dynamic_hw=True`).
+    try:
+        dynamic_hw = bool(experiment_config.export.get("dynamic_hw", False))
+    except Exception:
+        dynamic_hw = False
+
     logging.info(f"Input batch size: {input_batch_size}")
     logging.info(f"Dynamic axis: {dynamic_axis}")
+    logging.info(f"Dynamic H/W: {dynamic_hw}")
 
     device = 'cpu'
     if not on_cpu:
@@ -315,22 +456,44 @@ def run_export(experiment_config: ExperimentConfig) -> None:
         os.makedirs(output_root)
 
     # Load model
-    pl_model = get_pl_module(experiment_config).load_from_checkpoint(
-        model_path,
-        experiment_spec=experiment_config,
-        export=True,  # to use regular Attention instead of Memory-efficient Attention for export
-        map_location=device
-    )
+    # FFS commercial ckpt is a research-pickled nn.Module (not a PL ckpt).
+    # Route it through load_ffs_pretrained so we can export directly from
+    # the bp2 raw weights without first detouring through a PL-format
+    # wrapper. Mirrors scripts/{inference,evaluate,train}.py.
+    if experiment_config.model.model_type == 'FastFoundationStereo':
+        from nvidia_tao_pytorch.cv.depth_net.model.stereo_depth.fast_foundation_stereo.ckpt_utils import (
+            load_ffs_pretrained,
+        )
+        from nvidia_tao_pytorch.cv.depth_net.model.build_pl_model import build_pl_model
+        pl_model = build_pl_model(experiment_config, export=True)
+        result = load_ffs_pretrained(pl_model.model, model_path)
+        assert not result['missing'], (
+            f"FFS ckpt missing keys: {result['missing']}")
+        assert not result['unexpected'], (
+            f"FFS ckpt unexpected keys: {result['unexpected']}")
+        pl_model = pl_model.to(device)
+    else:
+        pl_model = get_pl_module(experiment_config).load_from_checkpoint(
+            model_path,
+            experiment_spec=experiment_config,
+            export=True,  # to use regular Attention instead of Memory-efficient Attention for export
+            map_location=device
+        )
 
     model = pl_model.model
-    onnx_model_export(experiment_config.model.model_type)(model,
-                                                          input_shape,
-                                                          input_batch_size,
-                                                          output_file,
-                                                          on_cpu,
-                                                          opset_version,
-                                                          valid_iters=valid_iters,
-                                                          dynamic_axis=dynamic_axis)
+    export_fn = onnx_model_export(experiment_config.model.model_type)
+    export_kwargs = dict(
+        valid_iters=valid_iters,
+        dynamic_axis=dynamic_axis,
+        dynamic_hw=dynamic_hw,
+    )
+    export_fn(model,
+              input_shape,
+              input_batch_size,
+              output_file,
+              on_cpu,
+              opset_version,
+              **export_kwargs)
 
 
 if __name__ == "__main__":

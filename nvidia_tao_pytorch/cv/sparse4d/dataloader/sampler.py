@@ -1,24 +1,34 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """Samplers for Sparse4D dataset."""
+
+import time
+import itertools
 
 import numpy as np
 import torch
 import torch.distributed as dist
 from torch.utils.data.sampler import Sampler
-import itertools
+
+from nvidia_tao_pytorch.core.tlt_logging import logging
+
+
+def _build_group_map(flag, num_groups):
+    """Build group_idx -> [sample_idxs] mapping using argsort+split (O(n log n))."""
+    sorted_indices = np.argsort(flag, kind='stable')
+    sorted_flags = flag[sorted_indices]
+    split_points = np.where(np.diff(sorted_flags) != 0)[0] + 1
+    groups_split = np.split(sorted_indices, split_points)
+    unique_groups = np.unique(flag)
+    group_to_samples = {
+        group_idx: groups_split[i].tolist()
+        for i, group_idx in enumerate(unique_groups)
+    }
+    return {
+        group_idx: group_to_samples.get(group_idx, [])
+        for group_idx in range(num_groups)
+    }
 
 
 class GroupInBatchSampler(Sampler):
@@ -56,22 +66,20 @@ class GroupInBatchSampler(Sampler):
         self.sequence_flip_prob = sequence_flip_prob
 
         self.size = len(self.dataset)
+
+        assert hasattr(self.dataset, "flag")
         self.flag = self.dataset.flag
+
+        t0 = time.time()
         self.group_sizes = np.bincount(self.flag)
         self.groups_num = len(self.group_sizes)
         self.global_batch_size = batch_size * world_size
 
-        # Validate configuration
         assert self.groups_num >= self.global_batch_size, \
             f"groups_num {self.groups_num} should be greater or equal than global_batch_size {self.global_batch_size}"
 
-        # Map group indices to dataset sample indices
-        self.group_idx_to_sample_idxs = {
-            group_idx: np.where(self.flag == group_idx)[0].tolist()
-            for group_idx in range(self.groups_num)
-        }
+        self.group_idx_to_sample_idxs = _build_group_map(self.flag, self.groups_num)
 
-        # For same scene in batch configuration
         if hasattr(self.dataset, 'same_scene_in_batch') and self.dataset.same_scene_in_batch:
             assert hasattr(self.dataset, 'scene_flag'), "scene_flag is not present in the dataset"
             self.scene_flag = self.dataset.scene_flag
@@ -79,27 +87,21 @@ class GroupInBatchSampler(Sampler):
             self.scenes_num = len(self.scene_sizes)
             self.sequences_split_num = self.dataset.sequences_split_num
 
-            # Check if we have enough sequences
-            assert self.sequences_split_num >= self.batch_size, f"sequences_split_num: {self.sequences_split_num} should be greater or equal than batch_size: {self.batch_size}"
+            assert self.sequences_split_num >= self.batch_size, \
+                f"sequences_split_num: {self.sequences_split_num} should be >= batch_size: {self.batch_size}"
 
-            # Map scene indices to sample indices and group indices
-            self.scene_idx_to_sample_idxs = {
-                scene_idx: np.where(self.scene_flag == scene_idx)[0].tolist()
-                for scene_idx in range(self.scenes_num)
-            }
+            self.scene_idx_to_sample_idxs = _build_group_map(self.scene_flag, self.scenes_num)
 
             self.scene_idx_to_group_idxs = {
                 scene_idx: sorted(list(set(self.flag[self.scene_idx_to_sample_idxs[scene_idx]])))
                 for scene_idx in range(self.scenes_num)
             }
 
-            # Setup scene indices per rank
             self.scene_indices_per_rank_idx = [
                 self._scene_indices_per_rank_idx(rank_idx)
                 for rank_idx in range(self.world_size)
             ]
 
-            # Setup group indices per scene and local sample idx
             self.group_indices_per_scene_and_local_sample_idx = [
                 [
                     self._group_indices_per_scene_and_local_sample_idx(scene_idx, local_sample_idx)
@@ -108,7 +110,6 @@ class GroupInBatchSampler(Sampler):
                 for scene_idx in range(self.scenes_num)
             ]
         else:
-            # Setup group indices per global sample idx
             self.group_indices_per_global_sample_idx = [
                 self._group_indices_per_global_sample_idx(
                     self.rank * self.batch_size + local_sample_idx
@@ -116,9 +117,13 @@ class GroupInBatchSampler(Sampler):
                 for local_sample_idx in range(self.batch_size)
             ]
 
-        # Buffer for each local sample
         self.buffer_per_local_sample = [[] for _ in range(self.batch_size)]
         self.aug_per_local_sample = [None for _ in range(self.batch_size)]
+
+        logging.info(
+            f"GroupInBatchSampler: built {self.groups_num} groups over {self.size} samples "
+            f"in {time.time() - t0:.2f}s"
+        )
 
     def _sync_random_seed(self, seed=None):
         """Synchronize random seed across distributed processes."""
@@ -255,6 +260,59 @@ class GroupInBatchSampler(Sampler):
                 )
 
             yield curr_batch
+
+    def update_from_dataset(self):
+        """Refresh internal state after the dataset has been resampled.
+
+        Must be called whenever dataset.data_infos, dataset.flag, or
+        dataset.scene_flag are rebuilt (e.g. by resample_pkls).
+        """
+        t0 = time.time()
+        self.size = len(self.dataset)
+        self.flag = self.dataset.flag
+        self.group_sizes = np.bincount(self.flag)
+        self.groups_num = len(self.group_sizes)
+
+        self.group_idx_to_sample_idxs = _build_group_map(self.flag, self.groups_num)
+
+        if hasattr(self.dataset, 'same_scene_in_batch') and self.dataset.same_scene_in_batch:
+            self.scene_flag = self.dataset.scene_flag
+            self.scene_sizes = np.bincount(self.scene_flag)
+            self.scenes_num = len(self.scene_sizes)
+
+            self.scene_idx_to_sample_idxs = _build_group_map(self.scene_flag, self.scenes_num)
+
+            self.scene_idx_to_group_idxs = {
+                scene_idx: sorted(list(set(self.flag[self.scene_idx_to_sample_idxs[scene_idx]])))
+                for scene_idx in range(self.scenes_num)
+            }
+
+            self.scene_indices_per_rank_idx = [
+                self._scene_indices_per_rank_idx(rank_idx)
+                for rank_idx in range(self.world_size)
+            ]
+            self.group_indices_per_scene_and_local_sample_idx = [
+                [
+                    self._group_indices_per_scene_and_local_sample_idx(scene_idx, local_sample_idx)
+                    for local_sample_idx in range(self.batch_size)
+                ]
+                for scene_idx in range(self.scenes_num)
+            ]
+        else:
+            self.group_indices_per_global_sample_idx = [
+                self._group_indices_per_global_sample_idx(
+                    self.rank * self.batch_size + local_sample_idx
+                )
+                for local_sample_idx in range(self.batch_size)
+            ]
+
+        self.buffer_per_local_sample = [[] for _ in range(self.batch_size)]
+        self.aug_per_local_sample = [None for _ in range(self.batch_size)]
+
+        logging.info(
+            f"GroupInBatchSampler: rebuilt {self.groups_num} groups over {self.size} samples "
+            f"in {time.time() - t0:.2f}s"
+        )
 
     def __len__(self):
         """Get dataset length."""

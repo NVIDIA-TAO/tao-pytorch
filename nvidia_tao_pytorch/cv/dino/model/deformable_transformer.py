@@ -1,16 +1,5 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """Deformable Transformer functions. """
 
@@ -357,6 +346,9 @@ class DeformableTransformer(nn.Module):
                                     ref_token_index=enc_topk_proposals,  # bs, nq
                                     ref_token_coord=enc_refpoint_embed,  # bs, nq, 4
                                     )
+        # Expose encoder outputs for downstream use (e.g. CoDETR collab heads)
+        self.enc_memory = memory
+        self.enc_spatial_shapes = spatial_shapes
         #########################################################
         # End Encoder
         # - memory: bs, \sum{hw}, c

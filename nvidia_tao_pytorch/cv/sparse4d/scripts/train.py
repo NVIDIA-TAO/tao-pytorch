@@ -1,16 +1,5 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """Train Sparse4D model."""
 
@@ -22,8 +11,9 @@ from nvidia_tao_pytorch.core.decorators.workflow import monitor_status
 from nvidia_tao_pytorch.core.hydra.hydra_runner import hydra_runner
 from nvidia_tao_pytorch.core.initialize_experiments import initialize_train_experiment
 from nvidia_tao_pytorch.core.tlt_logging import obfuscate_logs, logging
-from nvidia_tao_core.config.sparse4d.default_config import ExperimentConfig
+from nvidia_tao_pytorch.config.sparse4d.default_config import ExperimentConfig
 from nvidia_tao_pytorch.cv.sparse4d.dataloader.pl_sparse4d_data_module import Sparse4DDataModule
+from nvidia_tao_pytorch.cv.sparse4d.dataloader.callbacks import PklResampleCallback
 from nvidia_tao_pytorch.cv.sparse4d.model.sparse4d_pl_model import Sparse4DPlModel
 from nvidia_tao_pytorch.cv.sparse4d.utils.misc import load_pretrained_weights
 
@@ -76,6 +66,12 @@ def run_experiment(experiment_config, key):
 
     lr_monitor = LearningRateMonitor(logging_interval='step')
 
+    callbacks = [lr_monitor]
+    pkl_sample_size = experiment_config.dataset.get("pkl_sample_size", 0)
+    if pkl_sample_size > 0:
+        callbacks.append(PklResampleCallback(num_iters_per_epoch=num_iters_per_epoch))
+        logging.info(f"PklResampleCallback enabled (interval={num_iters_per_epoch} steps)")
+
     trainer = Trainer(
         **trainer_kwargs,
         num_nodes=num_nodes,
@@ -88,7 +84,7 @@ def run_experiment(experiment_config, key):
         precision=precision,
         use_distributed_sampler=False,
         sync_batchnorm=sync_batchnorm,
-        callbacks=[lr_monitor],
+        callbacks=callbacks,
         gradient_clip_val=grad_clip,
     )
 

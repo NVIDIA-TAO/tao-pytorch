@@ -1,44 +1,10 @@
-# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
-"""SigLIP2 backbone module.
-
-This module provides SigLIP2 implementations for the TAO PyTorch framework.
-SigLIP2 is Google's improved vision-language model that supports both image
-classification and text encoding for zero-shot classification.
-
-Key Features:
-- Support for multiple SigLIP2 model variants (SO400M, Giant)
-- Dynamic resolution support via NaFlex
-- Text encoding with canonicalization
-- Zero-shot classification support
-- Integration with TAO backbone framework
-
-Classes:
-    SigLIP2Wrapper: SigLIP2 model wrapper with TAO integration
-    WrappedTokenizer: Tokenizer wrapper with text canonicalization
-
-Functions:
-    siglip2_so400m_patch16_512: SigLIP2 SO400M with 512x512 images
-    siglip2_so400m: SigLIP2 SO400M with NaFlex (flexible resolution)
-
-References:
-    - https://huggingface.co/google/siglip2-so400m-patch16-naflex
-    - https://huggingface.co/google/siglip2-giant-opt-patch16-384
-"""
-
-from typing import Dict, List
+"""SigLIP2 backbone module."""
+import inspect
+import string
+from typing import Dict, List, Optional, Tuple
 
 import torch
 from torch import nn
@@ -48,61 +14,61 @@ from transformers import AutoModel, AutoProcessor
 
 from nvidia_tao_pytorch.cv.backbone_v2 import BACKBONE_REGISTRY
 from nvidia_tao_pytorch.cv.backbone_v2.backbone_base import BackboneBase
-from nvidia_tao_pytorch.cv.backbone_v2.text_utils import canonicalize_text
 
 
 class SigLIP2Wrapper(BackboneBase):
-    """SigLIP2 model wrapper with TAO integration.
+    """Wrapper exposing a HuggingFace SigLIP2 model as a TAO ``BackboneBase``.
 
-    This class provides a wrapper around Google's SigLIP2 models with additional
-    functionality for integration with the TAO PyTorch framework. It supports
-    both vision encoding and text encoding for multimodal applications.
-
-    Key Features:
-    - Dynamic image size support via NaFlex
-    - Text encoding with canonicalization
-    - Zero-shot classification support
-    - Integration with TAO backbone framework
-    - Support for activation checkpointing and layer freezing
-
-    Args:
-        clip_model: The underlying SigLIP2 model from HuggingFace.
-        tokenizer: Tokenizer for text encoding.
-        num_classes (int): Number of classes for classification head. Default: 0.
-        patch_size (int): Patch size for vision encoder. Default: 16.
-        is_dynamic (bool): Whether to use dynamic resolution (NaFlex). Default: True.
-        in_chans (int): Number of input image channels. Default: 3.
-        activation_checkpoint (bool): Whether to use activation checkpointing.
-            Default: False.
-        freeze_at: List of keys corresponding to the stages or layers to freeze.
-            Default: None.
-        freeze_norm (bool): If True, all normalization layers will be frozen.
-            Default: False.
-        head_init_scale (float): Initialization scale for the head. Default: 1.0.
-        **kwargs: Additional arguments.
-
-    Attributes:
-        inner: The underlying SigLIP2 model.
-        tokenizer: The wrapped tokenizer.
-        num_features (int): Number of features from the vision encoder.
-        head (nn.Module): Classification head (Linear layer or Identity).
+    Supports both fixed-resolution and ``naflex`` (dynamic-resolution) SigLIP2
+    variants. When ``is_dynamic`` is ``True``, inputs are unfolded into per-patch
+    tokens with an attention mask and spatial shapes; otherwise inputs are passed
+    directly as ``pixel_values``. The wrapper also exposes the SigLIP2 text tower
+    via :meth:`encode_text` and the standard logit scale/bias used at zero-shot
+    inference time via :meth:`zero_shot_postproc`.
     """
 
-    def __init__(
-        self,
-        clip_model,
-        tokenizer,
-        num_classes: int = 0,
-        patch_size: int = 16,
-        is_dynamic: bool = True,
-        in_chans: int = 3,
-        activation_checkpoint=False,
-        freeze_at=None,
-        freeze_norm=False,
-        head_init_scale=1.0,
-        **kwargs,
-    ):
-        """Initialize the SigLIP2Wrapper."""
+    # Pretrained weights are loaded inside ``AutoModel.from_pretrained`` (either
+    # from the HF hub or from a local snapshot directory), so the generic
+    # post-construction state-dict load in ``build_model`` is skipped.
+    _consumes_pretrained_path = True
+
+    def __init__(self,
+                 clip_model,
+                 tokenizer,
+                 num_classes: int = 0,
+                 patch_size: int = 16,
+                 is_dynamic: bool = True,
+                 in_chans: int = 3,
+                 activation_checkpoint=False,
+                 freeze_at=None,
+                 freeze_norm=False,
+                 head_init_scale=1.0,
+                 **kwargs,
+                 ):
+        """Initialize the SigLIP2 wrapper.
+
+        Args:
+            clip_model: HuggingFace SigLIP2 model containing ``vision_model`` and
+                ``text_model`` submodules.
+            tokenizer: Callable tokenizer (e.g. :class:`WrappedTokenizer`) used by
+                :meth:`encode_text`.
+            num_classes (int, optional): Number of classes for the linear head;
+                ``0`` means no head (Identity). Defaults to ``0``.
+            patch_size (int, optional): Spatial patch size of the vision tower.
+                Defaults to ``16``.
+            is_dynamic (bool, optional): If ``True``, run the vision tower in
+                ``naflex`` (dynamic-resolution) mode with per-patch tokens.
+                Defaults to ``True``.
+            in_chans (int, optional): Number of input channels. Defaults to ``3``.
+            activation_checkpoint (bool, optional): Forwarded to ``BackboneBase``.
+                Defaults to ``False``.
+            freeze_at: Forwarded to ``BackboneBase``. Defaults to ``None``.
+            freeze_norm (bool, optional): Forwarded to ``BackboneBase``.
+                Defaults to ``False``.
+            head_init_scale (float, optional): Multiplier applied to the head
+                weight and bias at initialization. Defaults to ``1.0``.
+            **kwargs: Unused, accepted for compatibility with backbone factories.
+        """
         super().__init__(
             in_chans=in_chans,
             num_classes=num_classes,
@@ -116,11 +82,7 @@ class SigLIP2Wrapper(BackboneBase):
         self._patch_size = patch_size
         self._is_dynamic = is_dynamic
         self.num_features = self.inner.vision_model.config.hidden_size
-        # Ensure vision model returns dict outputs by default so we don't
-        # need to pass return_dict=True (which breaks ONNX tracing).
-        self.inner.vision_model.config.return_dict = True
         self.register_buffer('mask', torch.ones(1, 1, dtype=torch.int32))
-
         if num_classes > 0:
             self.head = nn.Linear(self.num_features, num_classes)
             self.head.weight.data.mul_(head_init_scale)
@@ -130,15 +92,11 @@ class SigLIP2Wrapper(BackboneBase):
 
     @property
     def patch_size(self):
-        """Return the patch size."""
+        """Spatial patch size of the SigLIP2 vision tower."""
         return self._patch_size
 
     def get_stage_dict(self):
-        """Get the stage dictionary for feature extraction.
-
-        Returns:
-            dict: Dictionary mapping stage indices to model components.
-        """
+        """Get the stage dictionary."""
         stage_dict = {0: self.inner.vision_model.embeddings}
         for i, block in enumerate(self.inner.vision_model.encoder.layers, start=1):
             stage_dict[i] = block
@@ -158,117 +116,96 @@ class SigLIP2Wrapper(BackboneBase):
 
         Args:
             num_classes (int): New number of classes for classification.
-            global_pool (str, optional): Global pooling type (unused).
+            global_pool (str, optional): Global pooling type (unused in current implementation).
                 Defaults to "".
         """
         self.num_classes = num_classes
-        self.head = (
-            nn.Linear(self.num_features, num_classes)
-            if num_classes > 0
-            else nn.Identity()
-        )
+        self.head = nn.Linear(self.num_features, num_classes) if num_classes > 0 else nn.Identity()
 
-    def forward_pre_logits(self, x: torch.Tensor) -> torch.Tensor:
+    def forward_pre_logits(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Forward pass through the backbone, excluding the head.
 
         Args:
-            x (torch.Tensor): Input tensor of shape (B, C, H, W).
+            x (Tensor): Input tensor.
 
         Returns:
-            torch.Tensor: Summary tensor of shape (B, D).
+            summary (Tensor): Summary tensor.
+            features (Tensor): Features tensor.
         """
         summary = self.forward(x, return_features=False, return_logits=True)
         return summary
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        return_features: bool = False,
-        return_logits: bool = False
-    ):
-        """Forward pass through the vision encoder.
+    def forward(self, x: torch.Tensor, return_features: bool = False, return_logits: bool = False):
+        """Run the SigLIP2 vision tower and optionally return spatial features or head logits.
 
         Args:
-            x (torch.Tensor): Input tensor of shape (B, C, H, W).
-            return_features (bool): If True, also return spatial features.
-                Default: False.
-            return_logits (bool): If True, return pooled features without head.
-                Default: False.
+            x (Tensor): Input image tensor of shape ``[B, C, H, W]``.
+            return_features (bool, optional): If ``True``, also return the spatial
+                feature map reshaped to ``[B, C, H, W]``. Defaults to ``False``.
+            return_logits (bool, optional): If ``True`` (and ``return_features`` is
+                ``False``), return the pooled summary instead of head logits.
+                Defaults to ``False``.
 
         Returns:
-            If return_features is True:
-                Tuple[torch.Tensor, torch.Tensor]: (summary, features)
-            If return_logits is True:
-                torch.Tensor: Pooled features of shape (B, D).
-            Otherwise:
-                torch.Tensor: Classification logits of shape (B, num_classes).
+            Tensor or Tuple[Tensor, Tensor]:
+                - ``(summary, features)`` when ``return_features=True``.
+                - ``summary`` when ``return_logits=True``.
+                - ``head(summary)`` otherwise.
         """
         out_h = x.shape[-2] // self._patch_size
         out_w = x.shape[-1] // self._patch_size
 
-        extra = {}
+        extra = dict()
 
         if self._is_dynamic:
-            pixel_values = rearrange(
-                x,
-                'b c (h p1) (w p2) -> b (h w) (p1 p2 c)',
-                p1=self._patch_size,
-                p2=self._patch_size,
-                h=out_h,
-                w=out_w
-            )
+            pixel_values = rearrange(x, 'b c (h p1) (w p2) -> b (h w) (p1 p2 c)',
+                                     p1=self._patch_size, p2=self._patch_size,
+                                     h=out_h, w=out_w)
             mask = self.mask.expand(*pixel_values.shape[:2])
-            shapes = torch.tensor(
-                [(out_h, out_w)] * pixel_values.shape[0],
-                dtype=torch.int64,
-                device=x.device
-            )
+            shapes = torch.tensor([(out_h, out_w)] * pixel_values.shape[0], dtype=torch.int64, device=x.device)
+
             extra = dict(attention_mask=mask, spatial_shapes=shapes)
         else:
             pixel_values = x
-
-        output = self.inner.vision_model(
-            pixel_values=pixel_values,
-            **extra
-        )
+        sig = inspect.signature(self.inner.vision_model.forward)
+        if 'return_dict' in sig.parameters:
+            extra['return_dict'] = True
+        output = self.inner.vision_model(pixel_values=pixel_values, **extra)
 
         summary = output.pooler_output
-
         if return_features:
             features = output.last_hidden_state
             features = rearrange(features, 'b (h w) c -> b c h w', h=out_h, w=out_w)
             return summary, features
-        elif return_logits:
-            return summary
         else:
-            return self.head(summary)
+            if return_logits:
+                return summary
+            else:
+                return self.head(summary)
 
     def forward_feature_pyramid(self, x: torch.Tensor):
-        """Forward pass to extract feature maps.
+        """Return the spatial feature map ``[B, C, H, W]`` from the SigLIP2 vision tower.
 
         Args:
-            x (torch.Tensor): Input tensor of shape (B, C, H, W).
+            x (Tensor): Input image tensor.
 
         Returns:
-            torch.Tensor: Feature maps of shape (B, C, H, W).
+            Tensor: Spatial feature map.
         """
         _, features = self.forward(x, return_features=True, return_logits=False)
         return features
 
-    def encode_text(
-        self,
-        inputs: Dict[str, torch.Tensor],
-        normalize: bool = False
-    ) -> torch.Tensor:
-        """Encode text inputs using the text encoder.
+    def encode_text(self, inputs: Dict[str, torch.Tensor], normalize: bool = False):
+        """Encode tokenized text inputs using the SigLIP2 text tower.
 
         Args:
-            inputs (Dict[str, torch.Tensor]): Dictionary with 'input_ids' and
-                'attention_mask' tensors.
-            normalize (bool): Whether to L2-normalize the output. Default: False.
+            inputs (Dict[str, Tensor]): Tokenizer output (``input_ids``,
+                ``attention_mask``, ...).
+            normalize (bool, optional): If ``True``, L2-normalize the pooled
+                token embedding along the last dim. Defaults to ``False``.
 
         Returns:
-            torch.Tensor: Text features of shape (B, D).
+            Tensor: Pooled text embedding.
         """
         output = self.inner.text_model(**inputs, return_dict=True)
         token = output.pooler_output
@@ -278,174 +215,157 @@ class SigLIP2Wrapper(BackboneBase):
 
         return token
 
-    def zero_shot_postproc(self, logits: torch.Tensor) -> torch.Tensor:
-        """Apply zero-shot post-processing (logit scale and bias).
+    def zero_shot_postproc(self, logits: torch.Tensor):
+        """Apply SigLIP2's learned ``logit_scale``/``logit_bias`` to similarity logits.
 
         Args:
-            logits (torch.Tensor): Raw logits from image-text similarity.
+            logits (Tensor): Image-text similarity logits.
 
         Returns:
-            torch.Tensor: Processed logits with scale and bias applied.
+            Tensor: ``logits * exp(logit_scale) + logit_bias``.
         """
-        logit_scale = self.inner.logit_scale.to(logits.device)
-        logit_bias = self.inner.logit_bias.to(logits.device)
+        logit_scale, logit_bias = self.inner.logit_scale.to(logits.device), self.inner.logit_bias.to(logits.device)
         logits = logits * logit_scale.exp() + logit_bias
         return logits
 
 
 class WrappedTokenizer:
-    """Tokenizer wrapper with text canonicalization.
+    """Thin wrapper around a HuggingFace ``AutoProcessor`` that canonicalizes text first.
 
-    This wrapper applies text canonicalization before tokenization to improve
-    zero-shot classification performance.
-
-    Args:
-        proc: The underlying processor from HuggingFace.
+    Lower-cases inputs, strips punctuation, then tokenizes with fixed
+    ``max_length=64`` padding/truncation so the resulting tensors are batchable
+    with SigLIP2's text tower.
     """
 
     def __init__(self, proc):
-        """Initialize the WrappedTokenizer."""
+        """Store the underlying HuggingFace processor.
+
+        Args:
+            proc: A HuggingFace ``AutoProcessor`` (or compatible callable).
+        """
         self._proc = proc
 
     def __call__(self, text: List[str]):
-        """Tokenize text with canonicalization.
+        """Canonicalize and tokenize a batch of text strings.
 
         Args:
-            text (List[str]): List of text strings to tokenize.
+            text (List[str]): Input strings.
 
         Returns:
-            Dict[str, torch.Tensor]: Tokenized outputs with 'input_ids' and
-                'attention_mask'.
+            BatchEncoding: Tokenizer output with ``return_tensors='pt'`` and
+                fixed ``max_length=64`` padding/truncation.
         """
         c_text = [canonicalize_text(t) for t in text]
-        return self._proc(
-            text=c_text,
-            return_tensors='pt',
-            max_length=64,
-            padding='max_length',
-            truncation=True
-        )
+        return self._proc(text=c_text, return_tensors='pt', max_length=64, padding='max_length', truncation=True)
 
 
-def get_siglip2_model(version: str):
-    """Create a SigLIP2 model from HuggingFace.
+def canonicalize_text(
+    text: str,
+    *,
+    keep_punctuation_exact_string=None,
+    trans_punctuation: dict = str.maketrans("", "", string.punctuation),
+):
+    """Returns canonicalized `text` (lowercase and punctuation removed).
+
+    From: https://github.com/google-research/big_vision/blob/53f18caf27a9419231bbf08d3388b07671616d3d/big_vision/evaluators/proj/image_text/prompt_engineering.py#L94
 
     Args:
-        version (str): Model version identifier.
+      text: string to be canonicalized.
+      keep_punctuation_exact_string: If provided, then this exact string kept.
+        For example providing '{}' will keep any occurrences of '{}' (but will
+        still remove '{' and '}' that appear separately).
+    """
+    text = text.replace("_", " ")
+    if keep_punctuation_exact_string:
+        text = keep_punctuation_exact_string.join(
+            part.translate(trans_punctuation)
+            for part in text.split(keep_punctuation_exact_string)
+        )
+    else:
+        text = text.translate(trans_punctuation)
+    text = text.lower()
+    text = " ".join(text.split())
+    return text.strip()
+
+
+def get_siglip2_model(version: str, pretrained_backbone_path: Optional[str] = None):
+    """Build a :class:`SigLIP2Wrapper` for a known SigLIP2 release alias.
+
+    Looks up ``version`` in an internal map of supported releases, loads the
+    HuggingFace model and processor (from the hub or a local snapshot
+    directory), wraps the processor in a :class:`WrappedTokenizer`, and returns
+    the wrapped backbone.
+
+    Args:
+        version (str): One of ``'siglip2'``, ``'siglip2-so400m'``,
+            ``'siglip2-so400m-512'``, ``'siglip2-g'``, or ``'siglip2-g-384'``.
+        pretrained_backbone_path (str, optional): Local path to a HuggingFace
+            snapshot directory (containing ``config.json``, weights, and
+            processor files) for the chosen ``version``. When ``None`` (the
+            default), the model and processor are downloaded from the HF hub
+            using the registered repo id.
 
     Returns:
-        SigLIP2Wrapper: Wrapped SigLIP2 model.
+        SigLIP2Wrapper: Configured backbone (with ``num_classes=0``).
+
+    Raises:
+        KeyError: If ``version`` is not a recognized release alias.
     """
-    # Format: (hf_model_name, is_dynamic, patch_size)
     version_map = {
-        # NaFlex (dynamic resolution)
-        'siglip2-so400m-patch16-naflex': ('google/siglip2-so400m-patch16-naflex', True, 16),
-        # Fixed resolution patch14 variants
-        'siglip2-so400m-patch14-224': ('google/siglip2-so400m-patch14-224', False, 14),
-        'siglip2-so400m-patch14-384': ('google/siglip2-so400m-patch14-384', False, 14),
-        # Fixed resolution patch16 variants
-        'siglip2-so400m-patch16-256': ('google/siglip2-so400m-patch16-256', False, 16),
-        'siglip2-so400m-patch16-384': ('google/siglip2-so400m-patch16-384', False, 16),
-        'siglip2-so400m-patch16-512': ('google/siglip2-so400m-patch16-512', False, 16),
+        'siglip2-so400m-512': ('google/siglip2-so400m-patch16-512', False, 16),
+        'siglip2-so400m': ('google/siglip2-so400m-patch16-naflex', True, 16),
+        'siglip2-g-384': ('google/siglip2-giant-opt-patch16-384', False, 16),
     }
+    version_map['siglip2'] = version_map['siglip2-so400m']
+    version_map['siglip2-g'] = version_map['siglip2-g-384']
 
-    if version not in version_map:
-        raise ValueError(
-            f"Unknown SigLIP2 version: {version}. "
-            f"Available: {sorted(version_map.keys())}"
-        )
+    version, is_dynamic, patch_size = version_map[version]
 
-    hf_model_name, is_dynamic, patch_size = version_map[version]
+    # ``from_pretrained`` accepts either a hub repo id or a local snapshot dir,
+    # so an explicit local path simply replaces the hub id when provided.
+    source = pretrained_backbone_path if pretrained_backbone_path else version
 
-    model = AutoModel.from_pretrained(hf_model_name, trust_remote_code=True)
-    proc = AutoProcessor.from_pretrained(hf_model_name, trust_remote_code=True)
+    model = AutoModel.from_pretrained(source, trust_remote_code=True)
+    proc = AutoProcessor.from_pretrained(source, trust_remote_code=True)
 
     tokenizer = WrappedTokenizer(proc)
 
-    model = SigLIP2Wrapper(
-        model,
-        tokenizer,
-        num_classes=0,
-        is_dynamic=is_dynamic,
-        patch_size=patch_size
-    )
+    model = SigLIP2Wrapper(model, tokenizer, num_classes=0, is_dynamic=is_dynamic, patch_size=patch_size)
 
     return model
 
 
 @BACKBONE_REGISTRY.register()
-def siglip2_so400m_patch16_naflex(**kwargs):
-    """Create SigLIP2 SO400M model with NaFlex (flexible resolution).
+def siglip2_so400m_patch16_512(pretrained_backbone_path: Optional[str] = None, **kwargs):
+    """SigLIP2 SO400M Patch16 512.
 
     Args:
-        **kwargs: Additional arguments (unused).
-
-    Returns:
-        SigLIP2Wrapper: SigLIP2 model.
+        pretrained_backbone_path (str, optional): Local HuggingFace snapshot
+            directory to load instead of downloading from the hub.
+        **kwargs: Forwarded by the backbone registry; accepted for compatibility.
     """
-    return get_siglip2_model("siglip2-so400m-patch16-naflex")
+    return get_siglip2_model("siglip2-so400m-512", pretrained_backbone_path=pretrained_backbone_path)
 
 
 @BACKBONE_REGISTRY.register()
-def siglip2_so400m_patch14_224(**kwargs):
-    """Create SigLIP2 SO400M Patch14 224 model.
+def siglip2_so400m(pretrained_backbone_path: Optional[str] = None, **kwargs):
+    """SigLIP2 SO400M.
 
     Args:
-        **kwargs: Additional arguments (unused).
-
-    Returns:
-        SigLIP2Wrapper: SigLIP2 model.
+        pretrained_backbone_path (str, optional): Local HuggingFace snapshot
+            directory to load instead of downloading from the hub.
+        **kwargs: Forwarded by the backbone registry; accepted for compatibility.
     """
-    return get_siglip2_model("siglip2-so400m-patch14-224")
+    return get_siglip2_model("siglip2-so400m", pretrained_backbone_path=pretrained_backbone_path)
 
 
 @BACKBONE_REGISTRY.register()
-def siglip2_so400m_patch14_384(**kwargs):
-    """Create SigLIP2 SO400M Patch14 384 model.
+def siglip2_g_384(pretrained_backbone_path: Optional[str] = None, **kwargs):
+    """SigLIP2 Giant 384.
 
     Args:
-        **kwargs: Additional arguments (unused).
-
-    Returns:
-        SigLIP2Wrapper: SigLIP2 model.
+        pretrained_backbone_path (str, optional): Local HuggingFace snapshot
+            directory to load instead of downloading from the hub.
+        **kwargs: Forwarded by the backbone registry; accepted for compatibility.
     """
-    return get_siglip2_model("siglip2-so400m-patch14-384")
-
-
-@BACKBONE_REGISTRY.register()
-def siglip2_so400m_patch16_256(**kwargs):
-    """Create SigLIP2 SO400M Patch16 256 model.
-
-    Args:
-        **kwargs: Additional arguments (unused).
-
-    Returns:
-        SigLIP2Wrapper: SigLIP2 model.
-    """
-    return get_siglip2_model("siglip2-so400m-patch16-256")
-
-
-@BACKBONE_REGISTRY.register()
-def siglip2_so400m_patch16_384(**kwargs):
-    """Create SigLIP2 SO400M Patch16 384 model.
-
-    Args:
-        **kwargs: Additional arguments (unused).
-
-    Returns:
-        SigLIP2Wrapper: SigLIP2 model.
-    """
-    return get_siglip2_model("siglip2-so400m-patch16-384")
-
-
-@BACKBONE_REGISTRY.register()
-def siglip2_so400m_patch16_512(**kwargs):
-    """Create SigLIP2 SO400M Patch16 512 model.
-
-    Args:
-        **kwargs: Additional arguments (unused).
-
-    Returns:
-        SigLIP2Wrapper: SigLIP2 model.
-    """
-    return get_siglip2_model("siglip2-so400m-patch16-512")
+    return get_siglip2_model("siglip2-g-384", pretrained_backbone_path=pretrained_backbone_path)

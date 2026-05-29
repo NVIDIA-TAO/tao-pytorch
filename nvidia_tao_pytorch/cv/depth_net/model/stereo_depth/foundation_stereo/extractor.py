@@ -1,20 +1,10 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """Extractor module consists of various encoder architectures"""
 
 import os
+from typing import Optional
 import numpy as np
 import torch
 from torch import nn
@@ -110,16 +100,21 @@ class EdgeNextConvEncoder(nn.Module):
             learnable gamma parameter in layer scaling. If 0 or less,
             layer scaling is disabled. Defaults to 1e-6.
         expan_ratio (int, optional): The expansion ratio for the first
-            point-wise convolution. The hidden dimension will be
-            `dim * expan_ratio`. Defaults to 4.
+            point-wise convolution. Used only when ``pwconv1_dim`` is
+            None; the hidden dimension is then ``dim * expan_ratio``.
+            Defaults to 4.
         kernel_size (int, optional): The kernel size for the depth-wise
             convolution. Defaults to 7.
         norm (str, optional): The type of normalization layer to use.
             Can be 'layer', 'batch', or 'none'. Defaults to 'layer'.
+        pwconv1_dim (Optional[int], optional): Explicit hidden dimension
+            for the first pointwise convolution. When None, derived from
+            ``expan_ratio * dim``.
     """
 
     def __init__(self, dim, layer_scale_init_value=1e-6,
-                 expan_ratio=4, kernel_size=7, norm='layer'):
+                 expan_ratio=4, kernel_size=7, norm='layer',
+                 pwconv1_dim: Optional[int] = None):
         super().__init__()
 
         # Depth-wise convolution
@@ -135,9 +130,11 @@ class EdgeNextConvEncoder(nn.Module):
             self.norm = nn.Identity()
 
         # Point-wise convolutions
-        self.pwconv1 = nn.Linear(dim, expan_ratio * dim)
+        if pwconv1_dim is None:
+            pwconv1_dim = expan_ratio * dim
+        self.pwconv1 = nn.Linear(dim, pwconv1_dim)
         self.act = nn.GELU()
-        self.pwconv2 = nn.Linear(expan_ratio * dim, dim)
+        self.pwconv2 = nn.Linear(pwconv1_dim, dim)
 
         # Layer scaling gamma parameter
         self.gamma = nn.Parameter(
@@ -697,7 +694,8 @@ class Feature(nn.Module):
     upsample these features, resulting in multi-scale output feature maps.
     """
 
-    def __init__(self, cfg, export=False):
+    def __init__(self, cfg, export=False, use_vit_backbone: bool = True,
+                 phantom_vit_feat_dim: Optional[int] = None):
         """
         Constructor for the Feature class.
 
@@ -705,8 +703,26 @@ class Feature(nn.Module):
             cfg (omegaconf.dictconfig.DictConfig): A configuration object
                 containing parameters such as `edgenext_pretrained_path` and
                 `encoder`.
+            export (bool, optional): If True, the underlying DepthAnythingV2
+                feature extractor is built in export mode. Defaults to False.
+            use_vit_backbone (bool, optional): If True, a frozen DepthAnythingV2
+                ViT branch is fused into the 1/4 decoder output. If False, the
+                ViT branch is omitted and the 1/4 conv4 input drops by
+                ``vit_feat_dim`` channels. Defaults to True.
+            phantom_vit_feat_dim (Optional[int], optional): When set (and
+                ``use_vit_backbone=False``), allocates this many "phantom"
+                channels in ``conv4``'s output and switches ``conv4`` to a
+                single 1x1 expansion ``Conv2d``. Matches upstream-ckpt layouts
+                that reserve the ViT slot without running a ViT branch.
+                Defaults to None (legacy Sequential fusion+refine layout).
         """
         super().__init__()
+
+        if phantom_vit_feat_dim is not None and use_vit_backbone:
+            raise ValueError(
+                "phantom_vit_feat_dim is only meaningful with "
+                "use_vit_backbone=False; the ViT branch already populates "
+                "the slot when enabled.")
 
         # Initialize and load pretrained EdgeNeXt model
         model = EdgeNeXt(depths=[3, 3, 9, 3], dims=[48, 96, 160, 304], expan_ratio=4,
@@ -731,10 +747,15 @@ class Feature(nn.Module):
 
         self.channel = [48, 96, 160, 304]   # channel sizes hardcoded for decoder design
 
-        # Initialize and freeze the DepthAnythingV2 feature extractor
-        self.dino = DepthAnythingFeature(cfg, export=export)
-        self.dino = utils.freeze_model(self.dino)
-        vit_feat_dim = DepthAnythingFeature.model_configs[cfg.encoder]['features'] // 2
+        # Initialize and freeze the DepthAnythingV2 feature extractor (optional)
+        self.use_vit_backbone = use_vit_backbone
+        if self.use_vit_backbone:
+            self.dino = DepthAnythingFeature(cfg, export=export)
+            self.dino = utils.freeze_model(self.dino)
+            vit_feat_dim = DepthAnythingFeature.model_configs[cfg.encoder]['features'] // 2
+        else:
+            self.dino = None
+            vit_feat_dim = phantom_vit_feat_dim if phantom_vit_feat_dim is not None else 0
         extra_channel_boost = 0
 
         # Decoder part: Deconvolutional layers for upsampling
@@ -748,17 +769,25 @@ class Feature(nn.Module):
             self.channel[1] * 2, self.channel[0], norm_type='instance2d',
             conv_type='deconv2d', concat=True, use_resnet_layer=True)
 
-        # Final convolutional block after upsampling and feature fusion
-        self.conv4 = nn.Sequential(
-            Conv(self.channel[0] * 2 + vit_feat_dim,
-                 self.channel[0] * 2 + vit_feat_dim + extra_channel_boost,
-                 conv_type='conv2d', norm_type='instance2d', relu=True,
-                 kernel_size=3, stride=1, padding=1),
-            ResidualBlock(self.channel[0] * 2 + vit_feat_dim + extra_channel_boost,
-                          self.channel[0] * 2 + vit_feat_dim + extra_channel_boost,
-                          norm_fn='instance'),
-            ResidualBlock(self.channel[0] * 2 + vit_feat_dim + extra_channel_boost,
-                          self.channel[0] * 2 + vit_feat_dim, norm_fn='instance'))
+        if phantom_vit_feat_dim is not None and not self.use_vit_backbone:
+            # Single 1x1 expansion that reserves a ViT-sized channel band
+            # without a fusion or residual-refine stack.
+            self.conv4 = nn.Conv2d(
+                self.channel[0] * 2,
+                self.channel[0] * 2 + vit_feat_dim,
+                kernel_size=1, padding=0)
+        else:
+            # Default: Sequential(Conv + 2x ResidualBlock) for fusion+refine.
+            self.conv4 = nn.Sequential(
+                Conv(self.channel[0] * 2 + vit_feat_dim,
+                     self.channel[0] * 2 + vit_feat_dim + extra_channel_boost,
+                     conv_type='conv2d', norm_type='instance2d', relu=True,
+                     kernel_size=3, stride=1, padding=1),
+                ResidualBlock(self.channel[0] * 2 + vit_feat_dim + extra_channel_boost,
+                              self.channel[0] * 2 + vit_feat_dim + extra_channel_boost,
+                              norm_fn='instance'),
+                ResidualBlock(self.channel[0] * 2 + vit_feat_dim + extra_channel_boost,
+                              self.channel[0] * 2 + vit_feat_dim, norm_fn='instance'))
 
         self.patch_size = 14
         self.d_out = [self.channel[0] * 2 + vit_feat_dim,
@@ -787,21 +816,24 @@ class Feature(nn.Module):
         """
         _, _, height, width = x.shape
 
-        # Resize input image for DepthAnythingV2, keeping aspect ratio
-        divider = np.lcm(self.patch_size, 16)
-        h_resize, w_resize = utils.get_resize_keep_aspect_ratio(
-            height, width, divider=divider, max_h=1344, max_w=1344)
-        x_in_ = F.interpolate(x, size=(h_resize, w_resize), mode='bicubic', align_corners=False)
+        if self.use_vit_backbone:
+            # Resize input image for DepthAnythingV2, keeping aspect ratio
+            divider = np.lcm(self.patch_size, 16)
+            h_resize, w_resize = utils.get_resize_keep_aspect_ratio(
+                height, width, divider=divider, max_h=1344, max_w=1344)
+            x_in_ = F.interpolate(x, size=(h_resize, w_resize), mode='bicubic', align_corners=False)
 
-        # Extract features from DepthAnythingV2 (in evaluation mode with no_grad)
-        self.dino = self.dino.eval()
-        with torch.no_grad():
-            output = self.dino(x_in_)
-        vit_feat = output['out']
+            # Extract features from DepthAnythingV2 (in evaluation mode with no_grad)
+            self.dino = self.dino.eval()
+            with torch.no_grad():
+                output = self.dino(x_in_)
+            vit_feat = output['out']
 
-        # Resize ViT features to match the 4x downsampling level
-        vit_feat = F.interpolate(
-            vit_feat, size=(height // 4, width // 4), mode='bilinear', align_corners=True)
+            # Resize ViT features to match the 4x downsampling level
+            vit_feat = F.interpolate(
+                vit_feat, size=(height // 4, width // 4), mode='bilinear', align_corners=True)
+        else:
+            vit_feat = None
 
         # EdgeNeXt encoder path
         x = self.downsample_layers[0](x)
@@ -819,7 +851,8 @@ class Feature(nn.Module):
         x4 = self.deconv8_4(x8, x4)
 
         # Concatenate upsampled features with ViT features and process with final convolution
-        x4 = torch.cat([x4, vit_feat], dim=1)
+        if self.use_vit_backbone:
+            x4 = torch.cat([x4, vit_feat], dim=1)
         x4 = self.conv4(x4)
 
         return [x4, x8, x16, x32], vit_feat

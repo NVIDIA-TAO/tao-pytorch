@@ -1,1 +1,10 @@
-nvidia-modelopt[all]==0.35.0
+# Pin to the 26.03 base image version. `pip install --upgrade` (used in the
+# Dockerfile layer) would otherwise pull the latest from PyPI and silently
+# diverge from the preinstalled wheel — bump this together with the base.
+nvidia-modelopt[all]==0.41.0
+# The Dockerfile installs this file with --no-deps, so list ModelOpt ONNX extra
+# dependencies that are not already provided by the 26.03 base image.
+cppimport==22.5.10
+lief==0.17.6
+onnxconverter-common==1.16.0
+onnxslim==0.1.94

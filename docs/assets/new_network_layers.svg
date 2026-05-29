@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="430" viewBox="0 0 960 430" role="img" aria-labelledby="title desc">
+  <title id="title">New network integration layers</title>
+  <desc id="desc">A new TAO network has a PyTorch backend layer for local CLI usage and an optional TAO Core layer for API and microservice integration.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#475569"/>
+    </marker>
+    <style>
+      .layer1 { fill: #e0f2fe; stroke: #0369a1; stroke-width: 1.8; rx: 12; }
+      .layer2 { fill: #fef3c7; stroke: #b45309; stroke-width: 1.8; rx: 12; }
+      .box { fill: #ffffff; stroke: #64748b; stroke-width: 1.2; rx: 8; }
+      .label { font: 600 15px Arial, sans-serif; fill: #111827; }
+      .small { font: 12px Arial, sans-serif; fill: #374151; }
+      .path { stroke: #475569; stroke-width: 2; fill: none; marker-end: url(#arrow); }
+    </style>
+  </defs>
+
+  <text x="480" y="30" text-anchor="middle" class="label">New Network Integration</text>
+
+  <rect x="45" y="70" width="870" height="145" class="layer1"/>
+  <text x="480" y="98" text-anchor="middle" class="label">PyTorch Backend Layer</text>
+
+  <rect x="80" y="125" width="145" height="58" class="box"/>
+  <text x="152" y="149" text-anchor="middle" class="label">Config</text>
+  <text x="152" y="168" text-anchor="middle" class="small">dataclasses</text>
+
+  <rect x="260" y="125" width="145" height="58" class="box"/>
+  <text x="332" y="149" text-anchor="middle" class="label">Task package</text>
+  <text x="332" y="168" text-anchor="middle" class="small">model + data</text>
+
+  <rect x="440" y="125" width="145" height="58" class="box"/>
+  <text x="512" y="149" text-anchor="middle" class="label">Scripts</text>
+  <text x="512" y="168" text-anchor="middle" class="small">train/export/etc</text>
+
+  <rect x="620" y="125" width="145" height="58" class="box"/>
+  <text x="692" y="149" text-anchor="middle" class="label">Entrypoint</text>
+  <text x="692" y="168" text-anchor="middle" class="small">shared launcher</text>
+
+  <rect x="800" y="125" width="80" height="58" class="box"/>
+  <text x="840" y="149" text-anchor="middle" class="label">setup.py</text>
+  <text x="840" y="168" text-anchor="middle" class="small">command</text>
+
+  <rect x="45" y="260" width="870" height="125" class="layer2"/>
+  <text x="480" y="288" text-anchor="middle" class="label">Optional TAO Core / FTMS Layer</text>
+
+  <rect x="135" y="315" width="170" height="48" class="box"/>
+  <text x="220" y="344" text-anchor="middle" class="label">Core config schema</text>
+
+  <rect x="395" y="315" width="170" height="48" class="box"/>
+  <text x="480" y="344" text-anchor="middle" class="label">network config JSON</text>
+
+  <rect x="655" y="315" width="170" height="48" class="box"/>
+  <text x="740" y="344" text-anchor="middle" class="label">API actions + metrics</text>
+
+  <path d="M225 154 H260" class="path"/>
+  <path d="M405 154 H440" class="path"/>
+  <path d="M585 154 H620" class="path"/>
+  <path d="M765 154 H800" class="path"/>
+  <path d="M512 183 V230 H480 V315" class="path"/>
+  <path d="M305 339 H395" class="path"/>
+  <path d="M565 339 H655" class="path"/>
+</svg>

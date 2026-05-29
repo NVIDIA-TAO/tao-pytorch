@@ -1,0 +1,118 @@
+# syntax=docker/dockerfile:1.7
+# Build onnxruntime-gpu wheel for the TAO PyTorch base image.
+# Output: /wheels/onnxruntime_gpu-*.whl in a FROM scratch final image.
+
+ARG PYTORCH_BASE_IMAGE
+FROM ${PYTORCH_BASE_IMAGE} AS builder
+
+ARG ONNXRUNTIME_VERSION=1.25.1
+ARG ONNXRUNTIME_REPO=https://github.com/microsoft/onnxruntime
+ARG ONNXRUNTIME_BUILD_CONFIG=Release
+ARG GPU_ARCHS="75 80 86 90 90a 100 110 120"
+ARG TORCH_CUDA_ARCH_LIST="7.5 8.0 8.6 9.0 9.0a 10.0 11.0 12.0+PTX"
+# Capped at 4: linking libprotobuf.a + cuda kernel compilation peaks at
+# ~10-12 GB per job. Inside buildx's docker-container driver /proc/meminfo
+# reports host memory not the build container's cgroup limit, so the dynamic
+# formula upstream over-provisions and OOM-kills make. 4 is the empirically
+# stable value the legacy pipeline used (ONNXRUNTIME_BUILD_PARALLEL=4).
+ARG MAX_JOBS_CAP=4
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+        cmake ninja-build build-essential git python3-dev
+
+ENV CPATH="/usr/local/cuda/include/cccl:${CPATH}" \
+    TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}
+
+WORKDIR /workspace/onnxruntime_build
+RUN git clone -b rel-${ONNXRUNTIME_VERSION} --depth 1 --recursive \
+      ${ONNXRUNTIME_REPO} onnxruntime
+
+# Patch CCCL device_transform.cuh for the CUDA 13.x + GCC 13 incompatibility.
+# At file scope, the header declares a template specialization using a
+# globally-qualified struct name:
+#
+#     template <typename T>
+#     struct ::cuda::proclaims_copyable_arguments<…> : ::cuda::std::true_type {};
+#
+# GCC 13 rejects this with "global qualification of class name is invalid before
+# ':' token". Wrapping the specialization in `namespace cuda { … }` removes the
+# need for the leading `::cuda::` qualification and compiles cleanly.
+#
+# Mirrors the workaround used by dusty-nv/jetson-containers' ORT build:
+#   https://github.com/dusty-nv/jetson-containers/blob/master/packages/ml/onnxruntime/build.sh
+# Tolerant of both `class T` and `typename T` template-parameter forms.
+RUN python3 <<'PY'
+import re, glob
+PATTERN = re.compile(
+    r'template <(?:class|typename) T>\n'
+    r'struct ::cuda::proclaims_copyable_arguments'
+    r'<CUB_NS_QUALIFIER::detail::__return_constant<T>> : ::cuda::std::true_type\n'
+    r'\{\};'
+)
+REPLACEMENT = (
+    'namespace cuda {\n'
+    'template <typename T>\n'
+    'struct proclaims_copyable_arguments'
+    '<CUB_NS_QUALIFIER::detail::__return_constant<T>> : ::cuda::std::true_type\n'
+    '{};\n'
+    '} // namespace cuda'
+)
+total = 0
+for path in glob.glob('/usr/local/cuda*/**/cccl/cub/device/device_transform.cuh', recursive=True):
+    with open(path) as f:
+        src = f.read()
+    new_src, n = PATTERN.subn(REPLACEMENT, src)
+    if n:
+        with open(path, 'w') as f:
+            f.write(new_src)
+        print(f'patched {n}x in {path}')
+        total += n
+    else:
+        print(f'no match in {path}')
+print(f'CCCL patch: {total} substitution(s) applied')
+PY
+
+WORKDIR /workspace/onnxruntime_build/onnxruntime
+RUN set -eu; \
+    total_mem_gb=$(awk '/MemTotal:/ {print int($2 / 1024 / 1024)}' /proc/meminfo); \
+    if [ -r /sys/fs/cgroup/memory.max ]; then \
+      cgroup_max=$(cat /sys/fs/cgroup/memory.max); \
+      if [ "$cgroup_max" != "max" ]; then \
+        cgroup_gb=$(( cgroup_max / 1024 / 1024 / 1024 )); \
+        if [ "$cgroup_gb" -lt "$total_mem_gb" ]; then total_mem_gb=$cgroup_gb; fi; \
+      fi; \
+    fi; \
+    parallel=$(( (total_mem_gb - 16) / 8 )); \
+    if [ "$parallel" -lt 2 ]; then parallel=2; fi; \
+    if [ "$parallel" -gt $(nproc) ]; then parallel=$(nproc); fi; \
+    if [ "$parallel" -gt ${MAX_JOBS_CAP} ]; then parallel=${MAX_JOBS_CAP}; fi; \
+    echo "ORT build parallel=$parallel (mem_gb=$total_mem_gb, nproc=$(nproc), cap=${MAX_JOBS_CAP})"; \
+    CUDA_ARCHS=$(echo "${GPU_ARCHS}" | sed 's/ /;/g' | sed 's/\([0-9]\+a\?\)/\1-real/g'); \
+    ARCH=$(uname -m); \
+    if [ "$ARCH" = "aarch64" ]; then CUDA_TARGET="sbsa-linux"; else CUDA_TARGET="${ARCH}-linux"; fi; \
+    CUDA_INCLUDE_DIRS="/usr/local/cuda/include/cccl;/usr/local/cuda/targets/${CUDA_TARGET}/include;/usr/local/cuda/targets/${CUDA_TARGET}/include/cccl"; \
+    ./build.sh \
+      --config ${ONNXRUNTIME_BUILD_CONFIG} \
+      --parallel ${parallel} \
+      --skip_submodule_sync \
+      --build_shared_lib \
+      --compile_no_warning_as_error \
+      --build_dir /workspace/onnxruntime_build/build \
+      --cmake_extra_defines CMAKE_CUDA_ARCHITECTURES="${CUDA_ARCHS}" \
+      --cmake_extra_defines CMAKE_POLICY_VERSION_MINIMUM=3.5 \
+      --cmake_extra_defines CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES="${CUDA_INCLUDE_DIRS}" \
+      --build_wheel \
+      --update --build \
+      --use_cuda --cuda_home /usr/local/cuda \
+      --cudnn_home /usr \
+      --use_tensorrt --use_tensorrt_builtin_parser \
+      --tensorrt_home /usr/src/tensorrt \
+      --allow_running_as_root && \
+    mkdir -p /wheels && \
+    cp /workspace/onnxruntime_build/build/${ONNXRUNTIME_BUILD_CONFIG}/dist/onnxruntime_gpu-*.whl /wheels/
+
+FROM scratch
+COPY --from=builder /wheels /wheels

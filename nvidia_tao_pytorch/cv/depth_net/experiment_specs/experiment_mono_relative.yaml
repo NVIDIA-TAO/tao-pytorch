@@ -53,5 +53,5 @@ export:
   input_channel: 3
   input_width: 924
   input_height: 518
-  opset_version: 16
+  opset_version: 17
   on_cpu: False

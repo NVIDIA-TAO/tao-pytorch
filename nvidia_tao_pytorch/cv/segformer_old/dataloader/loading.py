@@ -1,8 +1,9 @@
-# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
-
 # Original source taken from https://github.com/open-mmlab/mmsegmentation/mmseg/datasets/transforms/loading.py
-
+#
 # Copyright (c) OpenMMLab. All rights reserved.
+#
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """Custom LoadAnnotations Module."""
 

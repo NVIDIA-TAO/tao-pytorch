@@ -1,16 +1,5 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """Logger class for TAO Toolkit models."""
 
@@ -20,10 +9,23 @@ import json
 import logging
 import os
 
+import numpy as np
+
 from nvidia_tao_core.microservices.handlers.cloud_handlers.utils import status_callback
 
 from torch import distributed as torch_distributed
 from pytorch_lightning.utilities import rank_zero_only, rank_zero_warn
+
+
+def _json_default(obj):
+    # numpy 2.0 returns np.generic scalars from many ops where 1.x silently produced
+    # Python floats; json.dumps does not accept np.generic and would raise TypeError.
+    if isinstance(obj, np.generic):
+        return obj.item()
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
 
 logger = logging.getLogger(__name__)
 
@@ -158,7 +160,7 @@ class BaseLogger(object):
         Returns
             data_string (str): Recursively formatted string.
         """
-        return json.dumps(data)
+        return json.dumps(data, default=_json_default)
 
     @rank_zero_only
     def log(self, level, string):
@@ -274,7 +276,7 @@ class StatusLogger(BaseLogger):
         """
         if not isinstance(data, dict):
             raise TypeError(f"Data must be a dictionary and not type {type(data)}.")
-        data_string = json.dumps(data)
+        data_string = json.dumps(data, default=_json_default)
         return data_string
 
 
@@ -306,5 +308,4 @@ def set_status_logger(status_logger):
 
 def get_status_logger():
     """Get the status logger."""
-    global _STATUS_LOGGER  # pylint: disable=W0602,W0603
     return _STATUS_LOGGER

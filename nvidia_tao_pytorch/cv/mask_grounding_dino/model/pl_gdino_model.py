@@ -1,16 +1,5 @@
-# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """ Main PTL model file for Mask Grounding DINO. """
 
@@ -384,7 +373,9 @@ class MaskGDINOPlModel(TAOLightningModule):
             if self.trainer.is_global_zero and eval_results:
                 # Log main metrics (bbox/segm)
                 for iou_type in self.iou_types:
-                    for key, value in eval_results[iou_type]['all'].items():
+                    # _summarize_task omits the "all" aggregate when no class produced
+                    # predictions (e.g. fast_dev_run with an undertrained model).
+                    for key, value in eval_results[iou_type].get('all', {}).items():
                         if isinstance(value, (int, float)):
                             self.log(f"[{iou_type}] val_{key}", value, rank_zero_only=True)
                         self.status_logging_dict[f"[{iou_type}] val_{key}"] = str(value)
@@ -496,7 +487,7 @@ class MaskGDINOPlModel(TAOLightningModule):
             eval_results = self.test_evaluator.summarize()
             if self.trainer.is_global_zero and eval_results:
                 for iou_type in self.iou_types:
-                    for key, value in eval_results[iou_type]['all'].items():
+                    for key, value in eval_results[iou_type].get('all', {}).items():
                         if isinstance(value, (int, float)):
                             self.log(f"[{iou_type}] test_{key}", value, rank_zero_only=True)
                         self.status_logging_dict[f"[{iou_type}] test_{key}"] = str(value)
