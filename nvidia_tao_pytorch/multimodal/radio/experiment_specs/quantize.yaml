@@ -1,0 +1,72 @@
+results_dir: ???
+wandb:
+  enable: False
+train:
+  seed: 47
+  resume_training_checkpoint_path: null
+  num_epochs: 50
+  num_nodes: 1
+  num_gpus: 8
+  gpu_ids: [0,1,2,3,4,5,6,7]
+  validation_interval: 1
+  checkpoint_interval: 1
+  tensorboard:
+    enabled: True
+  optim:
+    lr: 0.0005
+    optim: "adamw"
+    policy: "step"
+    weight_decay: 0.001
+    betas: [0.0, 0.9]
+    skip_names: ['PatchEmbed']
+distill:
+  teacher:
+    backbone:
+      type: "vit_large_patch14_dinov2_swiglu"
+      pretrained_backbone_path: ???
+      freeze_backbone: True
+  pretrained_teacher_model_path: ???
+model:
+  backbone:
+    type: "resnet_101"
+    freeze_backbone: False
+
+quantize:
+  backend: modelopt.pytorch
+  mode: static_ptq
+  algorithm: max
+  model_path:  ???
+  results_dir: ${results_dir}
+
+  # Global FP8 E4M3 for all modules (weights + activations)
+  layers:
+    - module_name: '*'
+      weights:
+        dtype: fp8_e4m3fn
+      activations:
+        dtype: fp8_e4m3fn
+
+  # Disable for specific modules/patterns and classes
+  skip_names:
+    - '*lm_head*'
+    - '*block_sparse_moe.gate*'
+    - '*router*'
+    - '*output_layer*'
+    - 'output.*'
+    - 'BatchNorm1d'
+    - 'BatchNorm2d'
+    - 'BatchNorm3d'
+    - 'LeakyReLU'
+    - '*head*'
+
+dataset:
+  root_dir: "???"
+  batch_size: 128
+  workers: 32
+  num_classes: ??
+  img_size: 224
+  val_dataset:
+    images_dir: ${dataset.root_dir}/val
+  # Dataset for calibration used during post-training quantization
+  quant_calibration_dataset:
+    images_dir: ${dataset.root_dir}/val

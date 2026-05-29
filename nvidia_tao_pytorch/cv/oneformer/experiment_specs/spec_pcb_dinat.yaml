@@ -1,0 +1,86 @@
+results_dir: 
+
+dataset:
+  train:
+    annotations: 
+    panoptic: 
+    batch_size: 4
+    num_workers: 4
+  val:
+    annotations: 
+    panoptic: 
+    batch_size: 4
+    num_workers: 4
+  test:
+    annotations: 
+    panoptic: 
+    names:
+      - pcb
+    batch_size: 1
+    num_workers: 8
+  image_size: [1920, 1080]
+  label_map: 
+  cutmix_prob: 0.0
+
+
+model:
+  backbone:
+    name: D2DiNAT
+    dinat:
+      embed_dim: 192
+      mlp_ratio: 2.0
+      depths: [3, 4, 18, 5]
+      num_heads: [6, 12, 24, 48]
+      kernel_size: 7
+      drop_path_rate: 0.3
+      dilations: [[1, 20, 1], [1, 5, 1, 10], [1, 2, 1, 3, 1, 4, 1, 5, 1, 2, 1, 3, 1, 4, 1, 5, 1, 5], [1, 2, 1, 2, 1]]
+  one_former:
+    num_object_queries: 64
+  sem_seg_head:
+    num_classes: 25
+  test:
+    test_topk_per_image: 100
+    object_mask_threshold: 0.8
+
+wandb:
+  enable: true
+  project: Computex OneFormer PCB
+  entity: ''
+  tags:
+  - training
+  - computex
+  reinit: false
+  sync_tensorboard: false
+  save_code: false
+  name: ''
+  run_id: ''
+  
+train:
+  num_epochs: 1000
+  num_gpus: 8
+  num_nodes: 4
+  pretrained_model: 
+  pretrained_backbone: 
+  precision: 32
+  iters_per_epoch: 1500
+  val_check_interval: 1.0      
+  checkpoint_interval: 1
+  checkpoint_interval_unit: epoch
+  optim:
+    lr: 0.0001            
+    lr_scheduler: WarmupPoly
+    warmup_iters: 1500    
+    warmup_factor: 0.001
+  
+evaluate: 
+  checkpoint: 
+  num_gpus: 8
+  iou_per_class: false
+  results_dir: 
+
+inference:
+  mode: instance
+  results_dir: 
+  images_dir: 
+  image_size: [1920, 1080]
+  checkpoint: 

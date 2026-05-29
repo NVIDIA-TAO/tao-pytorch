@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="360" viewBox="0 0 960 360" role="img" aria-labelledby="title desc">
+  <title id="title">Coding agent development workflow</title>
+  <desc id="desc">An agent inspects the repository, makes a scoped change, runs targeted tests, updates documentation, and reports residual risk.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#475569"/>
+    </marker>
+    <style>
+      .box { fill: #f8fafc; stroke: #334155; stroke-width: 1.5; rx: 10; }
+      .active { fill: #e0f2fe; stroke: #0369a1; stroke-width: 1.7; rx: 10; }
+      .verify { fill: #ecfdf5; stroke: #047857; stroke-width: 1.7; rx: 10; }
+      .warn { fill: #fff7ed; stroke: #c2410c; stroke-width: 1.7; rx: 10; }
+      .label { font: 600 15px Arial, sans-serif; fill: #111827; }
+      .small { font: 12px Arial, sans-serif; fill: #374151; }
+      .path { stroke: #475569; stroke-width: 2; fill: none; marker-end: url(#arrow); }
+    </style>
+  </defs>
+
+  <text x="480" y="32" text-anchor="middle" class="label">Agent Development Loop</text>
+
+  <rect x="40" y="95" width="135" height="76" class="active"/>
+  <text x="107" y="122" text-anchor="middle" class="label">1. Inspect</text>
+  <text x="107" y="144" text-anchor="middle" class="small">setup, task</text>
+  <text x="107" y="161" text-anchor="middle" class="small">config, tests</text>
+
+  <rect x="215" y="95" width="135" height="76" class="box"/>
+  <text x="282" y="122" text-anchor="middle" class="label">2. Scope</text>
+  <text x="282" y="144" text-anchor="middle" class="small">avoid unrelated</text>
+  <text x="282" y="161" text-anchor="middle" class="small">changes</text>
+
+  <rect x="390" y="95" width="135" height="76" class="active"/>
+  <text x="457" y="122" text-anchor="middle" class="label">3. Edit</text>
+  <text x="457" y="144" text-anchor="middle" class="small">follow local</text>
+  <text x="457" y="161" text-anchor="middle" class="small">patterns</text>
+
+  <rect x="565" y="95" width="135" height="76" class="verify"/>
+  <text x="632" y="122" text-anchor="middle" class="label">4. Test</text>
+  <text x="632" y="144" text-anchor="middle" class="small">targeted first</text>
+  <text x="632" y="161" text-anchor="middle" class="small">broaden if shared</text>
+
+  <rect x="740" y="95" width="155" height="76" class="verify"/>
+  <text x="817" y="122" text-anchor="middle" class="label">5. Document</text>
+  <text x="817" y="144" text-anchor="middle" class="small">README generator</text>
+  <text x="817" y="161" text-anchor="middle" class="small">and task docs</text>
+
+  <rect x="300" y="245" width="360" height="70" class="warn"/>
+  <text x="480" y="272" text-anchor="middle" class="label">Final report</text>
+  <text x="480" y="294" text-anchor="middle" class="small">what changed, what ran, what could not run, residual risk</text>
+
+  <path d="M175 133 H215" class="path"/>
+  <path d="M350 133 H390" class="path"/>
+  <path d="M525 133 H565" class="path"/>
+  <path d="M700 133 H740" class="path"/>
+  <path d="M817 171 V205 H480 V245" class="path"/>
+  <path d="M632 171 V205" class="path"/>
+</svg>

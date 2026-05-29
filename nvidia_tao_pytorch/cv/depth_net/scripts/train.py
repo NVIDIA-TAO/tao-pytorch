@@ -1,23 +1,12 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """Train depth network model."""
 import os
 import torch
 from pytorch_lightning import Trainer
 
-from nvidia_tao_core.config.depth_net.default_config import ExperimentConfig
+from nvidia_tao_pytorch.config.depth_net.default_config import ExperimentConfig
 from nvidia_tao_pytorch.core.connectors.checkpoint_connector import TLTCheckpointConnector
 from nvidia_tao_pytorch.core.decorators.workflow import monitor_status
 from nvidia_tao_pytorch.core.hydra.hydra_runner import hydra_runner
@@ -43,18 +32,33 @@ def run_experiment(experiment_config, key):
 
     # Load pretrained model as starting point if pretrained path is provided,
     if pretrained_path:
-        model_dict = torch.load(pretrained_path, map_location="cpu")
-        if "pytorch-lightning_version" not in model_dict and experiment_config.model.model_type in ['MetricDepthAnything', 'RelativeDepthAnything']:
-            # parse public checkpoint
-            modified_dict = parse_mono_depth_checkpoint(model_dict, experiment_config.model.model_type)
-            pt_model.load_state_dict(modified_dict, strict=True)
-        else:
-            pt_model = get_pl_module(experiment_config).load_from_checkpoint(
-                pretrained_path,
-                map_location="cpu",
-                experiment_spec=experiment_config,
-                strict=True
+        # FFS commercial ckpt is a research-pickled nn.Module (not a PL ckpt
+        # nor a plain state_dict). Route it through load_ffs_pretrained
+        # which handles the pickle stub + prefix/substring remap and
+        # reports missing/unexpected explicitly. Mirrors scripts/inference.py
+        # and scripts/evaluate.py.
+        if experiment_config.model.model_type == 'FastFoundationStereo':
+            from nvidia_tao_pytorch.cv.depth_net.model.stereo_depth.fast_foundation_stereo.ckpt_utils import (
+                load_ffs_pretrained,
             )
+            result = load_ffs_pretrained(pt_model.model, pretrained_path)
+            assert not result['missing'], (
+                f"FFS ckpt missing keys: {result['missing']}")
+            assert not result['unexpected'], (
+                f"FFS ckpt unexpected keys: {result['unexpected']}")
+        else:
+            model_dict = torch.load(pretrained_path, map_location="cpu")
+            if "pytorch-lightning_version" not in model_dict and experiment_config.model.model_type in ['MetricDepthAnything', 'RelativeDepthAnything']:
+                # parse public checkpoint
+                modified_dict = parse_mono_depth_checkpoint(model_dict, experiment_config.model.model_type)
+                pt_model.load_state_dict(modified_dict, strict=True)
+            else:
+                pt_model = get_pl_module(experiment_config).load_from_checkpoint(
+                    pretrained_path,
+                    map_location="cpu",
+                    experiment_spec=experiment_config,
+                    strict=True
+                )
 
     print('model params', sum(p.numel() for p in pt_model.parameters()), flush=True)
     num_nodes = experiment_config.train.num_nodes
@@ -65,10 +69,12 @@ def run_experiment(experiment_config, key):
 
     if experiment_config.train.precision.lower() == 'fp16':
         precision = '16-mixed'
+    elif experiment_config.train.precision.lower() == 'bf16':
+        precision = 'bf16-mixed'
     elif experiment_config.train.precision.lower() == 'fp32':
         precision = '32-true'
     else:
-        raise NotImplementedError(f"{experiment_config.train.precision} is not supported. Only fp32 and fp16 are supported")
+        raise NotImplementedError(f"{experiment_config.train.precision} is not supported. Only fp32, fp16, and bf16 are supported")
 
     strategy = 'auto'
     if len(trainer_kwargs['devices']) > 1:

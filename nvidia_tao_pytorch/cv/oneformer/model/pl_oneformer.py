@@ -1,16 +1,6 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """PyTorch Lightning module for OneFormer model training and inference."""
 
 import copy
@@ -76,8 +66,8 @@ class OneformerPlModule(TAOLightningModule):
         self.num_queries = self.model_config.one_former.num_object_queries
         self._build_model()
         self._build_criterion()
-        self.validation_step_outputs = []
-        self.test_step_outputs = []
+        self.validation_step_outputs = {}
+        self.test_step_outputs = {}
         self.checkpoint_filename = "oneformer_model"
         self.status_logging_dict = {}
         self.mode = self.cfg.inference.mode.lower()
@@ -138,8 +128,10 @@ class OneformerPlModule(TAOLightningModule):
         Args:
             pm (str, optional): Path to pretrained model weights
         """
-        if pm and self.cfg.model.backbone.name == "D2SwinTransformer":
+        if pm and self.cfg.model.backbone.name in ("D2SwinTransformer", "D2DiNAT"):
             checkpoint = torch.load(pm, map_location="cuda", weights_only=False)
+            if "model" in checkpoint:
+                checkpoint = checkpoint["model"]
             new_state_dict = OrderedDict()
             for key, value in checkpoint.items():
                 new_key = "backbone." + key
@@ -175,28 +167,6 @@ class OneformerPlModule(TAOLightningModule):
             logging.info(
                 f"The backbone weights were loaded successfully. {successful_keys_count} keys loaded out of {total_keys}."
             )
-
-    def load_pretrained_weights(self, pm=None):
-        """Load pretrained model weights.
-
-        Args:
-            pm (str, optional): Path to pretrained model file
-        """
-        if pm.endswith(".pth"):
-            checkpoint = torch.load(pm, map_location="cuda", weights_only=False)
-            state_dict = checkpoint["state_dict"]
-            new_state_dict = OrderedDict()
-            for key, value in state_dict.items():
-                new_key = key.removeprefix("model.")
-                new_state_dict[new_key] = value
-            missing_keys, unexpected_keys = self.model.load_state_dict(
-                new_state_dict, strict=False
-            )
-            print("missing keys: ", missing_keys)
-            print("unexpected keys: ", unexpected_keys)
-            logging.info("The pretrained model was loaded successfully.")
-        else:
-            logging.info("No pretrained model provided.")
 
     def _build_model(self):
         self.model = OneFormerModel(self.cfg)
@@ -477,6 +447,20 @@ class OneformerPlModule(TAOLightningModule):
 
             logging.info("Registered gradient contiguity hooks for DDP")
 
+    def on_validation_start(self):
+        """Validate dataloader batch sizes, supporting list of dataloaders."""
+        val_dl = self.trainer.datamodule.val_dataloader()
+        loaders = val_dl if isinstance(val_dl, (list, tuple)) else [val_dl]
+        for loader in loaders:
+            self._dataloader_batch_check(loader, "validation")
+
+    def on_test_start(self):
+        """Validate dataloader batch sizes, supporting list of dataloaders."""
+        test_dl = self.trainer.datamodule.test_dataloader()
+        loaders = test_dl if isinstance(test_dl, (list, tuple)) else [test_dl]
+        for loader in loaders:
+            self._dataloader_batch_check(loader, "test")
+
     def prepare_targets(self, targets, images):
         """Prepare targets for training."""
         h_pad, w_pad = images.shape[-2:]
@@ -572,12 +556,28 @@ class OneformerPlModule(TAOLightningModule):
             status_level=status_logging.Status.RUNNING
         )
 
+    def _get_val_dataset_names(self):
+        """Return dataset names from the data module, falling back to indices."""
+        dm = getattr(self.trainer, "datamodule", None)
+        names = getattr(dm, "val_dataset_names", None)
+        if names and len(names) > 1:
+            return names
+        return None
+
+    def _get_test_dataset_names(self):
+        """Return dataset names from the data module, falling back to indices."""
+        dm = getattr(self.trainer, "datamodule", None)
+        names = getattr(dm, "test_dataset_names", None)
+        if names and len(names) > 1:
+            return names
+        return None
+
     def on_validation_epoch_start(self) -> None:
         """Initialize validation epoch."""
-        self.validation_step_outputs = []
+        self.validation_step_outputs = {}
 
-    def validation_step(self, batch, batch_idx):
-        """Perform a validation step."""
+    def _eval_step(self, batch):
+        """Shared inference logic for validation and test steps."""
         inputs = batch["images"]
         segms = batch["sem_segs"]
         tasks = batch["tasks"]
@@ -604,65 +604,107 @@ class OneformerPlModule(TAOLightningModule):
                 reduce_zero_label=False,
             )
         )
-        val_metrics = {
+        return {
             "area_intersect": area_intersect,
             "area_union": area_union,
             "area_pred_label": area_pred_label,
             "area_label": area_label,
         }
-        self.validation_step_outputs.append(val_metrics)
-        return val_metrics
 
-    def on_validation_epoch_end(self):
-        """Process validation epoch end."""
-        total_area_intersect, total_area_union = 0, 0
-        total_area_pred_label, total_area_label = 0, 0
+    def validation_step(self, batch, batch_idx, dataloader_idx=0):
+        """Perform a validation step."""
+        metrics = self._eval_step(batch)
+        self.validation_step_outputs.setdefault(dataloader_idx, []).append(metrics)
+        return metrics
 
-        for out in self.validation_step_outputs:
-            total_area_intersect += out["area_intersect"]
-            total_area_union += out["area_union"]
-            total_area_pred_label += out["area_pred_label"]
-            total_area_label += out["area_label"]
+    def _compute_and_log_metrics(self, outputs_by_dl, dataset_names, prefix=""):
+        """Compute IoU metrics per dataloader and combined, then log them.
 
-        iou = total_area_intersect / total_area_union
-        miou = np.nanmean(iou)
-        all_acc = total_area_intersect.sum() / total_area_label.sum()
-        self.log(
-            "mIoU",
-            miou,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-            sync_dist=True
-        )
-        self.log(
-            "all_acc",
-            all_acc,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-            sync_dist=True,
-        )
+        Args:
+            outputs_by_dl: dict mapping dataloader_idx -> list of metric dicts.
+            dataset_names: list of human-readable names (or None for single dataset).
+            prefix: optional prefix for logged metric keys (e.g. "test_").
+        """
+        multi = dataset_names is not None and len(outputs_by_dl) > 1
+        combined_intersect, combined_union, combined_label = 0, 0, 0
 
         self.status_logging_dict = {}
-        self.status_logging_dict["mIoU"] = float(miou)
-        self.status_logging_dict["ACC_all"] = float(all_acc)
+
+        for dl_idx in sorted(outputs_by_dl.keys()):
+            total_intersect, total_union, total_label = 0, 0, 0
+            for out in outputs_by_dl[dl_idx]:
+                total_intersect += out["area_intersect"]
+                total_union += out["area_union"]
+                total_label += out["area_label"]
+
+            combined_intersect += total_intersect
+            combined_union += total_union
+            combined_label += total_label
+
+            if multi:
+                ds_name = dataset_names[dl_idx]
+                iou = total_intersect / total_union
+                miou = float(np.nanmean(iou))
+                acc = float(total_intersect.sum() / total_label.sum())
+                self.log(
+                    f"{prefix}mIoU/{ds_name}", miou,
+                    on_step=False, on_epoch=True, prog_bar=False, sync_dist=True,
+                    add_dataloader_idx=False,
+                )
+                self.log(
+                    f"{prefix}all_acc/{ds_name}", acc,
+                    on_step=False, on_epoch=True, prog_bar=False, sync_dist=True,
+                    add_dataloader_idx=False,
+                )
+                self.status_logging_dict[f"mIoU/{ds_name}"] = miou
+                self.status_logging_dict[f"ACC/{ds_name}"] = acc
+
+                if self.iou_per_class:
+                    class_names = self.metadata.stuff_classes
+                    for i, class_iou in enumerate(iou):
+                        if i < len(class_names):
+                            cname = class_names[i].replace(" ", "_")
+                            self.log(
+                                f"{prefix}{cname}/{ds_name}", class_iou,
+                                on_step=False, on_epoch=True, prog_bar=False, sync_dist=True,
+                                add_dataloader_idx=False,
+                            )
+
+        combined_iou = combined_intersect / combined_union
+        combined_miou = float(np.nanmean(combined_iou))
+        combined_acc = float(combined_intersect.sum() / combined_label.sum())
+
+        self.log(
+            f"{prefix}mIoU", combined_miou,
+            on_step=False, on_epoch=True, prog_bar=True, sync_dist=True,
+            add_dataloader_idx=False,
+        )
+        self.log(
+            f"{prefix}all_acc", combined_acc,
+            on_step=False, on_epoch=True, prog_bar=True, sync_dist=True,
+            add_dataloader_idx=False,
+        )
+        self.status_logging_dict[f"{prefix}mIoU"] = combined_miou
+        self.status_logging_dict[f"{prefix}ACC_all"] = combined_acc
 
         if self.iou_per_class:
             class_names = self.metadata.stuff_classes
-            for i, class_iou in enumerate(iou):
+            for i, class_iou in enumerate(combined_iou):
                 if i < len(class_names):
-                    class_name = class_names[i].replace(" ", "_")
+                    cname = class_names[i].replace(" ", "_")
                     self.log(
-                        f"{class_name}",
-                        class_iou,
-                        on_step=False,
-                        on_epoch=True,
-                        prog_bar=False,  # Set to False to avoid cluttering the progress bar
-                        sync_dist=True
+                        f"{prefix}{cname}", class_iou,
+                        on_step=False, on_epoch=True, prog_bar=False, sync_dist=True,
+                        add_dataloader_idx=False,
                     )
-                    self.status_logging_dict[f"IoU_{class_name}"] = float(class_iou)
+                    self.status_logging_dict[f"IoU_{cname}"] = float(class_iou)
 
+    def on_validation_epoch_end(self):
+        """Process validation epoch end -- reports per-dataset and combined metrics."""
+        self._compute_and_log_metrics(
+            self.validation_step_outputs,
+            self._get_val_dataset_names(),
+        )
         self.validation_step_outputs.clear()
 
         if not self.trainer.sanity_checking:
@@ -673,16 +715,29 @@ class OneformerPlModule(TAOLightningModule):
             )
 
     def on_test_epoch_start(self):
-        """Test epoch start"""
-        self.on_validation_epoch_start()
+        """Test epoch start."""
+        self.test_step_outputs = {}
 
-    def test_step(self, batch, batch_idx):
-        """Test step"""
-        return self.validation_step(batch, batch_idx)
+    def test_step(self, batch, batch_idx, dataloader_idx=0):
+        """Test step -- runs the same inference as validation_step."""
+        metrics = self._eval_step(batch)
+        self.test_step_outputs.setdefault(dataloader_idx, []).append(metrics)
+        return metrics
 
     def on_test_epoch_end(self):
-        """Test epoch end"""
-        self.on_validation_epoch_end()
+        """Test epoch end -- per-dataset and combined metrics."""
+        self._compute_and_log_metrics(
+            self.test_step_outputs,
+            self._get_test_dataset_names(),
+            prefix="test_",
+        )
+        self.test_step_outputs.clear()
+
+        status_logging.get_status_logger().kpi = self.status_logging_dict
+        status_logging.get_status_logger().write(
+            message="Test metrics generated.",
+            status_level=status_logging.Status.RUNNING
+        )
 
     def predict_step(self, batch, batch_idx):
         """Perform a prediction step."""
@@ -709,7 +764,7 @@ class OneformerPlModule(TAOLightningModule):
             visualizer = Visualizer(
                 raw_images[i],
                 MetadataCatalog.get("custom"),
-                instance_mode=ColorMode.IMAGE
+                instance_mode=ColorMode.SEGMENTATION
             )
             dh, dw = batch_info[i]['padding']
             image_size = batch_info[i]['image_size']
@@ -719,12 +774,12 @@ class OneformerPlModule(TAOLightningModule):
             if self.mode == 'semantic':
                 sem_seg = self.semantic_inference(mask_cls, mask_pred)
                 vis_output = visualizer.draw_sem_seg(sem_seg.argmax(dim=0).cpu())
-                vis_output.save(f"{self.cfg.results_dir}/pred_{batch_info[i]['filename']}.png")
+                # vis_output.save(f"{self.cfg.results_dir}/pred_{batch_info[i]['filename']}.png")
             elif self.mode == "instance":
                 result = self.instance_inference(mask_cls, mask_pred)
                 vis_output = visualizer.draw_instance_predictions(
                     predictions=result.to(torch.device("cpu")),
-                    mask_threshold=self.object_mask_threshold
+                    mask_threshold=0.1,
                 )
             elif self.mode == "panoptic":
                 panoptic_seg, segments_info = self.panoptic_inference(mask_cls, mask_pred)
@@ -737,7 +792,7 @@ class OneformerPlModule(TAOLightningModule):
                 os.path.join(
                     self.cfg.inference.results_dir,
                     batch_info[i]["filename"] + ".jpg"),
-                vis_output.get_image()
+                cv2.cvtColor(vis_output.get_image(), cv2.COLOR_RGB2BGR)
             )
 
     def forward(self, inputs, tasks=None, texts=None):
@@ -765,14 +820,32 @@ class OneformerPlModule(TAOLightningModule):
     def instance_inference(self, mask_cls, mask_pred):
         """Post process for instance segmentation."""
         image_size = mask_pred.shape[-2:]
-        # [Q, K]
-        scores = F.softmax(mask_cls, dim=-1)[:, 1:]
+        # [Q, K] — remove no-object class (last), consistent with semantic_inference
+        scores = F.softmax(mask_cls, dim=-1)[..., :-1]
         labels = torch.arange(self.num_classes, device=self.device).unsqueeze(0).repeat(self.num_queries, 1).flatten(0, 1)
         scores_per_image, topk_indices = scores.flatten(0, 1).topk(self.test_topk_per_image, sorted=False)
         labels_per_image = labels[topk_indices]
 
         topk_indices = topk_indices // self.num_classes
         mask_pred = mask_pred[topk_indices]
+
+        # Filter to thing classes only and remap to thing-class indices for the visualizer.
+        # thing_dataset_id_to_contiguous_id maps dataset IDs -> contiguous IDs for things,
+        # and thing_classes[j] corresponds to the j-th entry in that mapping.
+        thing_contiguous_ids = list(self.metadata.thing_dataset_id_to_contiguous_id.values())
+        thing_id_set = set(thing_contiguous_ids)
+        contiguous_to_thing_idx = {cid: i for i, cid in enumerate(thing_contiguous_ids)}
+
+        keep = torch.tensor(
+            [label.item() in thing_id_set for label in labels_per_image],
+            dtype=torch.bool, device=self.device,
+        )
+        scores_per_image = scores_per_image[keep]
+        mask_pred = mask_pred[keep]
+        labels_per_image = torch.tensor(
+            [contiguous_to_thing_idx[label.item()] for label in labels_per_image[keep]],
+            dtype=torch.long, device=self.device,
+        )
 
         result = Instances(image_size)
         result.pred_masks = (mask_pred > 0).float()
@@ -783,13 +856,10 @@ class OneformerPlModule(TAOLightningModule):
 
     def panoptic_inference(self, mask_cls, mask_pred):
         """Post process for panoptic segmentation."""
-        scores, labels = F.softmax(mask_cls, dim=-1)[..., 1:].max(-1)
-        # Original Mask2former
-        # scores, labels = F.softmax(mask_cls, dim=-1).max(-1)
+        # Remove no-object class (last), consistent with semantic/instance inference.
+        scores, labels = F.softmax(mask_cls, dim=-1)[..., :-1].max(-1)
         mask_pred = mask_pred.sigmoid()
         keep = scores > self.object_mask_threshold
-        # original Mask2former:
-        # keep = labels.ne(self.num_classes) & (scores > self.object_mask_threshold)
         cur_scores = scores[keep]
         cur_classes = labels[keep]
         cur_masks = mask_pred[keep]

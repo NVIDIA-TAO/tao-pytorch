@@ -1,16 +1,5 @@
-# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """Quantize an OCDNet model using the configured backend.
 
@@ -21,14 +10,17 @@ from the dataset specified in ``quant_calibration_dataset``, runs quantization v
 
 import os
 
+from omegaconf import OmegaConf
+
 from nvidia_tao_pytorch.core.decorators.workflow import monitor_status
 from nvidia_tao_pytorch.core.hydra.hydra_runner import hydra_runner
 from nvidia_tao_pytorch.core.tlt_logging import obfuscate_logs, logging
 
-from nvidia_tao_core.config.ocdnet.default_config import ExperimentConfig
+from nvidia_tao_pytorch.config.ocdnet.default_config import ExperimentConfig
 from nvidia_tao_pytorch.core.quantization import ModelQuantizer
 from nvidia_tao_pytorch.cv.ocdnet.model.pl_ocd_model import OCDnetModel
 from nvidia_tao_pytorch.cv.ocdnet.data_loader.pl_ocd_data_module import OCDDataModule
+from nvidia_tao_pytorch.cv.ocdnet.utils.util import load_checkpoint
 
 
 spec_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -58,11 +50,11 @@ def main(cfg: ExperimentConfig) -> None:
     # Build the Lightning model and extract the underlying nn.Module
     logging.debug("Loading OCDNet checkpoint")
     if not cfg.quantize.model_path.endswith(".onnx"):
-        pl_model = OCDnetModel.load_from_checkpoint(
-            cfg.quantize.model_path,
-            map_location="cpu",
-            experiment_spec=cfg,
-        )
+        experiment_config = OmegaConf.to_container(cfg, resolve=True)
+        dm = OCDDataModule(experiment_config)
+        pl_model = OCDnetModel(experiment_config, dm, "predict")
+        checkpoint = load_checkpoint(cfg.quantize.model_path, to_cpu=True)
+        pl_model.model.load_state_dict(checkpoint)
         orig_model = pl_model.model
     else:
         orig_model = None  # ModelOpt ONNX backend loads the model from the file.

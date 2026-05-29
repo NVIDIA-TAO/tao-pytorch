@@ -1,83 +1,75 @@
 addict==2.4.0
-anyconfig==0.14.0
-apispec==6.8.1
-apispec_webframeworks==1.2.0
-astroid==3.3.8
-beartype==0.19.0
-ccimport==0.4.4
+anyconfig==0.15.1
+astroid==3.3.11  # held at 3.3.x to match pylint 3.3.x; pylint 4.x requires isort>=5 which conflicts with nvidia-eff's isort<5
+beartype==0.22.9
+braceexpand
+einops
+# sam3 is installed --no-deps from its own Dockerfile layer: its setup.py
+# pins numpy<2, which conflicts with the 26.03 base (numpy 2.x) and
+# opencv-python-headless 4.13 (numpy>=2). Imports are guarded by
+# try/except ImportError in nvidia_tao_pytorch/cv/backbone_v2/sam3.py.
 colorama==0.4.6
-colored==2.3.0
 cutex==0.3.9
 easydict==1.13
-faiss-cpu==1.12.0
-fire==0.7.0
-flake8==7.1.1
-flask==3.1.0
-flask_limiter==3.10.1
-gdown==5.2.0
+faiss-cpu==1.13.2
+fire==0.7.1
+flake8==7.3.0
 gradio>=6.7.0,<7.0.0
-h5py==3.13.0
+h5py==3.16.0
 hydra-core==1.3.2
-imageio==2.37.0
-imgaug==0.4.0
+imageio==2.37.3
+# imgaug dropped: unmaintained since 2020, breaks on NumPy 2.x (np.sctypes,
+# np.complex). OCDNet's iaa_augment was rewritten to use albumentations.
+albumentations==2.0.8
+jaxtyping==0.3.9  # runtime dep of warpconvnet wheel (installed --no-deps)
 jsonlines==4.0.0
-lazy-import==0.2.2
-lazy-object-proxy==1.10.0
-lmdb==1.6.2
-marshmallow==3.26.1
-marshmallow_enum==1.5.1
+lmdb==2.2.0
 mccabe==0.7.0
-meshcat==0.3.2
-mypy==1.15.0
+mypy==1.20.2
 natsort==8.4.0
-nltk==3.9.3
-numpy==1.26.4
+nltk==3.9.4
+# numpy: pinned in the 26.03 base image (PyTorch 2.11 ships numpy 2.x); do not override.
 --extra-index-url https://edge.urm.nvidia.com/artifactory/api/pypi/sw-metropolis-pypi/simple
 spatialai_data_utils==1.0.0
 --extra-index-url https://pypi.nvidia.com
 nvidia-eff==0.6.6
 nvidia-eff-tao-encryption==0.1.9
-# Install onnx-graphsurgeon with extra-index-url
---extra-index-url https://pypi.ngc.nvidia.com
-onnx-graphsurgeon==0.5.8
-onnxoptimizer==0.3.13
-onnxsim==0.4.36
-opencv-python==4.11.0.86
+onnx-graphsurgeon==0.6.1
+onnxsim==0.6.2
+opencv-python-headless==4.13.0.92
 open3d==0.19.0 ; platform_machine == "x86_64"
 openpyxl==3.1.5
-parameterized==0.9.0
-pccm==0.4.16
-Polygon3==3.0.9.1
 pyarmor==8.5.8  # 8.5.8 is version nvidia-eff wheels use
-pyclipper==1.3.0.post6
-pycodestyle==2.12.1
-pycocotools==2.0.8  # base image has custom 2.0+nv0.8.1 version which has bugs
-pycuda==2025.1.2
-pyDeprecate==0.3.2
+pyclipper==1.4.0
+pycodestyle==2.14.0
+pycocotools==2.0.11  # base image has custom 2.0+nv0.8.1 version which has bugs
+pycuda==2026.1
 pydocstyle==6.3.0
-pyflakes==3.2.0
-pylint==3.3.4
+pyflakes==3.4.0
+pylint==3.3.7  # held at 3.3.x: 4.x requires isort>=5, nvidia-eff requires isort<5
 pyquaternion==0.9.9
 pyrr==0.10.3
-python-multipart==0.0.22
-PyWavelets==1.8.0
-scikit-image==0.25.1
-seaborn==0.13.2
-shapely==2.0.7
-tensorboardX==2.6.2.2
-terminaltables==3.1.10
+scikit-image==0.26.0
+shapely==2.1.2
+tensorboardX==2.6.5
 transformers<5.0.0
-ujson==5.10.0
-Unidecode==1.3.8
-wandb==0.23.0
-webdataset==0.2.111
+ujson==5.12.0
+wandb==0.26.1
+webdataset==1.0.2
 yapf==0.43.0
 memoizer==0.0.1
 git+https://github.com/lilohuang/PyTurboJPEG.git
 git+https://github.com/facebookresearch/pytorch3d.git
-pytest-testmon==2.1.3
-cachetools==7.0.1
+pytest-testmon==2.2.0
+cachetools==7.0.6
 # Security
-urllib3>=2.6.3
-Pillow>=12.1.1
-OpenEXR>=3.4.6
+# urllib3: provided by 26.03 base (urllib3 2.6.3) — do not override
+# NGC security scan remediation (2026-05-15): pin upgraded versions to override
+# vulnerable versions inherited from the pytorch:26.03-py3 base image.
+pillow==12.2.0          # GHSA-whj4-6x5x-4v2j, GHSA-pwv6-vv43-88gr (12.1.1 vulnerable)
+pydicom==3.0.2          # GHSA-v856-2rf8-9f28 (3.0.1 vulnerable); overrides tao-core pin
+mistune==3.2.1          # GHSA-8mp2-v27r-99xp (3.2.0 vulnerable)
+notebook==7.5.6         # GHSA-rch3-82jr-f9w9 (7.5.5 vulnerable)
+jupyterlab==4.5.7       # GHSA-rch3-82jr-f9w9, GHSA-37w4-hwhx-4rc4 (4.5.6 vulnerable)
+jupyter-server==2.18.0  # GHSA-5mrq-x3x5-8v8f, GHSA-5789-5fc7-67v3, GHSA-24qx-w28j-9m6p (2.17.0 vulnerable)
+onnx==1.21.0            # GHSA-q56x-g2fj-4rj6, GHSA-hqmj-h5c6-369m, GHSA-538c-55jv-c5g9, GHSA-3r9x-f23j-gc73 (1.18.0 vulnerable)

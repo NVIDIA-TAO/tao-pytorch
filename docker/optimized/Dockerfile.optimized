@@ -1,0 +1,166 @@
+# syntax=docker/dockerfile:1.7
+# Optimized Tier-2 base image. Functionally identical to docker/Dockerfile, but
+# the heavy from-source builds (ORT, torch-scatter, WarpConvNet) are pulled
+# from pre-built artifact images instead of compiled inline. xformers is
+# installed directly from NVIDIA's internal GitLab PyPI registry — pin lives
+# next to the other pip-install layers below.
+#
+# Artifact images are produced by docker/optimized/artifacts/Dockerfile.<component>
+# and pinned by content-addressable tag in docker/optimized/artifacts.lock.json.
+# docker/optimized/build.sh wraps the full flow; the buildx invocation it issues is:
+#
+#   ORT=$(./docker/optimized/lockhash.sh --image ort)
+#   TS=$(./docker/optimized/lockhash.sh --image torch_scatter)
+#   WC=$(./docker/optimized/lockhash.sh --image warpconvnet)
+#   docker buildx build \
+#     -f docker/optimized/Dockerfile.optimized \
+#     --build-arg ORT_IMAGE=$ORT \
+#     --build-arg TORCH_SCATTER_IMAGE=$TS \
+#     --build-arg WARPCONVNET_IMAGE=$WC \
+#     -t nvcr.io/nvstaging/tao/tao_pytorch_base_image:<tag> \
+#     --push .
+
+ARG PYTORCH_BASE_IMAGE=nvcr.io/nvidia/pytorch:26.03-py3
+ARG ORT_IMAGE
+ARG TORCH_SCATTER_IMAGE
+ARG WARPCONVNET_IMAGE
+
+# Re-anchor artifact images as named stages so COPY --from=<stage> is stable
+# regardless of how the build-arg is resolved (tag, digest, etc.).
+FROM ${ORT_IMAGE}            AS ort_wheels
+FROM ${TORCH_SCATTER_IMAGE}  AS torch_scatter_wheels
+FROM ${WARPCONVNET_IMAGE}    AS warpconvnet_wheels
+
+FROM ${PYTORCH_BASE_IMAGE}
+
+# Docker buildx provides these automatically for cross-platform detection
+ARG BUILDPLATFORM
+ARG TARGETPLATFORM
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+############################################################
+# 1) APT system deps (rarely changes)
+############################################################
+COPY docker/requirements-apt.txt requirements-apt.txt
+RUN apt-get upgrade && apt-get update && \
+  xargs apt-get install -y < requirements-apt.txt && \
+  rm requirements-apt.txt && \
+  rm -rf /var/lib/apt/lists/*
+
+# Set platform-specific library path using uname
+RUN ARCH_LIB_PATH="/usr/lib/$(uname -m)-linux-gnu" && \
+    echo "export LD_LIBRARY_PATH=\${LD_LIBRARY_PATH}:${ARCH_LIB_PATH}" >> /etc/bash.bashrc
+ENV BASH_ENV=/etc/bash.bashrc
+
+# Upgrade pip once for all subsequent layers
+RUN pip install --upgrade pip
+
+############################################################
+# 2) Build-time ENVs needed by from-source pip installs in Tier 3
+#    (pytorch3d in requirements-pip.txt compiles CUDA kernels).
+############################################################
+ENV TORCH_CUDA_ARCH_LIST="7.5 8.0 8.6 9.0 9.0a 10.0 11.0 12.0+PTX"
+ENV CPATH="/usr/local/cuda/include/cccl:${CPATH}"
+ENV NVCC_FLAGS="--ptxas-options=-O2 --ptxas-options=-v"
+
+############################################################
+# 3) Install pre-built artifact wheels.
+#    Each artifact image is FROM scratch with /wheels/*.whl produced by
+#    docker/artifacts/Dockerfile.<component>. Layer is invalidated only when
+#    one of those artifact images changes (i.e., underlying pin or dockerfile),
+#    not when docker/requirements-pip*.txt churns.
+############################################################
+RUN pip install --no-deps cupy-cuda13x==13.6.0  # CUDA 13.x runtime support
+
+COPY --from=torch_scatter_wheels /wheels /tmp/wheels/torch-scatter/
+COPY --from=warpconvnet_wheels   /wheels /tmp/wheels/warpconvnet/
+COPY --from=ort_wheels           /wheels /tmp/wheels/ort/
+
+RUN pip install --no-deps \
+        /tmp/wheels/torch-scatter/*.whl \
+        /tmp/wheels/warpconvnet/*.whl \
+        /tmp/wheels/ort/*.whl && \
+    rm -rf /tmp/wheels
+
+# xformers comes from NVIDIA's internal GitLab PyPI registry. The local-version
+# segment (+nv26.3.1.<pipeline>) ties the wheel's torch/CUDA ABI to the base
+# image — bump in lockstep with PYTORCH_BASE_IMAGE upgrades.
+ARG XFORMERS_VERSION=0.0.33+nv26.3.1.49215124
+ARG XFORMERS_INDEX_URL=https://gitlab-master.nvidia.com/api/v4/projects/100660/packages/pypi/simple
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --no-deps "xformers==${XFORMERS_VERSION}" \
+        --index-url "${XFORMERS_INDEX_URL}"
+
+############################################################
+# 4) Cheap pip-requirements layers — re-run quickly when pins change
+#    without invalidating the artifact-wheel layer above.
+############################################################
+
+COPY docker/requirements-pip.txt requirements-pip.txt
+RUN pip install --no-build-isolation -r requirements-pip.txt \
+  && rm requirements-pip.txt
+
+COPY docker/requirements-pip-pytorch.txt requirements-pip-pytorch.txt
+RUN pip install --no-build-isolation --ignore-installed --no-deps -r requirements-pip-pytorch.txt \
+  && rm requirements-pip-pytorch.txt
+
+COPY docker/requirements-pip-odise.txt requirements-pip-odise.txt
+RUN pip install --no-build-isolation --ignore-installed --no-deps -r requirements-pip-odise.txt \
+  && rm requirements-pip-odise.txt
+
+COPY docker/requirements-pip-quantization.txt requirements-pip-quantization.txt
+RUN pip install --no-build-isolation --upgrade --no-deps -r requirements-pip-quantization.txt \
+  && rm requirements-pip-quantization.txt
+
+COPY docker/requirements-pip-nvpanoptix3d.txt requirements-pip-nvpanoptix3d.txt
+RUN pip install meson-python meson ninja \
+  && pip install --no-build-isolation --upgrade --no-deps -r requirements-pip-nvpanoptix3d.txt \
+  && rm requirements-pip-nvpanoptix3d.txt
+
+# sam3: installed --no-deps because its setup.py pins numpy<2, which collides
+# with the 26.03 base (numpy 2.x) and opencv-python-headless 4.13 (numpy>=2).
+# Importers in nvidia_tao_pytorch/cv/backbone_v2/sam3.py guard with try/except,
+# so the install is best-effort — keep it after the bulk pip layers so a
+# transient github outage doesn't invalidate them.
+RUN pip install --no-build-isolation --no-deps \
+        git+https://github.com/facebookresearch/sam3.git
+
+# PyMarchingCubes: xheon's repo is unmaintained since Mar 2022 and its C
+# extension uses NumPy 1.x-only constants (PyArray_DOUBLE/PyArray_ULONG) that
+# NumPy 2.x removed. Patch to the NPY_* names before building.
+ARG PYMARCHINGCUBES_COMMIT=a6ad0388187b50dc62032a39359463d811af6768
+RUN git clone https://github.com/xheon/PyMarchingCubes.git /tmp/PyMarchingCubes \
+  && cd /tmp/PyMarchingCubes \
+  && git checkout ${PYMARCHINGCUBES_COMMIT} \
+  && sed -i -e 's/PyArray_DOUBLE/NPY_DOUBLE/g' \
+            -e 's/PyArray_ULONG/NPY_ULONG/g' \
+            marching_cubes/src/pywrapper.cpp \
+  && pip install --no-build-isolation --no-deps . \
+  && cd / && rm -rf /tmp/PyMarchingCubes
+
+############################################################
+# 5) Final image setup
+############################################################
+
+# Setup user account
+ARG uid=1000
+ARG gid=1000
+RUN groupadd -r -f -g ${gid} taotoolkituser && useradd -o -r -l -u ${uid} -g ${gid} -ms /bin/bash taotoolkituser
+RUN usermod -aG sudo taotoolkituser
+RUN echo 'taotoolkituser:nvidia' | chpasswd
+RUN mkdir -p /workspace && chown taotoolkituser /workspace
+
+WORKDIR /tao-pt
+
+# Security: Remove all git-related files and folders from the image
+# This addresses security scan failures (credentials, internal URLs) and reduces image size
+RUN find / -type d -name ".git" -exec rm -rf {} + 2>/dev/null || true && \
+    find / -type f -name ".git" -exec rm -f {} + 2>/dev/null || true && \
+    find / -type f -name ".gitignore" -exec rm -f {} + 2>/dev/null || true && \
+    find / -type d -name ".github" -exec rm -rf {} + 2>/dev/null || true && \
+    find / -type d -name ".gitlab" -exec rm -rf {} + 2>/dev/null || true && \
+    find / -type f -name ".gitlab-ci.yml" -exec rm -f {} + 2>/dev/null || true && \
+    find / -type f -name "gitlab-ci.yml" -exec rm -f {} + 2>/dev/null || true
+
+CMD [ "/bin/bash" ]

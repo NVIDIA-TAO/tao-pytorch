@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="940" height="330" viewBox="0 0 940 330" role="img" aria-labelledby="title desc">
+  <title id="title">TAO PyTorch configuration flow</title>
+  <desc id="desc">Configuration flows from dataclass defaults to YAML specs to Hydra overrides and into task code.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#475569"/>
+    </marker>
+    <style>
+      .box { fill: #f8fafc; stroke: #334155; stroke-width: 1.5; rx: 10; }
+      .schema { fill: #eef2ff; stroke: #4f46e5; stroke-width: 1.7; rx: 10; }
+      .runtime { fill: #ecfdf5; stroke: #047857; stroke-width: 1.7; rx: 10; }
+      .label { font: 600 15px Arial, sans-serif; fill: #111827; }
+      .small { font: 12px Arial, sans-serif; fill: #374151; }
+      .path { stroke: #475569; stroke-width: 2; fill: none; marker-end: url(#arrow); }
+      .merge { stroke: #94a3b8; stroke-width: 1.5; stroke-dasharray: 5 4; fill: none; }
+    </style>
+  </defs>
+
+  <text x="470" y="30" text-anchor="middle" class="label">Configuration Flow</text>
+
+  <rect x="45" y="82" width="170" height="78" class="schema"/>
+  <text x="130" y="108" text-anchor="middle" class="label">Dataclass schema</text>
+  <text x="130" y="130" text-anchor="middle" class="small">config/&lt;task&gt;</text>
+  <text x="130" y="147" text-anchor="middle" class="small">defaults + metadata</text>
+
+  <rect x="275" y="82" width="170" height="78" class="box"/>
+  <text x="360" y="108" text-anchor="middle" class="label">Experiment YAML</text>
+  <text x="360" y="130" text-anchor="middle" class="small">experiment_specs</text>
+  <text x="360" y="147" text-anchor="middle" class="small">user-editable spec</text>
+
+  <rect x="505" y="82" width="170" height="78" class="box"/>
+  <text x="590" y="108" text-anchor="middle" class="label">Hydra overrides</text>
+  <text x="590" y="130" text-anchor="middle" class="small">train.num_gpus=1</text>
+  <text x="590" y="147" text-anchor="middle" class="small">CLI dotlist</text>
+
+  <rect x="735" y="82" width="160" height="78" class="runtime"/>
+  <text x="815" y="108" text-anchor="middle" class="label">Task config</text>
+  <text x="815" y="130" text-anchor="middle" class="small">cfg passed to</text>
+  <text x="815" y="147" text-anchor="middle" class="small">run_experiment</text>
+
+  <rect x="275" y="230" width="170" height="58" class="runtime"/>
+  <text x="360" y="255" text-anchor="middle" class="label">default_specs</text>
+  <text x="360" y="275" text-anchor="middle" class="small">generated YAML</text>
+
+  <rect x="735" y="230" width="160" height="58" class="runtime"/>
+  <text x="815" y="255" text-anchor="middle" class="label">Task code</text>
+  <text x="815" y="275" text-anchor="middle" class="small">model/data/export</text>
+
+  <path d="M215 121 H275" class="path"/>
+  <path d="M445 121 H505" class="path"/>
+  <path d="M675 121 H735" class="path"/>
+  <path d="M130 160 V259 H275" class="path"/>
+  <path d="M815 160 V230" class="path"/>
+  <path d="M215 121 C240 55 480 55 505 121" class="merge"/>
+  <path d="M445 121 C470 188 710 188 735 121" class="merge"/>
+</svg>

@@ -1,0 +1,72 @@
+results_dir: ???
+
+model:
+  backbone: vit_large_codetr
+  num_queries: 1500
+  num_feature_levels: 5
+  return_interm_indices: [0, 1, 2, 3, 4]
+  two_stage_type: standard
+  num_co_heads: 2
+  co_head_num_convs: 1
+  hidden_dim: 256
+  nheads: 8
+  enc_layers: 6
+  dec_layers: 6
+  dim_feedforward: 2048
+  dec_n_points: 4
+  enc_n_points: 4
+  pe_temperatureH: 20
+  pe_temperatureW: 20
+  num_select: 1000
+  # Match original Co-DETR test_cfg[0] for the main DETR query head:
+  #   dict(max_per_img=1000, nms=dict(type='soft_nms', iou_threshold=0.8))
+  soft_nms_enabled: true
+  soft_nms_method: linear
+  soft_nms_iou_threshold: 0.8
+
+dataset:
+  dataset_type: default
+  num_classes: 80
+  contiguous_labels: true
+  batch_size: 1
+  augmentation:
+    fixed_padding: true
+    pad_size_divisor: 32        # match Co-DETR Pad(size_divisor=32); takes precedence over fixed_padding
+    fixed_random_crop: 1536
+    input_mean: [0.485, 0.456, 0.406]
+    input_std: [0.229, 0.224, 0.225]
+    test_random_resize: 1280
+    random_resize_max_size: 2048
+  infer_data_sources:
+    image_dir: ???
+    classmap: ???
+  test_data_sources:
+    image_dir: ???
+    json_file: ???
+  eval_class_ids: null
+
+train:
+  activation_checkpoint: False
+  freeze: []
+
+inference:
+  checkpoint: ???
+  conf_threshold: 0.2
+  batch_size: 1
+  save_annotated_images: false
+  # input_width: 640
+  # input_height: 640
+  # Optional: group classmap categories into output categories. Detections
+  # whose original class is not in any group are dropped. When soft-NMS is
+  # enabled (model.soft_nms_enabled), an extra per-output-category soft-NMS
+  # pass runs so duplicates within a merged group are suppressed.
+  category_mapping:
+    bicycle:   ["bicycle", "motorcycle"]
+    car:       ["car", "bus", "train", "truck"]
+    person:    ["person"]
+    road_sign: ["traffic light", "stop sign"]
+evaluate:
+  checkpoint: ???
+  conf_threshold: 0.0
+  # input_width: 640
+  # input_height: 640

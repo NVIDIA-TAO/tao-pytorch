@@ -1,0 +1,82 @@
+results_dir: /workspace/res34_to_mit_b0
+model:
+  backbone:
+    type: mit_b0
+    pretrained_backbone_path: ???
+    freeze_backbone: false
+dataset:
+  root_dir: /datasets/split/
+  num_classes: 0
+  img_size: 224
+  batch_size: 32
+  workers: 8
+  augmentation:
+    random_flip:
+      vflip_probability: 0.0
+      hflip_probability: 0.5
+      enable: true
+    random_rotate:
+      rotate_probability: 0.5
+      angle_list:
+      - 90.0
+      - 180.0
+      - 270.0
+      enable: false
+    random_color:
+      brightness: 0.4
+      contrast: 0.4
+      saturation: 0.4
+      hue: 0.0
+      enable: true
+      color_probability: 0.5
+    with_scale_random_crop:
+      scale_range:
+      - 1.0
+      - 1.2
+      enable: false
+    with_random_blur: false
+    with_random_crop: true
+    mean:
+    - 0.485
+    - 0.456
+    - 0.406
+  train_dataset:
+    images_dir: /datasets/split/val
+  val_dataset:
+    images_dir: /datasets/split/val
+  test_dataset:
+    images_dir: /datasets/split/val
+train:
+  num_gpus: 1
+  gpu_ids:
+  - 0
+  num_nodes: 1
+  seed: 47
+  cudnn:
+    benchmark: false
+    deterministic: true
+  num_epochs: 5
+  checkpoint_interval: 1
+  validation_interval: 1
+  resume_training_checkpoint_path: null
+  optim:
+    monitor_name: val_loss
+    optim: adamw
+    lr: 0.001
+    policy: cosine
+    momentum: 0.9
+    weight_decay: 0.05
+    skip_names: ["bias", "bn", "norm", "gamma", "gamma1", "gamma2", "temperature"]
+  tensorboard:
+    enabled: true
+    infrequent_logging_frequency: 2
+  enable_ema: false
+distill:
+  loss_type: "balanced"
+  # Optional: student_resolution (defaults to dataset.img_size). For multi-view use tar_data_sources.
+  # teacher: list of configs; each may set input_size and match_student_resolution (EVFM-style).
+  teacher:
+    backbone:
+      type: resnet_34
+      freeze_backbone: True
+  pretrained_teacher_model_path: ???

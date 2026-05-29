@@ -1,19 +1,8 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
+#
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """RADIO backbone."""
 
@@ -77,6 +66,15 @@ radio_model_cfg = {
         "init_values": 1e-5,
         "reg_tokens": 4,
         "no_embed_class": True,
+    },
+    # CRADIOV4 SO400M.
+    "vit_so400m_patch16_224": {
+        "img_size": 224,
+        "patch_size": 16,
+        "embed_dim": 1152,
+        "depth": 27,
+        "num_heads": 16,
+        "mlp_ratio": 4304 / 1152,
     },
 }
 
@@ -517,6 +515,7 @@ class RADIOBase(nn.Module):
         vit_backbone.head = nn.Identity()
 
         # Enable cropped position embedding.
+        # resolution is nominal for init; ViTPatchGenerator.forward uses x.shape[2:] for pos enc and supports variable input size
         vit_backbone = self._enable_cpe(
             vit_backbone,
             resolution=self.resolution,
@@ -570,10 +569,11 @@ class RADIOBase(nn.Module):
         cls_token = model.cls_token is not None
         max_img_size = int(round(max_img_size / patch_size) * patch_size)
 
+        # input_dims: nominal resolution for init; forward uses actual x.shape[2:] in apply_pos_enc (variable resolution)
         patch_generator = ViTPatchGenerator(
             patch_size=patch_size,
             embed_dim=embed_dim,
-            input_dims=resolution,  # Ensure the correct resolution is passed to ViTPatchGenerator.
+            input_dims=resolution,
             normalize_patches=normalize_patches,
             cls_token=cls_token,
             max_input_dims=max_img_size,
@@ -837,18 +837,31 @@ class RADIO(BackboneBase):
         spatial_features = spatial_features.permute(0, 2, 1).view(B, C, H, W)
         return spatial_features
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, return_features: bool = False, return_logits: bool = False) -> torch.Tensor:
         """Forward.
 
         Args:
             x (Tensor): Input tensor.
-
+            return_features (bool): Whether to return the spatial features.
+            return_logits (bool): Whether to return the summary logits.
         Returns:
             summary (Tensor): Summary tensor.
         """
-        summary, _ = self.radio(x)
-        summary = self.head(summary)
-        return summary
+        summary, spatial_features = self.radio(x)
+        if return_features:
+            B, _, C = spatial_features.shape
+            assert C == self.num_features // len(self.summary_idxs), \
+                f"Number of features mismatch: {C} != {self.num_features // len(self.summary_idxs)}"
+            # [B, L, C] -> [B, C, H, W]; use actual input size so variable resolution works (e.g. multiview/stochastic)
+            H = x.shape[2] // self.patch_size
+            W = x.shape[3] // self.patch_size
+            spatial_features = spatial_features.permute(0, 2, 1).view(B, C, H, W)
+            return summary, spatial_features
+        else:
+            if return_logits:
+                return summary
+            else:
+                return self.head(summary)
 
 
 @BACKBONE_REGISTRY.register()
@@ -973,5 +986,43 @@ def c_radio_v3_vit_huge_patch16_reg4_dinov2(**kwargs):
         num_teacher=4,
         cpe_max_size=2048,
         register_multiple=8,
+        **kwargs,
+    )
+
+
+@BACKBONE_REGISTRY.register()
+def c_radio_v4_vit_huge_patch16(**kwargs):
+    """CRADIOV4 ViT Huge Patch16.
+
+    The released v4 checkpoint has one CLS token per teacher, but only SigLIP2
+    and DINOv3 are exposed as backbone summary tokens; SAM3 is spatial/adaptor
+    only.
+    """
+    return RADIO(
+        backbone="vit_huge_patch16_224",
+        summary_idxs=[0, 1],
+        window_size=None,
+        num_teacher=3,
+        cpe_max_size=2048,
+        register_multiple=10,
+        **kwargs,
+    )
+
+
+@BACKBONE_REGISTRY.register()
+def c_radio_v4_vit_so400m_patch16(**kwargs):
+    """CRADIOV4 SigLIP-SO400M Patch16.
+
+    The released v4 checkpoint has one CLS token per teacher, but only SigLIP2
+    and DINOv3 are exposed as backbone summary tokens; SAM3 is spatial/adaptor
+    only.
+    """
+    return RADIO(
+        backbone="vit_so400m_patch16_224",
+        summary_idxs=[0, 1],
+        window_size=None,
+        num_teacher=3,
+        cpe_max_size=2048,
+        register_multiple=10,
         **kwargs,
     )

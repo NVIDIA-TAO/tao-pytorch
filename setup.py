@@ -1,24 +1,25 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """Setup script to build the TLT launcher package."""
 
 import os
+import platform
 import setuptools
 
 from release.python.utils import utils
 from torch.utils.cpp_extension import BuildExtension
+
+
+_IS_X86_64 = platform.machine() in ("x86_64", "AMD64")
+
+
+def _spatial_transform_cxx_flags():
+    """Compile flags for SpatialTransformOps. -mavx2 is x86-only."""
+    flags = ["-std=c++17", "-O3", "-DNDEBUG", "-fopenmp", "-DOMP_NESTED=true"]
+    if _IS_X86_64:
+        flags.append("-mavx2")
+    return flags
 
 
 version_locals = utils.get_version_details()
@@ -79,7 +80,6 @@ setuptools.setup(
             'ocdnet=nvidia_tao_pytorch.cv.ocdnet.entrypoint.ocdnet:main',
             'bevfusion=nvidia_tao_pytorch.cv.bevfusion.entrypoint.bevfusion:main',
             'sparse4d=nvidia_tao_pytorch.cv.sparse4d.entrypoint.sparse4d:main',
-            'nvpanoptix3d=nvidia_tao_pytorch.cv.nvpanoptix3d.entrypoint.nvpanoptix3d:main',
             # Pointpillars entry point
             'optical_inspection=nvidia_tao_pytorch.cv.optical_inspection.entrypoint.optical_inspection:main',
             'pointpillars=nvidia_tao_pytorch.pointcloud.pointpillars.entrypoint.pointpillars:main',
@@ -93,6 +93,7 @@ setuptools.setup(
             'mae=nvidia_tao_pytorch.ssl.mae.entrypoint.mae:main',
             # Multimodal entry point
             'clip=nvidia_tao_pytorch.multimodal.clip.entrypoint.clip:main',
+            'radio=nvidia_tao_pytorch.multimodal.radio.entrypoint.radio:main',
         ]
     },
     cmdclass={'build_ext': BuildExtension},
@@ -205,7 +206,32 @@ setuptools.setup(
             include_dirs=['src'],
             define_macros=[("WITH_CUDA", None)],
             extra_flags = utils.get_extra_compile_args()
-        )
+        ),
+        utils.make_cuda_ext(
+            name='FastToTensor',
+            module='nvidia_tao_pytorch.multimodal.radio.dataloader.ops',
+            sources=[
+                'src/fast_to_tensor_api.cpp',
+                'src/fast_to_tensor.cpp',
+            ],
+            include_dirs=['src'],
+            extra_flags={"cxx": ["-O3", "-march=native"]},
+        ),
+        utils.make_cuda_ext(
+            name='SpatialTransformOps',
+            module='nvidia_tao_pytorch.multimodal.radio.dataloader.ops',
+            sources=[
+                'src/spatial_transform_api.cpp',
+                'src/spatial_transform_cpu.cpp',
+                'src/spatial_transform_gpu.cu',
+            ],
+            include_dirs=['src'],
+            define_macros=[("WITH_CUDA", None)],
+            extra_flags={
+                "cxx": _spatial_transform_cxx_flags(),
+                "nvcc": utils.get_extra_compile_args()["nvcc"] + ["-lineinfo"],
+            },
+        ),
     ],
 )
 

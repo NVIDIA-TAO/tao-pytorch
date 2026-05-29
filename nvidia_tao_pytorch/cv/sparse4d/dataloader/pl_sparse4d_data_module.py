@@ -1,16 +1,5 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """Sparse4D DataModule for TAO PyTorch."""
 
@@ -126,6 +115,25 @@ class Sparse4DDataModule(pl.LightningDataModule):
         self.use_h5_file_for_rgb = self.dataset_config["use_h5_file_for_rgb"]
         self.use_h5_file_for_depth = self.dataset_config["use_h5_file_for_depth"]
 
+        # Lazy loading / pkl sampling parameters
+        self.lazy_load = self.dataset_config.get("lazy_load", False)
+        self.lazy_load_cache_size = self.dataset_config.get("lazy_load_cache_size", 50)
+        self.pkl_sample_size = self.dataset_config.get("pkl_sample_size", 0)
+        pkl_cam_counts_path = self.dataset_config.get("pkl_cam_counts_path", "")
+        self.pkl_cam_counts_path = pkl_cam_counts_path if pkl_cam_counts_path else None
+
+        # FPS drop augmentation
+        self.fps_drop_prob = self.dataset_config.get("fps_drop_prob", 0)
+        target_fps = self.dataset_config.get("target_fps_choices", None)
+        self.target_fps_choices = list(target_fps) if target_fps else None
+
+        # Camera subsampling
+        self.max_cameras = self.dataset_config.get("max_cameras", -1)
+
+        # Evaluation settings
+        self.eval_dist_fcn = self.dataset_config.get("eval_dist_fcn", "center_distance")
+        self.eval_hota = self.dataset_config.get("eval_hota", False)
+
         # Create transforms
         self.train_transforms = self._build_train_transforms()
         self.val_transforms = self._build_val_transforms()
@@ -197,7 +205,14 @@ class Sparse4DDataModule(pl.LightningDataModule):
                 keep_consistent_seq_aug=self.sequences["keep_consistent_aug"],
                 same_scene_in_batch=self.sequences["same_scene_in_batch"],
                 transforms=self.train_transforms,
-                train_dataset_cfg=self.train_dataset_cfg
+                train_dataset_cfg=self.train_dataset_cfg,
+                lazy_load=self.lazy_load,
+                lazy_load_cache_size=self.lazy_load_cache_size,
+                pkl_sample_size=self.pkl_sample_size,
+                pkl_cam_counts_path=self.pkl_cam_counts_path,
+                fps_drop_prob=self.fps_drop_prob,
+                target_fps_choices=self.target_fps_choices,
+                max_cameras=self.max_cameras,
             )
 
             # Setup validation dataset
@@ -211,7 +226,9 @@ class Sparse4DDataModule(pl.LightningDataModule):
                 tracking=True,
                 tracking_threshold=0.2,
                 transforms=self.val_transforms,
-                train_dataset_cfg=self.val_dataset_cfg
+                train_dataset_cfg=self.val_dataset_cfg,
+                eval_dist_fcn=self.eval_dist_fcn,
+                eval_hota=self.eval_hota,
             )
 
             logging.info(
@@ -234,7 +251,9 @@ class Sparse4DDataModule(pl.LightningDataModule):
                 augmentation=self.augmentation,
                 tracking=True,
                 tracking_threshold=0.2,
-                transforms=self.test_transforms
+                transforms=self.test_transforms,
+                eval_dist_fcn=self.eval_dist_fcn,
+                eval_hota=self.eval_hota,
             )
             self.val_dataset = self.test_dataset
 

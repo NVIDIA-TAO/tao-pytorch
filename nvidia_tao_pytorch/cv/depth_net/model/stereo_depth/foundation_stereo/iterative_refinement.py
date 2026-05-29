@@ -1,19 +1,10 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 
 """FoundationStereo Refinement Module"""
+
+from typing import List, Optional
 
 import torch
 import torch.nn as nn
@@ -37,16 +28,34 @@ class FlowHead(nn.Module):
 
 
 class DispHead(nn.Module):
-    """Disparity head upscaler"""
+    """Disparity head upscaler.
 
-    def __init__(self, input_dim=128, hidden_dim=256, output_dim=1):
+    Args:
+        input_dim (int, optional): Input channel count. Defaults to 128.
+        hidden_dim (Optional[int], optional): Internal width for the initial
+            pointwise conv and the EdgeNeXt encoders. When None, falls back
+            to ``input_dim``.
+        output_dim (int, optional): Output channel count. Defaults to 1.
+        pwconv1_widths (Optional[List[int]], optional): Per-encoder hidden
+            dimension for the two EdgeNeXt blocks' first pointwise conv.
+            When None, derived from ``[4 * hidden_dim, 4 * hidden_dim]``.
+    """
+
+    def __init__(self, input_dim=128, hidden_dim: Optional[int] = None,
+                 output_dim=1, pwconv1_widths: Optional[List[int]] = None):
         super(DispHead, self).__init__()
+        if hidden_dim is None:
+            hidden_dim = input_dim
+        if pwconv1_widths is None:
+            pwconv1_widths = [4 * hidden_dim, 4 * hidden_dim]
         self.conv = nn.Sequential(
-            nn.Conv2d(input_dim, input_dim, kernel_size=3, padding=1),
+            nn.Conv2d(input_dim, hidden_dim, kernel_size=3, padding=1),
             nn.ReLU(),
-            EdgeNextConvEncoder(input_dim, expan_ratio=4, kernel_size=7, norm=None),
-            EdgeNextConvEncoder(input_dim, expan_ratio=4, kernel_size=7, norm=None),
-            nn.Conv2d(input_dim, output_dim, 3, padding=1))
+            EdgeNextConvEncoder(hidden_dim, kernel_size=7, norm=None,
+                                pwconv1_dim=pwconv1_widths[0]),
+            EdgeNextConvEncoder(hidden_dim, kernel_size=7, norm=None,
+                                pwconv1_dim=pwconv1_widths[1]),
+            nn.Conv2d(hidden_dim, output_dim, 3, padding=1))
 
     def forward(self, x):
         """Forward method for DispHead."""
@@ -162,25 +171,42 @@ class BasicMotionEncoder(nn.Module):
                        correlation volume.
         ngroup (int, optional): The number of correlation groups used to compute
                                 the correlation volume. Defaults to 8.
+        last_conv_kernel (int, optional): Kernel size for the final fusion conv.
+                                          Defaults to 3.
+        last_conv_out (Optional[int], optional): Output channels for the final
+                                                 fusion conv. None → 128 - 1.
+        widths (Optional[List[int]], optional): Per-layer output widths for
+                                                ``[convc1, convc2, convd1, convd2]``.
+                                                When None, derived from
+                                                ``[256, 256, 64, 64]``.
     """
 
-    def __init__(self, corr_levels, corr_radius, ngroup=8):
+    def __init__(self, corr_levels, corr_radius, ngroup=8,
+                 last_conv_kernel: int = 3,
+                 last_conv_out: Optional[int] = None,
+                 widths: Optional[List[int]] = None):
         super(BasicMotionEncoder, self).__init__()
 
         cor_planes = corr_levels * (2 * corr_radius + 1) * (ngroup + 1)
 
-        self.convc1 = nn.Conv2d(cor_planes, 256, 1, padding=0)
-        self.convc2 = nn.Conv2d(256, 256, 3, padding=1)
+        if widths is None:
+            widths = [256, 256, 64, 64]
+        c1, c2, d1, d2 = widths
+
+        self.convc1 = nn.Conv2d(cor_planes, c1, 1, padding=0)
+        self.convc2 = nn.Conv2d(c1, c2, 3, padding=1)
 
         # Convolutional layers for processing the disparity map.
         # These layers increase the channel count and extract features from the disparity map.
-        self.convd1 = nn.Conv2d(1, 64, 7, padding=3)
-        self.convd2 = nn.Conv2d(64, 64, 3, padding=1)
+        self.convd1 = nn.Conv2d(1, d1, 7, padding=3)
+        self.convd2 = nn.Conv2d(d1, d2, 3, padding=1)
 
-        # Final convolutional layer to combine features from both the correlation
-        # volume and the disparity map. The output channels are set to a specific
-        # size (128-1) to produce a feature map.
-        self.conv = nn.Conv2d(64 + 256, 128 - 1, 3, padding=1)
+        # Final fusion conv. Default 128-1 channels leaves room for the raw
+        # disparity map appended in forward.
+        out_channels = last_conv_out if last_conv_out is not None else 128 - 1
+        self.conv = nn.Conv2d(d2 + c2, out_channels,
+                              last_conv_kernel,
+                              padding=last_conv_kernel // 2)
 
     def forward(self, disp, corr):
         """
@@ -275,7 +301,8 @@ class BasicMultiUpdateBlock(nn.Module):
             hidden_dims[0], hidden_dims[1])
 
         # Head for predicting the disparity delta from the finest-scale hidden state.
-        self.disp_head = DispHead(hidden_dims[2], hidden_dim=256, output_dim=1)
+        # hidden_dim defaults to input_dim (the previous explicit 256 was a dead arg).
+        self.disp_head = DispHead(hidden_dims[2], output_dim=1)
 
         # A small network to generate mask features from the finest-scale hidden state.
         self.mask_feat_4 = nn.Sequential(
@@ -353,9 +380,14 @@ class RaftConvGRU(nn.Module):
         input_dim (int, optional): The number of channels in the input feature map. Defaults to 256.
         kernel_size (int, optional): The size of the convolutional kernel used for all internal convolutions.
         Defaults to 3.
+        q_input_dim (Optional[int], optional): Input width for ``convq``. When None,
+            derived from ``hidden_dim + input_dim`` (legacy; same as convz/convr).
+            Allows asymmetric layouts where ``convq`` consumes ``cat([r*h, x])``
+            with a different channel count than ``hx`` consumed by convz/convr.
     """
 
-    def __init__(self, hidden_dim=128, input_dim=256, kernel_size=3):
+    def __init__(self, hidden_dim=128, input_dim=256, kernel_size=3,
+                 q_input_dim: Optional[int] = None):
         super().__init__()
 
         # The 'update gate' convolution. It determines how much of the new information
@@ -370,8 +402,10 @@ class RaftConvGRU(nn.Module):
 
         # The 'candidate hidden state' convolution. It computes a new candidate for the
         # hidden state based on the reset gate's output and the current input.
+        if q_input_dim is None:
+            q_input_dim = hidden_dim + input_dim
         self.convq = nn.Conv2d(
-            hidden_dim + input_dim, hidden_dim, kernel_size, padding=kernel_size // 2)
+            q_input_dim, hidden_dim, kernel_size, padding=kernel_size // 2)
 
     def forward(self, h, x, hx):
         """
@@ -422,30 +456,44 @@ class SelectiveConvGRU(nn.Module):
         large_kernel_size (int, optional): The kernel size for the large-kernel ConvGRU. Defaults to 3.
         patch_size (int, optional): This argument is not used in the current implementation but is
                                     included for potential future use or compatibility. Defaults to None.
+        gating_conv_widths (Optional[List[int]], optional): Output widths for
+            ``conv0`` and ``conv1``. When None, derived from
+            ``[input_dim, input_dim + hidden_dim]``.
     """
 
     def __init__(self, hidden_dim=128,
                  input_dim=256, small_kernel_size=1,
-                 large_kernel_size=3, patch_size=None):
+                 large_kernel_size=3, patch_size=None,
+                 gating_conv_widths: Optional[List[int]] = None):
         super(SelectiveConvGRU, self).__init__()
+
+        if gating_conv_widths is None:
+            gating_conv_widths = [input_dim, input_dim + hidden_dim]
 
         # Initial convolutional block to process the input feature map.
         self.conv0 = nn.Sequential(
-            nn.Conv2d(input_dim, input_dim, kernel_size=3, padding=1),
+            nn.Conv2d(input_dim, gating_conv_widths[0], kernel_size=3, padding=1),
             nn.ReLU(),
         )
 
-        # A second convolutional block to process the concatenated input and hidden state.
+        # Second convolutional block: input = conv0 output + hidden_dim.
         self.conv1 = nn.Sequential(
-            nn.Conv2d(input_dim + hidden_dim, input_dim + hidden_dim, kernel_size=3, padding=1),
+            nn.Conv2d(gating_conv_widths[0] + hidden_dim,
+                      gating_conv_widths[1], kernel_size=3, padding=1),
             nn.ReLU(),
         )
 
-        # The small-kernel ConvGRU for learning local features.
-        self.small_gru = RaftConvGRU(hidden_dim, input_dim, small_kernel_size)
+        # RaftConvGRU's convz/convr consume ``hx`` (= conv1 output) and
+        # convq consumes ``cat([r*h, x])`` (= conv0 output + h). Derive both
+        # from gating_conv_widths so the inner GRU stays consistent under
+        # non-formulaic widths.
+        raft_input_dim = gating_conv_widths[1] - hidden_dim
+        raft_q_input_dim = gating_conv_widths[0] + hidden_dim
 
-        # The large-kernel ConvGRU for learning contextual features.
-        self.large_gru = RaftConvGRU(hidden_dim, input_dim, large_kernel_size)
+        self.small_gru = RaftConvGRU(hidden_dim, raft_input_dim, small_kernel_size,
+                                     q_input_dim=raft_q_input_dim)
+        self.large_gru = RaftConvGRU(hidden_dim, raft_input_dim, large_kernel_size,
+                                     q_input_dim=raft_q_input_dim)
 
     def forward(self, att, h, *x):
         """
@@ -510,30 +558,74 @@ class BasicSelectiveMultiUpdateBlock(nn.Module):
                                     each scale. Defaults to 128.
         volume_dim (int, optional): The number of correlation groups to pass to the
                                     `BasicMotionEncoder`. Defaults to 8.
+        motion_encoder_widths (Optional[List[int]], optional): Forwarded to
+            ``BasicMotionEncoder.widths``.
+        motion_encoder_final (Optional[int], optional): Forwarded to
+            ``BasicMotionEncoder.last_conv_out``.
+        motion_encoder_kernel (int, optional): Forwarded to
+            ``BasicMotionEncoder.last_conv_kernel``. Defaults to 3.
+        gru_gating_conv_widths (Optional[List[int]], optional): Forwarded to
+            ``SelectiveConvGRU.gating_conv_widths`` for every GRU scale.
+        disp_head_intermediate (Optional[int], optional): Forwarded to
+            ``DispHead.hidden_dim``.
+        disp_head_pwconv1_widths (Optional[List[int]], optional): Forwarded to
+            ``DispHead.pwconv1_widths``.
+        mask_widths (Optional[List[int]], optional): Output widths for the
+            two ``mask`` Conv2d layers. None → ``[64, 32]``.
+        gru04_input_dim (Optional[int], optional): Override for the inner
+            ``gru04`` SelectiveConvGRU's ``input_dim`` argument. When None
+            (TAO regular FS / training-repo default), falls back to the
+            legacy formula ``hidden_dim * (n_gru_layers > 1) + hidden_dim * 2``.
+            FFS commercial ckpt was trained with the actual post-cat motion
+            features width (e.g. ``motion_encoder_final + 1 disp +
+            cnet_conv04_widths[1]``) which doesn't follow the formula.
     """
 
-    def __init__(self, args, hidden_dim=128, volume_dim=8):
+    def __init__(self, args, hidden_dim=128, volume_dim=8,
+                 motion_encoder_widths: Optional[List[int]] = None,
+                 motion_encoder_final: Optional[int] = None,
+                 motion_encoder_kernel: int = 3,
+                 gru_gating_conv_widths: Optional[List[int]] = None,
+                 disp_head_intermediate: Optional[int] = None,
+                 disp_head_pwconv1_widths: Optional[List[int]] = None,
+                 mask_widths: Optional[List[int]] = None,
+                 gru04_input_dim: Optional[int] = None):
         super().__init__()
         self.args = args
 
         # Initializes a motion encoder to process correlation volumes and disparity maps.
-        self.encoder = BasicMotionEncoder(args.corr_levels, args.corr_radius, volume_dim)
+        self.encoder = BasicMotionEncoder(
+            args.corr_levels, args.corr_radius, ngroup=volume_dim,
+            last_conv_kernel=motion_encoder_kernel,
+            last_conv_out=motion_encoder_final,
+            widths=motion_encoder_widths)
 
         # Initializes SelectiveConvGRU units for each scale based on the number of GRU layers.
         if args.n_gru_layers == 3:
-            self.gru16 = SelectiveConvGRU(hidden_dim, hidden_dim * 2)
+            self.gru16 = SelectiveConvGRU(hidden_dim, hidden_dim * 2,
+                                          gating_conv_widths=gru_gating_conv_widths)
         if args.n_gru_layers >= 2:
-            self.gru08 = SelectiveConvGRU(hidden_dim, hidden_dim * (args.n_gru_layers == 3) + hidden_dim * 2)
-        self.gru04 = SelectiveConvGRU(hidden_dim, hidden_dim * (args.n_gru_layers > 1) + hidden_dim * 2)
+            self.gru08 = SelectiveConvGRU(hidden_dim, hidden_dim * (args.n_gru_layers == 3) + hidden_dim * 2,
+                                          gating_conv_widths=gru_gating_conv_widths)
+        gru04_in = (gru04_input_dim
+                    if gru04_input_dim is not None
+                    else hidden_dim * (args.n_gru_layers > 1) + hidden_dim * 2)
+        self.gru04 = SelectiveConvGRU(hidden_dim, gru04_in,
+                                      gating_conv_widths=gru_gating_conv_widths)
 
         # Head for predicting the disparity delta from the finest-scale hidden state.
-        self.disp_head = DispHead(hidden_dim, 256)
+        # hidden_dim defaults to input_dim (the previous explicit 256 was a dead arg).
+        self.disp_head = DispHead(hidden_dim,
+                                  hidden_dim=disp_head_intermediate,
+                                  pwconv1_widths=disp_head_pwconv1_widths)
 
         # A small network to generate a mask from the finest-scale hidden state.
+        if mask_widths is None:
+            mask_widths = [64, 32]
         self.mask = nn.Sequential(
-            nn.Conv2d(128, 64, 3, padding=1),
+            nn.Conv2d(hidden_dim, mask_widths[0], 3, padding=1),
             nn.ReLU(inplace=True),
-            nn.Conv2d(64, 32, 3, padding=1),
+            nn.Conv2d(mask_widths[0], mask_widths[1], 3, padding=1),
             nn.ReLU(inplace=True))
 
     def forward(self, net, inp, corr, disp, att):
@@ -582,6 +674,9 @@ class BasicSelectiveMultiUpdateBlock(nn.Module):
         # Update hidden state at 1/4 scale.
         if self.args.n_gru_layers > 1:
             net[0] = self.gru04(att[0], net[0], motion_features, interp(net[1], net[0]))
+        else:
+            # n_gru_layers <= 1: no coarser scale to interpolate from.
+            net[0] = self.gru04(att[0], net[0], motion_features)
 
         # Predict the disparity delta from the finest-scale hidden state.
         delta_disp = self.disp_head(net[0])

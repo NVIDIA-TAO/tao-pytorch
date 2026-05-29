@@ -1,8 +1,5 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
-#
-# This work is made available under the Nvidia Source Code License-NC.
-# To view a copy of this license, visit
-# https://github.com/NVlabs/MAL/blob/main/LICENSE
+# SPDX-FileCopyrightText: Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 """MAL training script."""
 import logging
 import os
@@ -10,7 +7,7 @@ import warnings
 
 from pytorch_lightning import Trainer
 
-from nvidia_tao_core.config.mal.default_config import ExperimentConfig
+from nvidia_tao_pytorch.config.mal.default_config import ExperimentConfig
 from nvidia_tao_pytorch.core.decorators.workflow import monitor_status
 from nvidia_tao_pytorch.core.initialize_experiments import initialize_train_experiment
 from nvidia_tao_pytorch.cv.mal.datasets.pl_wsi_data_module import WSISDataModule

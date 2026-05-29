@@ -1,16 +1,5 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """The build nn module model."""
 
@@ -154,8 +143,12 @@ class DINOModel(nn.Module):
             raise ValueError(f"{backbone} requires dataset.augmentation.fixed_random_crop to be set. "
                              "Please set dataset.augmentation.fixed_random_crop in the spec file.")
 
-        # Index 4 is not part of the backbone but taken from index 3 with conv 3x3 stride 2
-        return_interm_indices = [r for r in return_interm_indices if r != 4]
+        # Index 4 is not part of hierarchical backbones (Swin, ResNet) — it is
+        # created via a stride-2 conv in input_proj.  ViTDet+SFP backbones
+        # produce all 5 levels directly, so keep index 4 for those.
+        from nvidia_tao_pytorch.cv.dino.model.backbone import _VITDET_MODEL_DICT
+        if backbone not in _VITDET_MODEL_DICT:
+            return_interm_indices = [r for r in return_interm_indices if r != 4]
         backbone_only = Backbone(backbone,
                                  pretrained_backbone_path,
                                  train_backbone,

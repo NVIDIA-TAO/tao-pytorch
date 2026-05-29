@@ -1,8 +1,5 @@
-# ---------------------------------------------------------------
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
-#
-# This work is licensed under the NVIDIA Source Code License
-# ---------------------------------------------------------------
+# SPDX-FileCopyrightText: Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """MLP Segformer Head."""
 

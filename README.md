@@ -1,245 +1,423 @@
 # TAO Toolkit - PyTorch Backend
 
-<!-- vscode-markdown-toc -->
-* [Overview](#Overview)
-* [Getting Started](#GettingStarted)
-	* [Requirements](#Requirements)
-		* [Hardware Requirements](#HardwareRequirements)
-		* [Software Requirements](#SoftwareRequirements)
-	* [Instantiating the development container](#Instantiatingthedevelopmentcontainer)
-		* [Command line options](#Commandlineoptions)
-		* [Using the mounts file](#Usingthemountsfile)
-	* [Updating the base docker](#Updatingthebasedocker)
-		* [Build base docker](#Buildbasedocker)
-		* [Test the newly built base docker](#Testthenewlybuiltbasedocker)
-		* [Update the new docker](#Updatethenewdocker)
-* [Building a release container](#Buildingareleasecontainer)
-* [Contribution Guidelines](#ContributionGuidelines)
-* [License](#License)
+## Overview
 
-<!-- vscode-markdown-toc-config
-	numbering=false
-	autoSave=true
-	/vscode-markdown-toc-config -->
-<!-- /vscode-markdown-toc -->
+TAO Toolkit is a Python package hosted on the NVIDIA Python Package Index. It
+uses TAO containers from the NVIDIA GPU Accelerated Container Registry (NGC) for
+training, evaluation, export, and deployment workflows. The output of a TAO
+workflow is a trained model that can be deployed for inference on NVIDIA devices
+with DeepStream, TensorRT, or Triton.
 
-## <a name='Overview'></a>Overview
+This repository contains the PyTorch backend implementation for TAO Toolkit. It
+includes model code, dataclass-based experiment schemas, task entrypoints,
+Docker build tooling, release packaging, and tests for the TAO PyTorch model
+families.
 
-TAO Toolkit is a Python package hosted on the NVIDIA Python Package Index. It interacts with lower-level TAO dockers available from the NVIDIA GPU Accelerated Container Registry (NGC). The TAO containers come pre-installed with all dependencies required for training. The output of the TAO workflow is a trained model that can be deployed for inference on NVIDIA devices using DeepStream, TensorRT and Triton.
+## Contents
 
-This repository contains the required implementation for the all the deep learning components and networks using the PyTorch backend. These routines are packaged as part of the TAO Toolkit PyTorch container in the Toolkit package. These source code here is compatible with PyTorch version > 2.0.0
+* [Repository Map](#repository-map)
+* [Developer And Power-User Docs](#developer-and-power-user-docs)
+* [Supported Commands](#supported-commands)
+* [Quickstart](#quickstart)
+* [Requirements](#requirements)
+* [Development Container](#development-container)
+* [Running Tasks](#running-tasks)
+* [Testing](#testing)
+* [Updating the Base Docker](#updating-the-base-docker)
+* [Building a Release Container](#building-a-release-container)
+* [Troubleshooting](#troubleshooting)
+* [Adding a New Network](#adding-a-new-network)
+* [Contribution Guidelines](#contribution-guidelines)
+* [License](#license)
 
-## <a name='GettingStarted'></a>Getting Started
+## Repository Map
 
-As soon as the repository is cloned, run the `envsetup.sh` file to check
-if the build environment has the necessary dependencies, and the required
-environment variables are set.
-
-```sh
-source ${PATH_TO_REPO}/scripts/envsetup.sh
-```
-
-We recommend adding this command to your local `~/.bashrc` file, so that every new terminal instance receives this.
-
-### <a name='Requirements'></a>Requirements
-
-#### <a name='HardwareRequirements'></a>Hardware Requirements
-
-##### Minimum system configuration
-
-* 8 GB system RAM
-* 4 GB of GPU RAM
-* 8 core CPU
-* 1 NVIDIA GPU
-* 100 GB of SSD space
-
-##### Recommended system configuration
-
-* 32 GB system RAM
-* 32 GB of GPU RAM
-* 8 core CPU
-* 1 NVIDIA GPU
-* 100 GB of SSD space
-
-#### <a name='SoftwareRequirements'></a>Software Requirements
-
-| **Software**                     | **Version** |
+| Path | Purpose |
 | :--- | :--- |
-| Ubuntu LTS                       | >=18.04     |
-| python                           | >=3.10.x     |
-| docker-ce                        | >19.03.5    |
-| docker-API                       | 1.40        |
-| `nvidia-container-toolkit`       | >1.3.0-1    |
-| nvidia-container-runtime         | 3.4.0-1     |
-| nvidia-docker2                   | 2.5.0-1     |
-| nvidia-driver                    | >535.85     |
-| python-pip                       | >21.06      |
+| `nvidia_tao_pytorch/core` | Shared runtime utilities: entrypoint launch, Hydra config loading, logging, telemetry, checkpoint handling, Lightning helpers, quantization, and export support. |
+| `nvidia_tao_pytorch/config` | Structured dataclass configuration schemas used to validate experiment YAML files and generate default specs. |
+| `nvidia_tao_pytorch/cv` | Computer vision task implementations, including model code, dataloaders, experiment specs, and task scripts. |
+| `nvidia_tao_pytorch/multimodal` | Multimodal workflows such as CLIP and RADIO. |
+| `nvidia_tao_pytorch/ssl` | Self-supervised learning workflows such as MAE and NVDINOv2. |
+| `nvidia_tao_pytorch/sdg` | Synthetic data generation workflows, currently StyleGAN-XL. |
+| `nvidia_tao_pytorch/pointcloud` | Point-cloud workflows, including PointPillars. |
+| `tests` | Unit and integration tests grouped by task family. |
+| `docker` | Development base-image Dockerfile, dependency lists, build scripts, and image manifest. |
+| `release` | Release Dockerfile, wheel build scripts, and version metadata. |
+| `runner/tao_pt.py` | Local developer launcher that runs commands inside the TAO PyTorch development container. |
+| `tao-core` | TAO Core submodule with shared API, microservice, telemetry, and configuration infrastructure. |
+| `tools` and `ci` | Documentation generation helpers, CI checks, changelog tooling, and release helpers. |
 
-### <a name='Instantiatingthedevelopmentcontainer'></a>Instantiating the development container
+## Developer And Power-User Docs
 
-Inorder to maintain a uniform development environment across all users, TAO Toolkit provides a base environment Dockerfile in `docker/Dockerfile` that contains all
-the required third party dependencies for the developers. For instantiating the docker, simply run the `tao_pt` CLI. The usage for the command line launcher is mentioned below.
+The detailed developer and container-operation guides live in
+[docs/index.md](docs/index.md). Start there for agent onboarding, architecture,
+source-code workflows, testing/debugging, new-network integration, and prebuilt
+container usage.
+
+## Supported Commands
+
+<!-- BEGIN GENERATED: supported-commands -->
+
+The package installs one console command per model family. Each command discovers
+its available subtasks from that model's `scripts` package. The `default_specs`
+subtask is added by the shared TAO entrypoint for every registered model.
+
+Run this command after adding or removing a model entrypoint:
 
 ```sh
-usage: tao_pt [-h] [--gpus GPUS] [--volume VOLUME] [--env ENV]
-              [--mounts_file MOUNTS_FILE] [--shm_size SHM_SIZE]
-              [--run_as_user] [--tag TAG] [--ulimit ULIMIT] [--port PORT]
-
-Tool to run the pytorch container.
-
-optional arguments:
-  -h, --help                show this help message and exit
-  --gpus GPUS               Comma separated GPU indices to be exposed to the docker.
-  --volume VOLUME           Volumes to bind.
-  --env ENV                 Environment variables to bind.
-  --mounts_file MOUNTS_FILE Path to the mounts file.
-  --shm_size SHM_SIZE       Shared memory size for docker
-  --run_as_user             Flag to run as user
-  --tag TAG                 The tag value for the local dev docker.
-  --ulimit ULIMIT           Docker ulimits for the host machine.
-  --port PORT               Port mapping (e.g. 8889:8889).
-
+python tools/update_readme_supported_commands.py
 ```
 
-A sample command to instantiate an interactive session in the base development docker is mentioned below.
+| Domain | Commands |
+| :--- | :--- |
+| Computer vision | `action_recognition`, `centerpose`, `classification_pyt`, `deformable_detr`, `depth_net`, `dino`, `grounding_dino`, `mal`, `mask2former`, `mask_grounding_dino`, `ml_recog`, `ocdnet`, `ocrnet`, `oneformer`, `optical_inspection`, `pose_classification`, `re_identification`, `rtdetr`, `segformer`, `visual_changenet` |
+| 3D / point cloud | `bevfusion`, `pointpillars`, `sparse4d` |
+| Multimodal | `clip`, `radio` |
+| Self-supervised learning | `mae`, `nvdinov2` |
+| Synthetic data generation | `stylegan_xl` |
+
+| Command | Package | Subtasks |
+| :--- | :--- | :--- |
+| `action_recognition` | `cv.action_recognition` | `default_specs`, `evaluate`, `export`, `inference`, `train` |
+| `bevfusion` | `cv.bevfusion` | `dataset_convert`, `default_specs`, `evaluate`, `inference`, `train` |
+| `centerpose` | `cv.centerpose` | `default_specs`, `evaluate`, `export`, `inference`, `train` |
+| `classification_pyt` | `cv.classification_pyt` | `default_specs`, `distill`, `evaluate`, `export`, `inference`, `quantize`, `train` |
+| `clip` | `multimodal.clip` | `default_specs`, `evaluate`, `export`, `inference`, `train` |
+| `deformable_detr` | `cv.deformable_detr` | `convert`, `default_specs`, `evaluate`, `export`, `inference`, `quantize`, `train` |
+| `depth_net` | `cv.depth_net` | `convert`, `default_specs`, `evaluate`, `export`, `inference`, `quantize`, `train` |
+| `dino` | `cv.dino` | `convert`, `default_specs`, `distill`, `evaluate`, `export`, `inference`, `quantize`, `train` |
+| `grounding_dino` | `cv.grounding_dino` | `default_specs`, `evaluate`, `export`, `inference`, `quantize`, `train` |
+| `mae` | `ssl.mae` | `default_specs`, `evaluate`, `export`, `inference`, `train` |
+| `mal` | `cv.mal` | `default_specs`, `evaluate`, `inference`, `train` |
+| `mask2former` | `cv.mask2former` | `default_specs`, `evaluate`, `export`, `inference`, `quantize`, `train` |
+| `mask_grounding_dino` | `cv.mask_grounding_dino` | `default_specs`, `evaluate`, `export`, `inference`, `quantize`, `train` |
+| `ml_recog` | `cv.ml_recog` | `default_specs`, `evaluate`, `export`, `inference`, `train` |
+| `nvdinov2` | `ssl.nvdinov2` | `default_specs`, `export`, `inference`, `train` |
+| `ocdnet` | `cv.ocdnet` | `default_specs`, `evaluate`, `export`, `inference`, `prune`, `quantize`, `train` |
+| `ocrnet` | `cv.ocrnet` | `dataset_convert`, `default_specs`, `evaluate`, `export`, `inference`, `prune`, `quantize`, `train` |
+| `oneformer` | `cv.oneformer` | `default_specs`, `evaluate`, `export`, `inference`, `quantize`, `train` |
+| `optical_inspection` | `cv.optical_inspection` | `dataset_convert`, `default_specs`, `evaluate`, `export`, `inference`, `train` |
+| `pointpillars` | `pointcloud.pointpillars` | `dataset_convert`, `default_specs`, `evaluate`, `export`, `inference`, `prune`, `train` |
+| `pose_classification` | `cv.pose_classification` | `dataset_convert`, `default_specs`, `evaluate`, `export`, `inference`, `train` |
+| `radio` | `multimodal.radio` | `default_specs`, `distill` |
+| `re_identification` | `cv.re_identification` | `default_specs`, `evaluate`, `export`, `inference`, `train` |
+| `rtdetr` | `cv.rtdetr` | `default_specs`, `distill`, `evaluate`, `export`, `inference`, `quantize`, `train` |
+| `segformer` | `cv.segformer` | `default_specs`, `evaluate`, `export`, `inference`, `quantize`, `train` |
+| `sparse4d` | `cv.sparse4d` | `default_specs`, `evaluate`, `export`, `inference`, `quantize`, `train` |
+| `stylegan_xl` | `sdg.stylegan_xl` | `dataset_convert`, `default_specs`, `evaluate`, `export`, `inference`, `train` |
+| `visual_changenet` | `cv.visual_changenet` | `default_specs`, `evaluate`, `export`, `inference`, `quantize`, `train` |
+
+For a specific model family, run the command with no subtask or with `-h` to see
+the supported subtasks:
+
+```sh
+depth_net -h
+depth_net train -h
+```
+
+<!-- END GENERATED: supported-commands -->
+
+## Quickstart
+
+Start by preparing the checkout and development shell:
+
+```sh
+git lfs install
+git lfs pull
+git submodule update --init --recursive
+source scripts/envsetup.sh
+```
+
+The `envsetup.sh` script sets `NV_TAO_PYTORCH_TOP` and defines the `tao_pt`
+function for launching the development container.
+
+Launch an interactive container with the repository mounted at `/tao-pt`. Mount
+a host workspace if you want specs, datasets, checkpoints, and results to
+persist outside the container:
 
 ```sh
 tao_pt --gpus all \
-       --volume /path/to/data/on/host:/path/to/data/on/container \
-       --volume /path/to/results/on/host:/path/to/results/in/container \
-       --env PYTHONPATH=/tao-pt
+       --run_as_user \
+       --volume /path/on/host/tao-workspace:/workspace \
+       -- bash
 ```
 
-Running Deep Neural Networks implies working on large datasets. These datasets are usually stored on network share drives with significantly higher storage capacity. Since the `tao_pt` CLI wrapper uses docker containers under the hood, these drives/mount points need to be mapped to the docker.
+Inside the container, generate a default experiment spec for a model family:
 
-There are 2 ways to configure the `tao_pt` CLI wrapper. 
+```sh
+cd /tao-pt
+depth_net default_specs results_dir=/workspace/specs/depth_net
+```
 
-1. Via the command line options
-2. Via the mounts file. By default, at `~/.tao_mounts.json`.
+Edit the generated `/workspace/specs/depth_net/experiment.yaml` with dataset,
+checkpoint, and output paths, then run a task:
 
-#### <a name='Commandlineoptions'></a>Command line options
+```sh
+depth_net train -e /workspace/specs/depth_net/experiment.yaml
+depth_net evaluate -e /workspace/specs/depth_net/experiment.yaml
+depth_net export -e /workspace/specs/depth_net/experiment.yaml
+```
 
-| **Option**      | **Description** | **Default** |
-| :-- | :-- | :-- |
-| `gpus`         | Comma separated GPU indices to be exposed to the docker | 1 | 
-| `volume`       | Paths on the host machine to be exposed to the container. This is analogous to the `-v` option in the docker CLI. You may define multiple mount points by using the --volume option multiple times.  | None |  
-| `env`          | Environment variables to defined inside the interactive container. You may set them as `--env VAR=<value>`. Multiple environment variables can be set by repeatedly defining the `--env` option. | None |
-| `mounts_file`  | Path to the mounts file, explained more in the next section. | `~/.tao_mounts.json` | 
-| `shm_size`     | Shared memory size for docker in Bytes. | 16G |
-| `run_as_user`  | Flag to run as default user account on the host machine. This helps with maintaining permissions for all directories and artifacts created by the container. | 
-| `tag`          | The tag value for the local dev docker | None |
-| `ulimit`       | Docker ulimits for the host machine | 
-| `port`         | Port mapping (e.g. 8889:8889) | None |
+Most task commands accept Hydra-style overrides after the experiment spec:
 
-#### <a name='Usingthemountsfile'></a>Using the mounts file
+```sh
+depth_net train -e /workspace/specs/depth_net/experiment.yaml train.num_gpus=1 train.gpu_ids=[0]
+```
 
-The `tao_pt` CLI wrapper instance can be configured by using a mounts file. By default, the wrapper expects the mounts file to be at 
-`~/.tao_mounts.json`. However, for multiple options, you may be able 
+## Requirements
 
-The launcher config file consists of three sections:
+### Hardware
 
-* `Mounts`
+Minimum system configuration:
 
-The `Mounts` parameter defines the paths in the local machine, that should be mapped to the docker. This is a list of `json` dictionaries containing the source path in the local machine and the destination path that is mapped for the CLI wrapper.
+* 8 GB system RAM
+* 4 GB GPU RAM
+* 8 CPU cores
+* 1 NVIDIA GPU
+* 100 GB SSD space
 
-A sample config file containing 2 mount points and no docker options is as below.
+Recommended system configuration:
 
-  ```json
-  {
-      "Mounts": [
-          {
-              "source": "/path/to/your/experiments",
-              "destination": "/workspace/tao-experiments"
-          },
-          {
-              "source": "/path/to/config/files",
-              "destination": "/workspace/tao-experiments/specs"
-          }
-      ]
-  }
-  ```
+* 32 GB system RAM
+* 32 GB GPU RAM
+* 8 CPU cores
+* 1 NVIDIA GPU
+* 100 GB SSD space
 
-### <a name='Updatingthebasedocker'></a>Updating the base docker
+Model-specific requirements can be higher, especially for large transformer,
+multimodal, 3D, and segmentation workloads.
 
-There will be situations where developers would be required to update the third party dependancies to newer versions, or upgrade CUDA etc. In such a case, please follow the steps below:
+### Host Software
 
-#### <a name='Buildbasedocker'></a>Build base docker
+| Software | Version |
+| :--- | :--- |
+| Ubuntu LTS | >= 18.04 |
+| Python | >= 3.10 |
+| Docker CE | > 19.03.5 |
+| Docker API | >= 1.40 |
+| `nvidia-container-toolkit` | > 1.3.0-1 |
+| NVIDIA driver | > 535.85 |
+| `python-pip` | > 21.06 |
 
-The base dev docker is defined in `$NV_TAO_PYTORCH_TOP/docker/Dockerfile`. The python packages required for the TAO dev is defined in `$NV_TAO_PYTORCH_TOP/docker/requirements-pip.txt` and the third party apt packages are defined in `$NV_TAO_PYTORCH_TOP/docker/requirements-apt.txt`. Once you have made the required change, please update the base docker using the build script in the same directory.
+The development and release containers provide the Python, CUDA, PyTorch, and
+third-party packages used by TAO workflows. Prefer running tasks through
+`tao_pt` unless you are intentionally developing against a local environment.
 
-The build script supports building for different platforms (x86_64/AMD64 and ARM64). By default, it builds for `linux/amd64` (x86_64).
+## Development Container
 
-**Cross-platform builds:** When building for a different architecture than your host (e.g., ARM64 on x86_64), the script automatically detects and configures QEMU emulation. The QEMU setup persists on your system and is reused for future builds.
+TAO Toolkit provides a base development Dockerfile at `docker/Dockerfile`. The
+container keeps CUDA, PyTorch, TensorRT, and model dependencies consistent across
+developer machines.
+
+`tao_pt` usage:
+
+```sh
+usage: tao_pt [-h] [--gpus GPUS] [--volume VOLUME] [--env ENV]
+              [--no-tty] [--mounts_file MOUNTS_FILE] [--shm_size SHM_SIZE]
+              [--run_as_user] [--tag TAG] [--cached CACHED]
+              [--ulimit ULIMIT] [--port PORT]
+```
+
+| Option | Description | Default |
+| :--- | :--- | :--- |
+| `--gpus` | Comma-separated GPU indices, `all`, or `none`. | `all` |
+| `--volume` | Bind mount in `host_path:container_path` form. Can be repeated. | None |
+| `--env` | Environment variable in `NAME=value` form. Can be repeated. | None |
+| `--no-tty` | Run without allocating an interactive TTY. | TTY enabled |
+| `--mounts_file` | Additional mounts file. | None |
+| `--shm_size` | Docker shared memory size. | `16G` |
+| `--run_as_user` | Run as the host UID/GID to avoid root-owned output files. | Disabled |
+| `--tag` | Use a locally tagged development image instead of the manifest digest. | None |
+| `--cached` | Use a fully specified cached image reference. | None |
+| `--ulimit` | Docker ulimit option. Can be repeated. | None |
+| `--port` | Port mapping such as `8889:8889`. The launcher also uses host networking. | None |
+
+Example:
+
+```sh
+tao_pt --gpus all \
+       --run_as_user \
+       --volume /path/to/data:/data \
+       --volume /path/to/results:/results \
+       -- bash
+```
+
+### Mounts File
+
+Large datasets often live outside the repository. You can define reusable Docker
+mounts in `~/.tao_mounts.json` or pass another file with `--mounts_file`.
+
+Example:
+
+```json
+{
+  "Mounts": [
+    {
+      "source": "/path/to/your/experiments",
+      "destination": "/workspace/tao-experiments"
+    },
+    {
+      "source": "/path/to/config/files",
+      "destination": "/workspace/tao-experiments/specs"
+    }
+  ]
+}
+```
+
+## Running Tasks
+
+The common task form is:
+
+```sh
+<model_command> <subtask> -e <experiment.yaml> [hydra.overrides]
+```
+
+Examples:
+
+```sh
+dino train -e /workspace/specs/dino.yaml
+dino evaluate -e /workspace/specs/dino.yaml evaluate.checkpoint=/results/dino/model.tlt
+dino export -e /workspace/specs/dino.yaml export.checkpoint=/results/dino/model.tlt
+```
+
+The launcher validates that an experiment spec exists, configures visible GPUs,
+forwards Hydra overrides, streams logs, and records task telemetry. Some
+distributed workflows are launched with `torchrun`; most PyTorch Lightning
+workflows are launched directly with Python and manage devices through the
+shared training utilities.
+
+## Testing
+
+Run tests from the repository root, preferably inside the development container:
+
+```sh
+pytest tests/cv_unit_test/depth_net
+pytest tests/core
+pytest -m "cv_unit and not tensorrt"
+```
+
+Useful targeted examples:
+
+```sh
+pytest tests/cv_unit_test/depth_net/test_export.py
+pytest tests/multimodal_unit_test
+pytest tests/ssl_unit_test
+```
+
+For static and CI-style checks, see the scripts in `ci/`, especially
+`ci/run_static_tests.py`, `ci/test_changed_files.py`, and
+`ci/run_functional_tests.py`.
+
+To verify the generated README command table is up to date:
+
+```sh
+python tools/update_readme_supported_commands.py --check
+```
+
+## Updating the Base Docker
+
+Use this flow when updating CUDA, PyTorch, system dependencies, or common Python
+dependencies.
+
+The base development Dockerfile is `docker/Dockerfile`. Python package
+requirements live in `docker/requirements-pip*.txt`, and apt package
+requirements live in `docker/requirements-apt.txt`.
+
+The build script supports x86_64/AMD64 and ARM64. By default, it builds for
+`linux/amd64`.
 
 ```sh
 cd $NV_TAO_PYTORCH_TOP/docker
-# Build for x86_64/AMD64 (default platform)
+
+# Build for x86_64/AMD64.
 ./build.sh --build --x86
 
-# Build for ARM64 (automatically sets up QEMU if on x86_64 host)
+# Build for ARM64.
 ./build.sh --build --arm
 
-# Build for both platforms (requires --push flag)
+# Build and push both platforms.
 ./build.sh --build --multiplatform --push
 ```
 
-For more build options and help, run:
+For more build options:
 
 ```sh
 ./build.sh --help
 ```
 
-#### <a name='Testthenewlybuiltbasedocker'></a>Test the newly built base docker
-
-The build script tags the newly built base docker with the username of the account in the user's local machine. Therefore, the developers may tests their new docker by using the `tao_pt` command with the `--tag` option.
-
-```sh
-tao_pt --tag $USER -- script args
-```
-
-#### <a name='Updatethenewdocker'></a>Update the new docker
-
-Once you are sufficiently confident about the newly built base docker, please do the following
-
-1. Push the newly built base docker to the registry
-
-    ```sh
-    # Push for x86_64/AMD64 platform
-    bash $NV_TAO_PYTORCH_TOP/docker/build.sh --build --push --x86
-    
-    # Or push multi-platform build (x86_64 and ARM64)
-    bash $NV_TAO_PYTORCH_TOP/docker/build.sh --build --push --multiplatform
-    ```
-    
-    **Note:** Multi-platform builds automatically push to the registry due to Docker buildx limitations. Single platform builds can be built locally without the `--push` flag for testing.
-
-2. The above step produces a digest file associated with the docker. This is a unique identifier for the docker. So please note this, and update all references of the old digest in the repository with the new digest. You may find the old digest in the `$NV_TAO_PYTORCH_TOP/docker/manifest.json`.
-
-Push you final updated changes to the repository so that other developers can leverage and sync with the new dev environment.
-
-Please note that if for some reason you would like to force build the docker without using a cache from the previous docker, you may do so by using the `--force` option.
+The build script tags the newly built base Docker image with the current
+username. Test it with:
 
 ```sh
-# Force rebuild without cache
-bash $NV_TAO_PYTORCH_TOP/docker/build.sh --build --push --force --x86
+tao_pt --tag $USER -- bash
 ```
 
-## <a name='Buildingareleasecontainer'></a>Building a release container
+After validating the image, push it and update `docker/manifest.json` with the
+new digest:
 
-The TAO docker is built on top of the TAO Pytorch base dev docker, by building a python wheel for the `nvidia_tao_pyt` module in this repository and installing the wheel in the Dockerfile defined in `release/docker/Dockerfile`. The whole build process is captured in a single shell script which may be run as follows:
+```sh
+./build.sh --build --push --x86
+./build.sh --build --push --multiplatform
+```
+
+To force a rebuild without using cache:
+
+```sh
+./build.sh --build --push --force --x86
+```
+
+## Building a Release Container
+
+The release container is built on top of the TAO PyTorch base development image.
+The release flow builds a wheel for `nvidia_tao_pytorch` and installs it into
+the image defined by `release/docker/Dockerfile`.
 
 ```sh
 git lfs install
 git lfs pull
+git submodule update --init --recursive
 source scripts/envsetup.sh
 cd $NV_TAO_PYTORCH_TOP
 ./release/docker/deploy.sh --build --wheel
 ```
 
-In order to build a new docker, please edit the `deploy.sh` file in `$NV_TAO_PYTORCH_TOP/release/docker` to update the patch version and re-run the steps above.
+Before cutting a release, confirm the wheel/package version in
+`release/python/version.py` and the release Docker tag assembled in
+`release/docker/deploy.sh`.
 
-## <a name='ContributionGuidelines'></a>Contribution Guidelines
-TAO Toolkit PyTorch backend is not accepting contributions as part of the TAO 5.0 release, but will be open in the future.
+## Troubleshooting
 
-## <a name='License'></a>License
+| Symptom | Check |
+| :--- | :--- |
+| `tao_pt` is not found | Run `source scripts/envsetup.sh` from the repository root. |
+| Docker cannot pull the image | Run `docker login nvcr.io` and confirm access to the configured NGC registry. |
+| Docker permission denied | Add your user to the `docker` group or run Docker with the required privileges. |
+| GPUs are not visible in the container | Check the NVIDIA driver, `nvidia-container-toolkit`, and the `--gpus` argument. |
+| Imports from `nvidia_tao_core` fail in local development | Initialize the `tao-core` submodule and source `scripts/envsetup.sh`. |
+| Output files are owned by root | Launch with `tao_pt --run_as_user ...`. |
+| Large assets or release files are missing | Run `git lfs install` and `git lfs pull`. |
+| An experiment YAML fails schema validation | Generate a fresh spec with `<model> default_specs results_dir=<dir>` and compare fields. |
+
+## Adding a New Network
+
+See [Integrating a New Network in TAO PyTorch](docs/new_network_integration.md)
+for the expected source layout, CLI registration steps, config schema patterns,
+task-script conventions, tests, and TAO Core / FTMS integration notes.
+
+## Contribution Guidelines
+
+This repository is maintained as part of NVIDIA TAO Toolkit. Follow the existing
+task structure when adding or updating a model family:
+
+* Add or update dataclass schemas under `nvidia_tao_pytorch/config/<task>`.
+* Keep model code, dataloaders, scripts, experiment specs, and entrypoints under
+  the corresponding task package.
+* Use shared utilities from `nvidia_tao_pytorch/core` when possible.
+* Add focused tests under the matching `tests/*` task directory.
+* Update this README or task-specific documentation when commands or workflows
+  change.
+
+## License
+
 This project is licensed under the [Apache-2.0](./LICENSE) License.

@@ -1,6 +1,9 @@
-# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
 # Copyright (c) Facebook, Inc. and its affiliates.
 # Modified by Bowen Cheng from https://github.com/facebookresearch/detr/blob/master/models/detr.py
+#
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """
 MaskFormer criterion.
 """

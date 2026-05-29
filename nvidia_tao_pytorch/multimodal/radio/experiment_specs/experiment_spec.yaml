@@ -1,0 +1,79 @@
+encryption_key: tlt_encode
+results_dir: ???
+wandb:
+  enable: False
+train:
+  seed: 47
+  resume_training_checkpoint_path: null
+  num_epochs: 25
+  num_nodes: 1
+  num_gpus: 8
+  gpu_ids: [0, 1, 2, 3, 4, 5, 6, 7]
+  validation_interval: 1
+  checkpoint_interval: 10
+  tensorboard:
+    enabled: True
+  optim:
+    lr: 0.005
+    optim: "adamw"
+    policy: "step"
+    weight_decay: 0.05
+
+evaluate:
+  checkpoint: ${results_dir}/train/classifier_model_latest.pth
+
+inference:
+  checkpoint: ${results_dir}/train/classifier_model_latest.pth
+#   vis_after_n_batches: 1
+
+export:
+  results_dir: "${results_dir}/export"
+  gpu_id: 0
+  checkpoint: ${results_dir}/train/classifier_model_latest.pth
+  onnx_file: "${export.results_dir}/classifier.onnx"
+  input_width: 224
+  input_height: 224
+  batch_size: -1
+
+# gen_trt_engine:
+#   tensorrt:
+#     data_type: FP32
+
+model:
+  backbone:
+    type: "vit_large_patch14_dinov2_swiglu"
+    pretrained_backbone_path: /tao-pt/mount/pretrained_models/NVDINOv2/ViTL/NV_DINOV2_518.ckpt
+    # pretrained_backbone_path: null
+    freeze_backbone: True
+
+
+dataset:
+  root_dir: ???
+  batch_size: 128
+  workers: 8
+  num_classes: 1000
+  img_size: 224
+  augmentation:
+    random_flip:
+      vflip_probability: 0
+      hflip_probability: 0.5
+      enable: True
+    random_rotate:
+      rotate_probability: 0.5
+      angle_list: [90, 180, 270]
+      enable: False
+    random_color:
+      brightness: 0.4
+      contrast: 0.4
+      saturation: 0.4
+      enable: True
+    with_scale_random_crop:
+      enable: False
+    with_random_crop: True
+    with_random_blur: False
+  train_dataset:
+    images_dir: ${root_dir}/train
+  val_dataset:
+    images_dir: ${root_dir}/val
+  test_dataset:
+    images_dir: ${root_dir}/test

@@ -1,0 +1,119 @@
+dataset:
+  augmentation:
+    mean:
+    - 0.485
+    - 0.456
+    - 0.406
+    multi_scales:
+    - 224: 1.0
+    # - 336: 0.9
+    random_aug:
+      enable: true
+    random_color:
+      brightness: 0.4
+      contrast: 0.4
+      enable: true
+      saturation: 0.4
+    random_erase:
+      enable: false
+    random_flip:
+      enable: true
+      hflip_probability: 0.5
+      vflip_probability: 0
+    random_rotate:
+      enable: false
+    with_random_blur: false
+    with_random_crop: false
+    with_scale_random_crop:
+      enable: false
+  batch_size: 2
+  img_size: 224
+  num_classes: 0
+  root_dir: /lustre/fsw/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/datasets/imagenet2012
+  test_dataset:
+    images_dir: /lustre/fsw/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/datasets/imagenet2012/val
+  train_dataset:
+    tar_data_sources:
+    - root_dir: /lustre/fsw/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/datasets/webdataset-secrets-redacted-3.0
+      samples_per_file: 100
+      scale_factor: 1.0
+      steps_per_epoch: 100
+    - root_dir: /lustre/fsw/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/datasets/webdataset-secrets-redacted-3.0
+      samples_per_file: 100
+      scale_factor: 1.0
+      steps_per_epoch: 100
+  val_dataset:
+    images_dir: /lustre/fsw/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/datasets/imagenet2012/val
+  workers: 1
+distill:
+  loss_lambda: 1.0
+  loss_type: MSE
+  teacher:
+  - model:
+      backbone:
+        freeze_backbone: true
+        pretrained_backbone_path: /lustre/fsw/portfolios/edgeai/users/yuw/experiments/NV_DINOV2_518.ckpt
+        type: vit_large_patch14_dinov2_swiglu
+    pretrained_teacher_model_path: /lustre/fsw/portfolios/edgeai/users/yuw/experiments/nvdinov2_epoch_10.pth
+    mode: combo
+  - model:
+      backbone:
+        freeze_backbone: true
+        type: siglip2_so400m
+    mode: combo
+  - model:
+      backbone:
+        freeze_backbone: true
+        type: dinov3_vit7b16
+    mode: combo
+  - model:
+      backbone:
+        freeze_backbone: true
+        type: sam3_default
+    mode: combo
+
+model:
+  backbone:
+    freeze_backbone: false
+    type: c_radio_v3_vit_base_patch16_reg4_dinov2
+results_dir: /lustre/fsw/portfolios/edgeai/users/yuw/experiments/cls/distill_multi_teacher
+train:
+  checkpoint_interval: 2
+  clip_grad_norm: 10000.0
+  ema_decay: 0.99992
+  enable_ema: false
+  gpu_ids:
+  - 0
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+  - 6
+  - 7
+  num_epochs: 100
+  num_gpus: 8
+  num_nodes: 1
+  optim:
+    betas:
+    - 0.9
+    - 0.999
+    lr: 0.000625
+    optim: adamw
+    policy: cosine
+    skip_names:
+    - bias
+    - norm
+    - grn
+    - gamma
+    - beta
+    warmup_epochs: 20
+    weight_decay: 0.05
+  precision: fp32
+  resume_training_checkpoint_path: null
+  seed: 42
+  tensorboard:
+    enabled: true
+  validation_interval: 2
+wandb:
+  enable: false

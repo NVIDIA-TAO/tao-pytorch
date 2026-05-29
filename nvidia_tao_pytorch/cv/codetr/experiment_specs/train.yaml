@@ -1,0 +1,137 @@
+results_dir: ???
+model:
+  backbone: vit_large_codetr
+  num_queries: 1500
+  num_feature_levels: 5
+  return_interm_indices: [0, 1, 2, 3, 4]
+  two_stage_type: standard
+  num_co_heads: 2
+  co_head_num_convs: 1
+  hidden_dim: 256
+  nheads: 8
+  enc_layers: 6
+  dec_layers: 6
+  dim_feedforward: 2048
+  dec_n_points: 4
+  enc_n_points: 4
+  pe_temperatureH: 20
+  pe_temperatureW: 20
+  num_select: 1000
+  # Match original Co-DETR test_cfg[0] for the main DETR query head:
+  #   dict(max_per_img=1000, nms=dict(type='soft_nms', iou_threshold=0.8))
+  soft_nms_enabled: true
+  soft_nms_method: linear
+  soft_nms_iou_threshold: 0.8
+# model:
+#   backbone: swin_large_patch4_window12_384 # vit_large_dinov2
+#   pretrained_backbone_path: null
+#   num_queries: 900
+#   num_feature_levels: 5
+#   hidden_dim: 256
+#   nheads: 8
+#   enc_layers: 6
+#   dec_layers: 6
+#   dim_feedforward: 2048
+#   dec_n_points: 4
+#   enc_n_points: 4
+#   dropout_ratio: 0.0
+#   aux_loss: True
+#   dilation: False
+#   train_backbone: True
+#   pre_norm: False
+#   two_stage_type: standard
+#   decoder_sa_type: sa
+#   embed_init_tgt: True
+#   fix_refpoints_hw: -1
+#   pe_temperatureH: 20
+#   pe_temperatureW: 20
+#   return_interm_indices: [0, 1, 2, 3, 4]
+#   use_dn: True
+#   dn_number: 100
+#   dn_box_noise_scale: 1.0
+#   dn_label_noise_ratio: 0.5
+#   cls_loss_coef: 2.0
+#   bbox_loss_coef: 5.0
+#   giou_loss_coef: 2.0
+#   focal_alpha: 0.25
+#   num_select: 300
+#   interm_loss_coef: 1.0
+#   no_interm_box_loss: False
+#   loss_types: ['labels', 'boxes']
+#   backbone_names: ["backbone.0"]
+#   linear_proj_names: ['reference_points', 'sampling_offsets']
+#   # CoDETR-specific
+#   num_co_heads: 1
+#   co_head_loss_weight: 1.0
+#   co_head_num_convs: 1
+
+dataset:
+  dataset_type: default
+  num_classes: 80
+  contiguous_labels: true
+  batch_size: 2
+  # eval_batch_size: 2
+  augmentation:
+    fixed_padding: true
+    pad_size_divisor: 32        # match Co-DETR Pad(size_divisor=32); takes precedence over fixed_padding
+    fixed_random_crop: 1536
+    input_mean: [0.485, 0.456, 0.406]
+    input_std: [0.229, 0.224, 0.225]
+    test_random_resize: 1280
+    random_resize_max_size: 2048
+    # fixed_random_crop: 640
+    # scales: [480, 512, 544, 576, 608, 640, 672, 704, 736, 768, 800]
+    # input_mean: [0.485, 0.456, 0.406]
+    # input_std: [0.229, 0.224, 0.225]
+    # test_random_resize: 1280
+    # random_resize_max_size: 2048
+    # random_flip: 0.5
+  train_data_sources:
+    - image_dir: ???
+      json_file: ???
+  val_data_sources:
+    - image_dir: ???
+      json_file: ???
+  infer_data_sources:
+    image_dir: ???
+    classmap: ???
+  test_data_sources:
+    image_dir: ???
+    json_file: ???
+  eval_class_ids: null
+
+train:
+  num_gpus: 1
+  num_nodes: 1
+  num_epochs: 12
+  checkpoint_interval: 1
+  validation_interval: 1
+  precision: fp32
+  distributed_strategy: ddp
+  activation_checkpoint: True
+  clip_grad_norm: 0.1
+  is_dry_run: False
+  pretrained_model_path: null
+  resume_training_checkpoint_path: null
+  freeze: []
+  optim:
+    optimizer: AdamW
+    lr: 2.0e-4
+    lr_backbone: 2.0e-5
+    lr_linear_proj_mult: 0.1
+    weight_decay: 1.0e-4
+    lr_scheduler: MultiStep
+    lr_steps: [11]
+    lr_decay: 0.1
+    layer_decay_rate: 0.65
+    monitor_name: val_loss
+inference:
+  checkpoint: ???
+  conf_threshold: 0.5
+  input_width: 640
+  input_height: 640
+evaluate:
+  checkpoint: ???
+  conf_threshold: 0.0
+  # input_width: 640
+  # input_height: 640

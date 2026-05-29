@@ -1,4 +1,4 @@
-ARG PYTORCH_BASE_IMAGE=nvcr.io/nvidia/pytorch:25.09-py3
+ARG PYTORCH_BASE_IMAGE=nvcr.io/nvidia/pytorch:26.03-py3
 FROM ${PYTORCH_BASE_IMAGE}
 
 # Docker buildx provides these automatically for cross-platform detection
@@ -12,16 +12,6 @@ RUN apt-get upgrade && apt-get update && \
   xargs apt-get install -y < requirements-apt.txt && \
   rm requirements-apt.txt && \
   rm -rf /var/lib/apt/lists/*
-
-# TAO-CORE microservice dependencies
-WORKDIR /workspace/k8s
-RUN wget https://github.com/kubernetes-client/python/archive/refs/tags/v23.6.0.zip && \
-    unzip v23.6.0.zip && \
-    cd python-23.6.0 && \
-    sed -i "s/PACKAGE_NAME\ \=\ .*/PACKAGE_NAME = \"kubernetes-client\"/" setup.py && \
-    pip install --disable-pip-version-check -r requirements.txt && \
-    python setup.py install
-
 
 COPY docker/requirements-pip.txt requirements-pip.txt
 RUN pip install --upgrade pip \
@@ -51,6 +41,27 @@ RUN pip install meson-python meson ninja \
   && pip install --no-build-isolation --upgrade --no-deps -r requirements-pip-nvpanoptix3d.txt \
   && rm requirements-pip-nvpanoptix3d.txt
 
+# sam3: installed --no-deps because its setup.py pins numpy<2, which collides
+# with the 26.03 base (numpy 2.x) and opencv-python-headless 4.13 (numpy>=2).
+# Importers in nvidia_tao_pytorch/cv/backbone_v2/sam3.py guard with try/except,
+# so the install is best-effort — keep it after the bulk pip layers so a
+# transient github outage doesn't invalidate them.
+RUN pip install --no-build-isolation --no-deps \
+        git+https://github.com/facebookresearch/sam3.git
+
+# PyMarchingCubes: xheon's repo is unmaintained since Mar 2022 and its C
+# extension uses NumPy 1.x-only constants (PyArray_DOUBLE/PyArray_ULONG) that
+# NumPy 2.x removed. Patch to the NPY_* names before building.
+ARG PYMARCHINGCUBES_COMMIT=a6ad0388187b50dc62032a39359463d811af6768
+RUN git clone https://github.com/xheon/PyMarchingCubes.git /tmp/PyMarchingCubes \
+  && cd /tmp/PyMarchingCubes \
+  && git checkout ${PYMARCHINGCUBES_COMMIT} \
+  && sed -i -e 's/PyArray_DOUBLE/NPY_DOUBLE/g' \
+            -e 's/PyArray_ULONG/NPY_ULONG/g' \
+            marching_cubes/src/pywrapper.cpp \
+  && pip install --no-build-isolation --no-deps . \
+  && cd / && rm -rf /tmp/PyMarchingCubes
+
 ################## Install WarpConvNet ##################
 # Install PyTorch first (specify your CUDA version)
 ENV CUDA=cu130
@@ -69,13 +80,13 @@ RUN cd WarpConvNet && \
 ################## Build onnxruntime-gpu ##################
 # We need to build onnxruntime-gpu from source because the official wheel is not available for CUDA 13.0
 # TODO: Update to the official wheel when it is available for CUDA 13.0
-ARG ONNXRUNTIME_VERSION=1.23.0
+ARG ONNXRUNTIME_VERSION=1.25.1
 ARG ONNXRUNTIME_REPO=https://github.com/microsoft/onnxruntime
 ARG ONNXRUNTIME_BUILD_CONFIG=Release
 ARG ONNXRUNTIME_BUILD_PARALLEL=8
 
-# Adding support for Hopper (9.0/9.0a), Blackwell (10.0), Thor (11.0), and future architectures
-# Used by both ONNX Runtime and xformers builds
+# Adding support for Hopper (9.0/9.0a), Blackwell (10.0), Thor (11.0), and future architectures.
+# Used by ONNX Runtime, torch-scatter, WarpConvNet, and pytorch3d (built via requirements-pip.txt).
 ENV TORCH_CUDA_ARCH_LIST="7.5 8.0 8.6 9.0 9.0a 10.0 11.0 12.0+PTX"
 ENV GPU_ARCHS="75 80 86 90 90a 100 110 120"
 
@@ -91,6 +102,48 @@ RUN git clone -b rel-${ONNXRUNTIME_VERSION} --recursive ${ONNXRUNTIME_REPO} onnx
     find /workspace/onnxruntime_build -name ".git" -type f -exec rm -f {} + 2>/dev/null || true && \
     find /workspace/onnxruntime_build -name ".github" -type d -exec rm -rf {} + 2>/dev/null || true && \
     find /workspace/onnxruntime_build -name ".gitlab" -type d -exec rm -rf {} + 2>/dev/null || true
+
+# Patch CCCL device_transform.cuh for the CUDA 13.x + GCC 13 incompatibility.
+# At file scope, the header declares a template specialization using a
+# globally-qualified struct name:
+#
+#     template <typename T>
+#     struct ::cuda::proclaims_copyable_arguments<…> : ::cuda::std::true_type {};
+#
+# GCC 13 rejects this with "global qualification of class name is invalid before
+# ':' token". Wrapping the specialization in `namespace cuda { … }` removes the
+# need for the leading `::cuda::` qualification and compiles cleanly.
+# Mirrors docker/optimized/artifacts/Dockerfile.ort — keep both in sync.
+RUN python3 <<'PY'
+import re, glob
+PATTERN = re.compile(
+    r'template <(?:class|typename) T>\n'
+    r'struct ::cuda::proclaims_copyable_arguments'
+    r'<CUB_NS_QUALIFIER::detail::__return_constant<T>> : ::cuda::std::true_type\n'
+    r'\{\};'
+)
+REPLACEMENT = (
+    'namespace cuda {\n'
+    'template <typename T>\n'
+    'struct proclaims_copyable_arguments'
+    '<CUB_NS_QUALIFIER::detail::__return_constant<T>> : ::cuda::std::true_type\n'
+    '{};\n'
+    '} // namespace cuda'
+)
+total = 0
+for path in glob.glob('/usr/local/cuda*/**/cccl/cub/device/device_transform.cuh', recursive=True):
+    with open(path) as f:
+        src = f.read()
+    new_src, n = PATTERN.subn(REPLACEMENT, src)
+    if n:
+        with open(path, 'w') as f:
+            f.write(new_src)
+        print(f'patched {n}x in {path}')
+        total += n
+    else:
+        print(f'no match in {path}')
+print(f'CCCL patch: {total} substitution(s) applied')
+PY
 
 WORKDIR /workspace/onnxruntime_build/onnxruntime
 
@@ -130,36 +183,16 @@ RUN rm -rf /workspace/onnxruntime_build
 
 WORKDIR /workspace
 
-##################
-## build xformers
-##################
-
-# Xformers commit hash
-ARG XFORMERS_COMMIT_HASH=c0eb310a0afbf782b8947501e4f835e30b5a47b1
-
-# flash attention issue: https://nvbugspro.nvidia.com/bug/5440235
-ENV NVCC_FLAGS="--ptxas-options=-O2 --ptxas-options=-v"
-
-COPY docker/xformers xformers_src
-
-RUN echo "======Start building xformers from vllm gitlab repository======" && \
-  find xformers_src -name ".git" -type d -exec rm -rf {} + 2>/dev/null || true && \
-  find xformers_src -name ".git" -type f -exec rm -f {} + 2>/dev/null || true && \
-  find xformers_src -name ".github" -type d -exec rm -rf {} + 2>/dev/null || true && \
-  find xformers_src -name ".gitlab" -type d -exec rm -rf {} + 2>/dev/null || true && \
-  cd xformers_src && \
-  echo "======Calculating MAX_JOBS to build xformers parallelly======" && \
-  # TLT-5330: 90 GB overhead, 20 GB/job, 4 job min and ${max_cpu} job max
-  total_mem_gb=$(grep MemFree /proc/meminfo | awk '{print int($2 / 1024 / 1024)}'); \
-  max_jobs=$(( (total_mem_gb - 90) / 20 )); \
-  max_jobs=$(( max_jobs < 4 ? 4 : max_jobs )); \
-  max_jobs=$(( max_jobs > $(nproc) ? $(nproc) : max_jobs )); \
-  echo "======Using MAX_JOBS=${max_jobs} to build xformers======" && \
-  MAX_JOBS=${max_jobs} python setup.py bdist_wheel -d build/ && \
-  pip install --no-deps build/xformers*.whl && \
-  cd ../ && \
-  rm -rf xformers_src && \
-  echo "======Xformers built and installed successfully======"
+####################
+## install xformers
+####################
+# xformers comes from NVIDIA's internal GitLab PyPI registry. The local-version
+# segment (+nv26.3.1.<pipeline>) ties the wheel's torch/CUDA ABI to the base
+# image — bump in lockstep with PYTORCH_BASE_IMAGE upgrades.
+ARG XFORMERS_VERSION=0.0.33+nv26.3.1.49215124
+ARG XFORMERS_INDEX_URL=https://gitlab-master.nvidia.com/api/v4/projects/100660/packages/pypi/simple
+RUN pip install --no-deps "xformers==${XFORMERS_VERSION}" \
+    --index-url "${XFORMERS_INDEX_URL}"
 
 # Setup user account
 ARG uid=1000

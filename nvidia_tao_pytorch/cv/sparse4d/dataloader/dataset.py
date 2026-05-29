@@ -1,19 +1,9 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """Sparse4D Dataset for TAO PyTorch."""
 
+import random
 import numpy as np
 import os
 import pickle
@@ -22,11 +12,13 @@ from torch.utils.data import Dataset
 from os import path as osp
 import copy
 from typing import List, Dict
+from collections import OrderedDict
 import sys
 import cv2
 import math
 from importlib import import_module
 import tempfile
+import time
 import tqdm
 import json
 import pyquaternion
@@ -60,6 +52,7 @@ class Omniverse3DDetTrackDataset(Dataset):
                  class_config=None,
                  load_interval: int = 1,
                  max_frames: int = -1,
+                 max_cameras: int = -1,
                  with_velocity: bool = True,
                  modality: Dict = None,
                  test_mode: bool = False,
@@ -72,8 +65,16 @@ class Omniverse3DDetTrackDataset(Dataset):
                  tracking_threshold: float = 0.2,
                  same_scene_in_batch: bool = True,
                  frame_drop_prob: float = 0,
+                 fps_drop_prob: float = 0,
+                 target_fps_choices: List[int] = None,
                  transforms=None,
-                 train_dataset_cfg: Dict = None):
+                 train_dataset_cfg: Dict = None,
+                 lazy_load: bool = False,
+                 lazy_load_cache_size: int = 50,
+                 pkl_sample_size: int = 0,
+                 pkl_cam_counts_path: str = None,
+                 eval_dist_fcn: str = "iou_3d",
+                 eval_hota: bool = True):
         """Initialize Sparse4D dataset.
 
         Args:
@@ -82,6 +83,7 @@ class Omniverse3DDetTrackDataset(Dataset):
             classes: List of class names
             load_interval: Interval of frames to load
             max_frames: Maximum number of frames to load (-1 for all)
+            max_cameras: If >0, randomly subsample to this many cameras per frame (training only)
             with_velocity: Whether to use velocity
             modality: Dict for modality configuration
             test_mode: Whether in test mode
@@ -94,13 +96,22 @@ class Omniverse3DDetTrackDataset(Dataset):
             tracking_threshold: Threshold for tracking confidence
             same_scene_in_batch: Whether to keep same scene in batch
             frame_drop_prob: Probability to drop frames
+            fps_drop_prob: Probability to downsample a scene to a lower FPS during loading
+            target_fps_choices: List of target FPS values for FPS drop augmentation
             transforms: Custom transforms
             train_dataset_cfg: Train dataset configuration
+            lazy_load: Defer pkl loading to __getitem__ using a pre-built index
+            lazy_load_cache_size: Max number of pkl files held in the LRU cache
+            pkl_sample_size: If >0, sample this many pkl files per epoch (balanced by camera count)
+            pkl_cam_counts_path: Path to pickle mapping pkl_path -> num_cameras
+            eval_dist_fcn: Distance function for evaluation: "center_distance", "iou_3d", or "both"
+            eval_hota: Whether to run HOTA tracking evaluation
         """
         self.data_root = data_root
         self.anno_file = anno_file
         self.load_interval = load_interval
         self.max_frames = max_frames
+        self.max_cameras = max_cameras
         self.with_velocity = with_velocity
         self.modality = modality if modality else {'use_camera': True, 'use_lidar': False}
         self.test_mode = test_mode
@@ -114,7 +125,15 @@ class Omniverse3DDetTrackDataset(Dataset):
         self.tracking_threshold = tracking_threshold
         self.same_scene_in_batch = same_scene_in_batch
         self.frame_drop_prob = frame_drop_prob
+        self.fps_drop_prob = fps_drop_prob
+        self.target_fps_choices = target_fps_choices if target_fps_choices is not None else [30, 20, 15, 10, 6, 5, 3, 2, 1]
         self.train_dataset_cfg = train_dataset_cfg
+        self.lazy_load = lazy_load
+        self.lazy_load_cache_size = lazy_load_cache_size
+        self.pkl_sample_size = pkl_sample_size
+        self.pkl_cam_counts_path = pkl_cam_counts_path
+        self.eval_dist_fcn = eval_dist_fcn
+        self.eval_hota = eval_hota
         self.ann_file = self.anno_file
 
         # Initialize class-related attributes based on class_config or classes input
@@ -167,8 +186,13 @@ class Omniverse3DDetTrackDataset(Dataset):
             "num_thresholds": 40
         }
 
-        # Load annotations
-        self.data_infos = self.load_annotations(self.ann_file)
+        # Initialize lazy loading data structures
+        if self.lazy_load:
+            self._pkl_cache = OrderedDict()
+            self._frame_index = []
+            self.data_infos = self.load_annotations_lazy(self.ann_file)
+        else:
+            self.data_infos = self.load_annotations(self.ann_file)
 
         # Set up flags for batch sampling
         if self.with_seq_flag and self.same_scene_in_batch:
@@ -178,6 +202,23 @@ class Omniverse3DDetTrackDataset(Dataset):
         self.results = []
         self.det3d_eval_configs = DetectionConfig.deserialize(self.DetConfigs)
         self.track3d_eval_configs = TrackingConfig.deserialize(self.TrackConfigs)
+        self.det3d_eval_configs_iou3d = DetectionConfig.deserialize(
+            self._build_iou3d_det_config()
+        )
+        self.track3d_eval_configs_iou3d = TrackingConfig.deserialize(
+            self._build_iou3d_track_config()
+        )
+
+    def __getstate__(self):
+        """Exclude unpicklable LRU cache when forking DataLoader workers."""
+        state = self.__dict__.copy()
+        if "_pkl_cache" in state:
+            state["_pkl_cache"] = OrderedDict()
+        return state
+
+    def __setstate__(self, state):
+        """Restore state from pickle."""
+        self.__dict__.update(state)
 
     def __len__(self):
         """Get dataset length."""
@@ -189,6 +230,44 @@ class Omniverse3DDetTrackDataset(Dataset):
         self.CLASS_RANGE = class_config["CLASS_RANGE_DICT"]
         self.DefaultAttribute = class_config["ATTRIBUTE_DICT"]
         self.PRETTY_CLASS_NAMES = class_config["MAP_CLASS_NAMES"]
+
+    def _build_iou3d_det_config(self):
+        """Build 3D IoU-based detection eval config.
+
+        dist_ths uses 1-IoU convention: 0.3 means IoU>=0.7, 0.5 means IoU>=0.5.
+        """
+        return {
+            "class_range": self.CLASS_RANGE,
+            "dist_fcn": "iou_3d",
+            "dist_ths": [0.3, 0.5, 0.7],
+            "dist_th_tp": 0.5,
+            "min_recall": 0.1,
+            "min_precision": 0.1,
+            "max_boxes_per_sample": 500,
+            "mean_ap_weight": 5,
+        }
+
+    def _build_iou3d_track_config(self):
+        """Build 3D IoU-based tracking eval config.
+
+        dist_th_tp uses 1-IoU convention: 0.5 means IoU>=0.5 for a TP match.
+        """
+        return {
+            "tracking_names": self.CLASSES,
+            "pretty_tracking_names": self.PRETTY_CLASS_NAMES,
+            "class_range": self.CLASS_RANGE,
+            "dist_fcn": "iou_3d",
+            "dist_th_tp": 0.5,
+            "min_recall": 0.1,
+            "max_boxes_per_sample": 500,
+            "metric_worst": {
+                "amota": 0.0, "amotp": 1.0, "recall": 0.0, "motar": 0.0,
+                "mota": 0.0, "motp": 1.0, "mt": 0.0, "ml": -1.0, "faf": 500,
+                "gt": -1, "tp": 0.0, "fp": -1.0, "fn": -1.0, "ids": -1.0,
+                "frag": -1.0, "tid": 20, "lgd": 20,
+            },
+            "num_thresholds": 40,
+        }
 
     def _set_sequence_group_flag(self):
         """Set flag for sequence-based GroupSampler."""
@@ -238,7 +317,12 @@ class Omniverse3DDetTrackDataset(Dataset):
                         curr_new_flag += 1
 
                 assert len(new_flags) == len(self.flag), "Error in splitting sequences"
-                assert (len(np.bincount(new_flags)) == len(np.bincount(self.flag)) * self.sequences_split_num), f"{len(np.bincount(new_flags))} != {len(np.bincount(self.flag))} * {self.sequences_split_num} invalid number of sequences"
+                assert (
+                    len(np.bincount(new_flags)) <=
+                    len(np.bincount(self.flag)) * self.sequences_split_num
+                ), (
+                    f"{len(np.bincount(new_flags))} > {len(np.bincount(self.flag))} * {self.sequences_split_num}"
+                )
                 self.flag = np.array(new_flags, dtype=np.int64)
 
         for data_idx in range(len(self.data_infos)):
@@ -287,24 +371,80 @@ class Omniverse3DDetTrackDataset(Dataset):
         }
         return aug_config
 
+    def camera_sampling(self, data_infos):
+        """Randomly subsample cameras in each frame to max_cameras."""
+        for data_info in data_infos:
+            if len(data_info["cams"]) > self.max_cameras:
+                sampled_cam_names = random.sample(
+                    list(data_info["cams"].keys()), self.max_cameras
+                )
+                data_info["cams"] = {
+                    cam_name: data_info["cams"][cam_name]
+                    for cam_name in sampled_cam_names
+                }
+        return data_infos
+
+    def _apply_fps_drop(self, infos):
+        """Downsample frames to a randomly chosen lower FPS.
+
+        Uses a periodic keep pattern: keep p of every q frames, where
+        p/q = target_fps / base_fps reduced to lowest terms.
+        """
+        target_fps = random.choice(self.target_fps_choices)
+        if target_fps >= FPS:
+            return infos, int(FPS)
+        g = math.gcd(int(FPS), int(target_fps))
+        q = int(FPS) // g
+        p = int(target_fps) // g
+        return [info for i, info in enumerate(infos) if (i % q) < p], int(target_fps)
+
+    def _get_ann_paths(self, ann_file):
+        """Get list of pkl file paths from an annotation file.
+
+        Supports three formats:
+            - Directory: all .pkl files in the directory
+            - .txt file: one pkl path per line
+            - Single .pkl file: returns None (caller loads directly)
+        """
+        if osp.isdir(ann_file):
+            ann_files = sorted([n for n in os.listdir(ann_file) if n.endswith(".pkl")])
+            return [osp.join(ann_file, name) for name in ann_files]
+        elif ann_file.endswith(".txt"):
+            with open(ann_file, "r") as f:
+                lines = [line.strip() for line in f if line.strip()]
+            return [line.split()[0] for line in lines]
+        return None
+
+    def _load_pkl_files(self, ann_paths):
+        """Load multiple pkl files and merge their infos."""
+        data = {"infos": [], "metadata": {}}
+        for ann_idx, ann_path in enumerate(ann_paths):
+            start_time = time.time()
+            with open(ann_path, 'rb') as f:
+                data_scene = pickle.load(f)
+
+            scene_infos = data_scene["infos"]
+            if not self.test_mode and self.fps_drop_prob > 0 and random.random() < self.fps_drop_prob:
+                scene_infos, local_fps = self._apply_fps_drop(scene_infos)
+            else:
+                local_fps = int(FPS)
+
+            data["infos"].extend(scene_infos)
+            data["metadata"] = data_scene.get("metadata", {})
+            if (ann_idx + 1) % 1 == 0 or (ann_idx + 1) == len(ann_paths):
+                logging.info(
+                    f"[{ann_idx + 1}/{len(ann_paths)}] loaded {len(data['infos'])} frames so far "
+                    f"@ {local_fps} fps ({time.time() - start_time:.2f}s last)"
+                )
+        return data
+
     def load_annotations(self, ann_file: str) -> List[Dict]:
         """Load annotations from file."""
         logging.info(f"** loading annotations {ann_file} ...")
 
-        if osp.isdir(ann_file):
-            data = {
-                "infos": [],
-                "metadata": {}
-            }
-            ann_files = sorted([n for n in os.listdir(ann_file) if n.endswith(".pkl")])
-            for _, scene_name in enumerate(ann_files):
-                ann_path = osp.join(ann_file, scene_name)
-
-                with open(ann_path, 'rb') as f:
-                    data_scene = pickle.load(f)
-
-                data["infos"].extend(data_scene["infos"])
-                data["metadata"] = data_scene.get("metadata", {})
+        ann_paths = self._get_ann_paths(ann_file)
+        if ann_paths is not None:
+            data = self._load_pkl_files(ann_paths)
         else:
             with open(ann_file, 'rb') as f:
                 data = pickle.load(f)
@@ -313,16 +453,216 @@ class Omniverse3DDetTrackDataset(Dataset):
 
         if self.max_frames > 0:
             data_infos = data_infos[:self.max_frames]
+        if not self.test_mode and self.max_cameras > 0:
+            data_infos = self.camera_sampling(data_infos)
 
         data_infos = data_infos[:: self.load_interval]
         self.metadata = data.get("metadata", {})
         self.version = self.metadata.get("version", "unknown")
         return data_infos
 
+    def _get_cached_pkl(self, pkl_path):
+        """Load a pkl file with LRU caching (single-threaded, no locking needed)."""
+        if pkl_path in self._pkl_cache:
+            self._pkl_cache.move_to_end(pkl_path)
+            return self._pkl_cache[pkl_path]
+
+        with open(pkl_path, "rb") as f:
+            data = pickle.load(f)
+        self._pkl_cache[pkl_path] = data
+
+        while len(self._pkl_cache) > self.lazy_load_cache_size:
+            self._pkl_cache.popitem(last=False)
+
+        return data
+
+    def _get_lazy_index_cache_path(self, ann_file):
+        """Get the path to the cached lazy index file."""
+        if ann_file.endswith(".txt"):
+            return ann_file.replace(".txt", "_lazy_index.pkl")
+        elif osp.isdir(ann_file):
+            return osp.join(ann_file, "_lazy_index.pkl")
+        return None
+
+    def load_annotations_lazy(self, ann_file):
+        """Load annotations lazily using a pre-built index file.
+
+        The index file must be created beforehand using tools/build_lazy_index.py.
+        """
+        logging.info(f"** loading annotations (lazy mode) {ann_file} ...")
+
+        if not (osp.isdir(ann_file) or ann_file.endswith(".txt")):
+            logging.info("Single pkl file detected, falling back to normal loading")
+            self.lazy_load = False
+            return self.load_annotations(ann_file)
+
+        cache_path = self._get_lazy_index_cache_path(ann_file)
+
+        if not cache_path or not osp.exists(cache_path):
+            raise FileNotFoundError(
+                f"Lazy index cache not found at: {cache_path}\n"
+                f"Please build the index first by running:\n"
+                f"  python tools/build_lazy_index.py {ann_file}"
+            )
+
+        logging.info(f"** Loading lazy index from {cache_path}")
+        start_time = time.time()
+        with open(cache_path, "rb") as f:
+            cached_data = pickle.load(f)
+        frame_index = cached_data["frame_index"]
+        self.metadata = cached_data.get("metadata", {})
+        self.version = self.metadata.get("version", "unknown")
+        logging.info(f"** Loaded index with {len(frame_index)} frames in {time.time() - start_time:.2f}s")
+
+        frame_index = sorted(frame_index, key=lambda e: (e["scene_name"], e["timestamp"]))
+
+        if self.max_frames > 0:
+            frame_index = frame_index[:self.max_frames]
+        frame_index = frame_index[::self.load_interval]
+
+        self._full_frame_index = frame_index
+
+        self._pkl_cam_counts = {}
+        if self.pkl_sample_size > 0 and self.pkl_cam_counts_path:
+            if osp.exists(self.pkl_cam_counts_path):
+                with open(self.pkl_cam_counts_path, "rb") as f:
+                    self._pkl_cam_counts = pickle.load(f)
+                logging.info(f"** Loaded pkl cam counts: {len(self._pkl_cam_counts)} entries")
+            else:
+                logging.warning(f"pkl_cam_counts_path not found: {self.pkl_cam_counts_path}")
+
+        if self.pkl_sample_size > 0:
+            return self._apply_pkl_sampling(epoch=0)
+
+        self._frame_index = frame_index
+        return self._build_data_infos(frame_index)
+
+    def _apply_pkl_sampling(self, epoch=0):
+        """Sample a balanced subset of pkl files and rebuild data_infos.
+
+        Args:
+            epoch: Used as random seed offset for reproducible per-epoch variation.
+        """
+        from collections import defaultdict
+
+        full_index = self._full_frame_index
+        all_pkls = sorted({e["pkl_path"] for e in full_index})
+
+        missing = [p for p in all_pkls if p not in self._pkl_cam_counts]
+        if missing:
+            raise KeyError(
+                f"{len(missing)} pkl paths in lazy index are not in pkl_cam_counts_path. "
+                f"First 5: {missing[:5]}. "
+                f"Rebuild _pkl_cam_counts.pkl or use a matching ann_file."
+            )
+
+        target = min(self.pkl_sample_size, len(all_pkls))
+
+        by_cams = defaultdict(list)
+        for pkl_path in all_pkls:
+            by_cams[self._pkl_cam_counts[pkl_path]].append(pkl_path)
+
+        num_cam_groups = len(by_cams)
+        base_per_cam = target // num_cam_groups
+        leftover = target - base_per_cam * num_cam_groups
+
+        rng = random.Random(42 + epoch)
+
+        alloc = {}
+        for nc in sorted(by_cams):
+            alloc[nc] = min(base_per_cam, len(by_cams[nc]))
+
+        for nc in sorted(by_cams, key=lambda x: -len(by_cams[x])):
+            if leftover <= 0:
+                break
+            extra = min(len(by_cams[nc]) - alloc[nc], leftover)
+            if extra > 0:
+                alloc[nc] += extra
+                leftover -= extra
+
+        total_alloc = sum(alloc.values())
+        if total_alloc < target:
+            deficit = target - total_alloc
+            for nc in sorted(by_cams, key=lambda x: -len(by_cams[x])):
+                extra = min(len(by_cams[nc]) - alloc[nc], deficit)
+                if extra > 0:
+                    alloc[nc] += extra
+                    deficit -= extra
+                if deficit <= 0:
+                    break
+
+        sampled_pkls = set()
+        for nc in sorted(by_cams):
+            pool = by_cams[nc]
+            n = alloc[nc]
+            chosen = pool if n >= len(pool) else rng.sample(pool, n)
+            sampled_pkls.update(chosen)
+
+        sampled_index = [e for e in full_index if e["pkl_path"] in sampled_pkls]
+        self._frame_index = sampled_index
+
+        cam_dist = defaultdict(int)
+        for p in sampled_pkls:
+            cam_dist[self._pkl_cam_counts[p]] += 1
+        dist_str = ", ".join(f"{nc}cam:{cnt}" for nc, cnt in sorted(cam_dist.items()))
+
+        logging.info(
+            f"** pkl sampling (epoch={epoch}): {len(sampled_pkls)}/{len(all_pkls)} pkls, "
+            f"{len(sampled_index)} frames [{dist_str}]"
+        )
+
+        return self._build_data_infos(sampled_index)
+
+    def resample_pkls(self, epoch):
+        """Re-sample pkl files for a new epoch. Called by PklResampleCallback."""
+        if self.pkl_sample_size <= 0:
+            return
+
+        if self.lazy_load:
+            self.data_infos = self._apply_pkl_sampling(epoch)
+            self._pkl_cache.clear()
+        else:
+            return
+
+        self._set_sequence_group_flag()
+
+    def _build_data_infos(self, frame_index):
+        """Build lightweight data_infos from frame_index for lazy loading."""
+        data_infos = []
+        for idx, entry in enumerate(frame_index):
+            data_infos.append({
+                "scene_name": entry["scene_name"],
+                "timestamp": entry["timestamp"],
+                "frame_idx": entry["frame_idx"],
+                "_lazy_idx": idx,
+            })
+
+        num_pkl_files = len({entry["pkl_path"] for entry in frame_index})
+        logging.info(f"** lazy loading complete: {len(data_infos)} frames from {num_pkl_files} pkl files")
+        return data_infos
+
+    def _get_full_info_lazy(self, index):
+        """Get the full info dict for a frame using lazy loading."""
+        entry = self._frame_index[index]
+        pkl_path = entry["pkl_path"]
+        local_idx = entry["local_idx"]
+
+        data = self._get_cached_pkl(pkl_path)
+        info = data["infos"][local_idx]
+
+        if not self.test_mode and self.max_cameras > 0 and len(info.get("cams", {})) > self.max_cameras:
+            sampled_cam_names = random.sample(list(info["cams"].keys()), self.max_cameras)
+            info = copy.copy(info)
+            info["cams"] = {name: info["cams"][name] for name in sampled_cam_names}
+
+        return info
+
     def get_data_info(self, index):
         """Get data info by index."""
-        info = self.data_infos[index]
-        # standard protocol modified from SECOND.Pytorch
+        if self.lazy_load:
+            info = self._get_full_info_lazy(index)
+        else:
+            info = self.data_infos[index]
         input_dict = dict(
             sample_idx=info["token"],
             timestamp=info["timestamp"],
@@ -382,7 +722,10 @@ class Omniverse3DDetTrackDataset(Dataset):
 
     def get_ann_info(self, index):
         """Get annotation info by index."""
-        info = self.data_infos[index]
+        if self.lazy_load:
+            info = self._get_full_info_lazy(index)
+        else:
+            info = self.data_infos[index]
         if self.use_valid_flag:
             mask = info["valid_flag"]
         else:
@@ -647,77 +990,140 @@ class Omniverse3DDetTrackDataset(Dataset):
         return res_path, res_nvschema_path
 
     def _evaluate_single(
-        self, result_path, logging=None, result_name="img_bbox", tracking=False
+        self, result_path, result_name="img_bbox", tracking=False,
+        det_config=None, track_config=None, metric_prefix_override=None,
     ):
-        """Evaluate single result."""
+        """Evaluate single result.
+
+        Args:
+            result_path: Path to results JSON file.
+            result_name: Name prefix for metrics.
+            tracking: Whether to run tracking evaluation.
+            det_config: Override detection config (for IoU3D mode).
+            track_config: Override tracking config (for IoU3D mode).
+            metric_prefix_override: Override metric prefix string.
+        """
         output_dir = osp.join(*osp.split(result_path)[:-1])
+
+        det_cfg = det_config if det_config is not None else self.det3d_eval_configs
+        trk_cfg = track_config if track_config is not None else self.track3d_eval_configs
 
         if not tracking:
             from spatialai_data_utils.eval.detection.evaluate import AIC24DetEval
 
+            eval_output_dir = output_dir
+            if metric_prefix_override is not None:
+                eval_output_dir = osp.join(output_dir, metric_prefix_override)
+                os.makedirs(eval_output_dir, exist_ok=True)
+
             aic24_det_eval = AIC24DetEval(
                 self.data_infos,
-                config=self.det3d_eval_configs,
+                config=det_cfg,
                 result_path=result_path,
-                output_dir=output_dir,
+                output_dir=eval_output_dir,
                 verbose=True,
             )
             aic24_det_eval.main(render_curves=False)
 
-            # record metrics
-            metrics_path = osp.join(output_dir, "metrics_summary.json")
+            metrics_path = osp.join(eval_output_dir, "metrics_summary.json")
             try:
                 with open(metrics_path, 'r') as f:
                     metrics = json.load(f)
-            except FileNotFoundError:
-                logging.error(f"Evaluation failed: metrics summary file not found at {metrics_path}")
-                metrics = {}  # Return empty dict or handle error as appropriate
-            except json.JSONDecodeError:
-                logging.error(f"Evaluation failed: Could not decode JSON from {metrics_path}")
-                metrics = {}  # Return empty dict or handle error as appropriate
+            except (FileNotFoundError, json.JSONDecodeError) as e:
+                logging.error(f"Evaluation failed reading {metrics_path}: {e}")
+                return {}
 
             detail = dict()
-            metric_prefix = f"{result_name}_NuScenes"
+            metric_prefix = metric_prefix_override if metric_prefix_override else f"{result_name}_NuScenes"
             for name in self.CLASSES:
                 for k, v in metrics["label_aps"][name].items():
                     val = float(f"{v:.4f}")
-                    detail[
-                        f"{metric_prefix}/{name}_AP_dist_{k}"
-                    ] = val
+                    detail[f"{metric_prefix}/{name}_AP_dist_{k}"] = val
                 for k, v in metrics["label_tp_errors"][name].items():
                     val = float(f"{v:.4f}")
                     detail[f"{metric_prefix}/{name}_{k}"] = val
                 for k, v in metrics["tp_errors"].items():
                     val = float(f"{v:.4f}")
-                    detail[
-                        f"{metric_prefix}/{self.ErrNameMapping[k]}"
-                    ] = val
+                    detail[f"{metric_prefix}/{self.ErrNameMapping[k]}"] = val
 
             detail[f"{metric_prefix}/NDS"] = metrics["nd_score"]
             detail[f"{metric_prefix}/mAP"] = metrics["mean_ap"]
         else:
             from spatialai_data_utils.eval.tracking.evaluate import AIC24TrackEval
 
+            eval_output_dir = output_dir
+            if metric_prefix_override is not None:
+                eval_output_dir = osp.join(output_dir, metric_prefix_override)
+                os.makedirs(eval_output_dir, exist_ok=True)
+
             aic24_track_eval = AIC24TrackEval(
                 self.data_infos,
-                config=self.track3d_eval_configs,
+                config=trk_cfg,
                 result_path=result_path,
-                output_dir=output_dir,
+                output_dir=eval_output_dir,
                 verbose=True,
             )
-            metrics = aic24_track_eval.main()
+            aic24_track_eval.main()
 
-            # record metrics
-            metrics_path = osp.join(output_dir, "metrics_summary.json")
+            metrics_path = osp.join(eval_output_dir, "metrics_summary.json")
             try:
                 with open(metrics_path, 'r') as f:
                     metrics = json.load(f)
-            except FileNotFoundError:
-                logging.error(f"Evaluation failed: metrics summary file not found at {metrics_path}")
-                metrics = {}  # Return empty dict or handle error as appropriate
-            except json.JSONDecodeError:
-                logging.error(f"Evaluation failed: Could not decode JSON from {metrics_path}")
-                metrics = {}  # Return empty dict or handle error as appropriate
+            except (FileNotFoundError, json.JSONDecodeError) as e:
+                logging.error(f"Evaluation failed reading {metrics_path}: {e}")
+                return {}
+
+            detail = dict()
+            metric_prefix = metric_prefix_override if metric_prefix_override else f"{result_name}_NuScenes"
+            tracking_keys = [
+                "amota", "amotp", "recall", "motar", "gt", "mota", "motp",
+                "mt", "ml", "faf", "tp", "fp", "fn", "ids", "frag", "tid", "lgd",
+            ]
+            for key in tracking_keys:
+                detail[f"{metric_prefix}/{key}"] = metrics[key]
+
+        return detail
+
+    def _evaluate_hota(self, result_path, output_dir, eval_dist_fcn="iou_3d",
+                       metric_prefix="img_bbox_HOTA"):
+        """Run per-class HOTA tracking evaluation.
+
+        Args:
+            result_path: Path to results_nusc.json.
+            output_dir: Directory to write HOTA eval artifacts.
+            eval_dist_fcn: "iou_3d" for 3D IoU matching, "center_distance" for center distance.
+            metric_prefix: Prefix for metric keys in the returned dict.
+        """
+        from spatialai_data_utils.eval.mtmc.tracking.hota_eval import (
+            evaluate_hota,
+            HOTA_FIELDS,
+        )
+
+        if self.lazy_load:
+            data_infos = [self._get_full_info_lazy(i) for i in range(len(self.data_infos))]
+        else:
+            data_infos = self.data_infos
+
+        results = evaluate_hota(
+            data_infos=data_infos,
+            result_path=result_path,
+            output_dir=output_dir,
+            class_names=self.CLASSES,
+            tracker_name="sparse4d",
+            verbose=True,
+            eval_dist_fcn=eval_dist_fcn,
+        )
+
+        detail = {}
+        for class_name, metrics in results["per_class"].items():
+            if metrics is None:
+                continue
+            for field in HOTA_FIELDS:
+                detail[f"{metric_prefix}/{class_name}_{field}"] = metrics[field] * 100
+
+        for field in HOTA_FIELDS:
+            if field in results.get("average", {}):
+                detail[f"{metric_prefix}/{field}"] = results["average"][field] * 100
 
         return detail
 
@@ -777,7 +1183,6 @@ class Omniverse3DDetTrackDataset(Dataset):
         self,
         results,
         metrics=["detection"],
-        logging=None,
         jsonfile_prefix=None,
         result_names=["img_bbox"],
         output_nvschema=False,
@@ -797,24 +1202,83 @@ class Omniverse3DDetTrackDataset(Dataset):
             n_images_col=n_images_col, viz_down_sample=viz_down_sample
         )
 
+        # Determine which distance functions to evaluate
+        if self.eval_dist_fcn == "both":
+            dist_fcn_modes = ["center_distance", "iou_3d"]
+        elif self.eval_dist_fcn in ("center_distance", "iou_3d"):
+            dist_fcn_modes = [self.eval_dist_fcn]
+        else:
+            raise ValueError(
+                f"Unknown eval_dist_fcn: {self.eval_dist_fcn}. "
+                "Must be 'center_distance', 'iou_3d', or 'both'."
+            )
+
+        results_dict = dict()
         for metric in metrics:
             tracking = metric == "tracking"
             if tracking and not self.tracking:
                 continue
 
-            if isinstance(result_files, dict):
-                results_dict = dict()
-                for name in result_names:
-                    ret_dict = self._evaluate_single(
-                        result_files[name], tracking=tracking
-                    )
-                results_dict.update(ret_dict)
-            elif isinstance(result_files, str):
-                results_dict = self._evaluate_single(
-                    result_files, tracking=tracking
-                )
-            if tmp_dir is not None:
-                tmp_dir.cleanup()
+            for dist_mode in dist_fcn_modes:
+                if dist_mode == "iou_3d":
+                    det_cfg = self.det3d_eval_configs_iou3d
+                    trk_cfg = self.track3d_eval_configs_iou3d
+                    amota_prefix = "img_bbox_IoU3D"
+                    hota_prefix = "img_bbox_HOTA_IoU3D"
+                else:
+                    det_cfg = self.det3d_eval_configs
+                    trk_cfg = self.track3d_eval_configs
+                    amota_prefix = None
+                    hota_prefix = "img_bbox_HOTA"
+
+                # AMOTA / detection evaluation
+                if isinstance(result_files, dict):
+                    for name in result_names:
+                        try:
+                            ret_dict = self._evaluate_single(
+                                result_files[name],
+                                tracking=tracking,
+                                det_config=det_cfg,
+                                track_config=trk_cfg,
+                                metric_prefix_override=amota_prefix,
+                            )
+                        except Exception as e:
+                            logging.warning(f"{dist_mode} evaluation failed: {e}")
+                            ret_dict = dict()
+                        results_dict.update(ret_dict)
+                elif isinstance(result_files, str):
+                    try:
+                        ret_dict = self._evaluate_single(
+                            result_files,
+                            tracking=tracking,
+                            det_config=det_cfg,
+                            track_config=trk_cfg,
+                            metric_prefix_override=amota_prefix,
+                        )
+                    except Exception as e:
+                        logging.warning(f"{dist_mode} evaluation failed: {e}")
+                        ret_dict = dict()
+                    results_dict.update(ret_dict)
+
+                # HOTA evaluation (same distance mode as AMOTA)
+                if self.eval_hota and tracking:
+                    try:
+                        if isinstance(result_files, dict):
+                            res_path = result_files[result_names[0]]
+                        else:
+                            res_path = result_files
+                        hota_output_dir = osp.join(*osp.split(res_path)[:-1])
+                        hota_detail = self._evaluate_hota(
+                            res_path, hota_output_dir,
+                            eval_dist_fcn=dist_mode,
+                            metric_prefix=hota_prefix,
+                        )
+                        results_dict.update(hota_detail)
+                    except Exception as e:
+                        logging.warning(f"HOTA ({dist_mode}) evaluation failed: {e}")
+
+        if tmp_dir is not None:
+            tmp_dir.cleanup()
 
         return results_dict
 

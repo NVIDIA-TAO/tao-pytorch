@@ -1,16 +1,5 @@
-# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """OCRNet Data Module"""
 
@@ -57,6 +46,11 @@ class OCRDataModule(pl.LightningDataModule):
             self.val_gt_file = self.dataset_config.val_gt_file
 
         elif stage == 'test':
+            # Lightning may call setup('test') more than once per Trainer.test()
+            # invocation; idempotent guard prevents a second LmdbDataset open
+            # on the same path (lmdb 2.x rejects double-open per process).
+            if getattr(self, "dataset", None) is not None:
+                return
 
             test_log_file = os.path.join(self.experiment_spec.results_dir, "log_evaluation.txt")
             self.console_logger = create_logger(test_log_file)
@@ -114,36 +108,43 @@ class OCRDataModule(pl.LightningDataModule):
     def train_dataloader(self):
         """Build the dataloader for training.
 
+        Cached so Lightning's per-epoch reopen doesn't construct a second
+        LmdbDataset on the same path (lmdb 2.x rejects double-open per process).
+
         Returns:
             train_loader: PyTorch DataLoader used for training.
         """
-        train_loader = \
-            build_dataloader(experiment_spec=self.experiment_spec,
-                             data_path=self.train_data_path,
-                             gt_file=self.train_gt_file)
+        if getattr(self, "_train_loader", None) is None:
+            self._train_loader = \
+                build_dataloader(experiment_spec=self.experiment_spec,
+                                 data_path=self.train_data_path,
+                                 gt_file=self.train_gt_file)
 
-        self.console_logger.info(f"Train dataset samples: {len(train_loader.dataset)}")
-        self.console_logger.info(f"Train batch num: {len(train_loader)}")
+            self.console_logger.info(f"Train dataset samples: {len(self._train_loader.dataset)}")
+            self.console_logger.info(f"Train batch num: {len(self._train_loader)}")
 
-        return train_loader
+        return self._train_loader
 
     def val_dataloader(self):
         """Build the dataloader for validation.
 
+        Cached for the same reason as train_dataloader — see above.
+
         Returns:
             val_loader: PyTorch DataLoader used for validation.
         """
-        val_loader = build_dataloader(experiment_spec=self.experiment_spec,
-                                      data_path=self.val_data_path,
-                                      shuffle=False,
-                                      gt_file=self.val_gt_file)
+        if getattr(self, "_val_loader", None) is None:
+            self._val_loader = build_dataloader(experiment_spec=self.experiment_spec,
+                                                data_path=self.val_data_path,
+                                                shuffle=False,
+                                                gt_file=self.val_gt_file)
 
-        self.console_logger.info(f"Val dataset samples: {len(val_loader.dataset)}")
-        self.console_logger.info(f"Val batch num: {len(val_loader)}")
-        self.gpu_num = len(self.experiment_spec.train.gpu_ids)
-        self.val_batch_num = int(len(val_loader) / self.gpu_num)
+            self.console_logger.info(f"Val dataset samples: {len(self._val_loader.dataset)}")
+            self.console_logger.info(f"Val batch num: {len(self._val_loader)}")
+            self.gpu_num = len(self.experiment_spec.train.gpu_ids)
+            self.val_batch_num = int(len(self._val_loader) / self.gpu_num)
 
-        return val_loader
+        return self._val_loader
 
     def test_dataloader(self):
         """Build the dataloader for testing.

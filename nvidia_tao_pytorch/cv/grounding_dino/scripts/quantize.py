@@ -1,16 +1,5 @@
-# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """Quantize a Grounding DINO model using the configured backend.
 
@@ -21,14 +10,19 @@ from the dataset specified in ``quant_calibration_data_sources``, runs quantizat
 
 import os
 import logging
+import tempfile
+
+import torch
+import pytorch_lightning as pl
 
 from nvidia_tao_pytorch.core.decorators.workflow import monitor_status
 from nvidia_tao_pytorch.core.hydra.hydra_runner import hydra_runner
 from nvidia_tao_pytorch.core.tlt_logging import obfuscate_logs
 
-from nvidia_tao_core.config.grounding_dino.default_config import ExperimentConfig
+from nvidia_tao_pytorch.config.grounding_dino.default_config import ExperimentConfig
 from nvidia_tao_pytorch.core.quantization import ModelQuantizer
 from nvidia_tao_pytorch.cv.grounding_dino.model.pl_gdino_model import GDINOPlModel
+from nvidia_tao_pytorch.cv.grounding_dino.model.utils import grounding_dino_parser
 from nvidia_tao_pytorch.cv.grounding_dino.dataloader.pl_odvg_data_module import ODVGDataModule
 
 
@@ -57,26 +51,39 @@ def main(cfg: ExperimentConfig) -> None:
     logger = logging.getLogger(__name__)
     logger.info("Starting Grounding DINO quantization")
 
-    # Build the Lightning model and extract the underlying nn.Module
-    logger.debug("Loading Grounding DINO checkpoint")
-    if not cfg.quantize.model_path.endswith(".onnx"):
-        pl_model = GDINOPlModel.load_from_checkpoint(
-            cfg.quantize.model_path,
-            map_location="cpu",
-            experiment_spec=cfg,
-            cap_lists=None,
-        )
-        orig_model = pl_model.model
-    else:
-        orig_model = None  # ModelOpt ONNX backend loads the model from the file.
-
-    # Prepare calibration dataloader via DataModule
+    calibration_loader = None
+    cap_lists = None
     if cfg.quantize.mode != "weight_only_ptq" and cfg.dataset.quant_calibration_data_sources is not None:
         dm = ODVGDataModule(cfg.dataset)
         dm.setup(stage="calibration")
         calibration_loader = dm.calib_dataloader()
+        cap_lists = dm.calib_dataset.cap_lists
+
+    if cap_lists is None:
+        dm = ODVGDataModule(cfg.dataset)
+        dm.setup(stage="test")
+        cap_lists = dm.test_dataset.cap_lists
+
+    # Build the Lightning model and extract the underlying nn.Module
+    logger.debug("Loading Grounding DINO checkpoint")
+    if not cfg.quantize.model_path.endswith(".onnx"):
+        model_path = cfg.quantize.model_path
+        original = torch.load(model_path, map_location="cpu")
+        if "pytorch-lightning_version" not in original:
+            final = grounding_dino_parser(original["model"])
+            tmp = tempfile.NamedTemporaryFile()
+            model_path = tmp.name
+            torch.save({"state_dict": final, "pytorch-lightning_version": pl.__version__}, model_path)
+        pl_model = GDINOPlModel.load_from_checkpoint(
+            model_path,
+            map_location="cpu",
+            experiment_spec=cfg,
+            cap_lists=cap_lists,
+            strict=False,
+        )
+        orig_model = pl_model.model
     else:
-        calibration_loader = None
+        orig_model = None  # ModelOpt ONNX backend loads the model from the file.
 
     # Create quantizer and quantize the model
     quantizer = ModelQuantizer(cfg.quantize)

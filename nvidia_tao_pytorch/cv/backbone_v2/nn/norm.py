@@ -1,16 +1,5 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 # EfficientViT: Multi-Scale Linear Attention for High-Resolution Dense Prediction
 # Han Cai, Junyan Li, Muyan Hu, Chuang Gan, Song Han
@@ -101,18 +90,19 @@ class LayerNorm2d(nn.LayerNorm):
             )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward."""
+        """Forward.
+
+        Both data formats route through ``F.layer_norm`` so ONNX export
+        emits a single ``LayerNormalization`` op.
+        """
         if self.data_format == "channels_last":
-            return F.layer_norm(x, self.normalized_shape, self.weight, self.bias, self.eps)
-        else:
-            u = x.mean(1, keepdim=True)
-            s = (x - u).pow(2).mean(1, keepdim=True)
-            x = (x - u) / torch.sqrt(s + self.eps)
-            if self.elementwise_affine:
-                x = self.weight[:, None, None] * x
-                if self.bias is not None:
-                    x = x + self.bias[:, None, None]
-            return x
+            return F.layer_norm(x, self.normalized_shape,
+                                self.weight, self.bias, self.eps)
+        # channels_first: permute to channels-last, layer_norm, permute back.
+        return F.layer_norm(
+            x.permute(0, 2, 3, 1).contiguous(),
+            self.normalized_shape, self.weight, self.bias, self.eps,
+        ).permute(0, 3, 1, 2).contiguous()
 
 
 class GlobalResponseNorm(nn.Module):

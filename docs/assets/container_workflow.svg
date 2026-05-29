@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="430" viewBox="0 0 980 430" role="img" aria-labelledby="title desc">
+  <title id="title">TAO container power-user interaction flow</title>
+  <desc id="desc">A power user chooses tao_pt or direct Docker, selects an image, mounts data, runs a TAO command, and writes results to host storage.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#475569"/>
+    </marker>
+    <style>
+      .user { fill: #fef3c7; stroke: #b45309; stroke-width: 1.7; rx: 10; }
+      .host { fill: #f8fafc; stroke: #334155; stroke-width: 1.5; rx: 10; }
+      .wrap { fill: #e0f2fe; stroke: #0369a1; stroke-width: 1.7; rx: 10; }
+      .container { fill: #ecfdf5; stroke: #047857; stroke-width: 1.7; rx: 10; }
+      .out { fill: #fff7ed; stroke: #c2410c; stroke-width: 1.7; rx: 10; }
+      .label { font: 600 15px Arial, sans-serif; fill: #111827; }
+      .small { font: 12px Arial, sans-serif; fill: #374151; }
+      .path { stroke: #475569; stroke-width: 2; fill: none; marker-end: url(#arrow); }
+    </style>
+  </defs>
+
+  <text x="490" y="32" text-anchor="middle" class="label">Container Power-User Flow</text>
+
+  <rect x="40" y="70" width="150" height="70" class="user"/>
+  <text x="115" y="99" text-anchor="middle" class="label">Power user</text>
+  <text x="115" y="121" text-anchor="middle" class="small">CLI / CI / scheduler</text>
+
+  <rect x="240" y="40" width="170" height="70" class="wrap"/>
+  <text x="325" y="69" text-anchor="middle" class="label">tao_pt</text>
+  <text x="325" y="91" text-anchor="middle" class="small">wrapper path</text>
+
+  <rect x="240" y="150" width="170" height="70" class="host"/>
+  <text x="325" y="179" text-anchor="middle" class="label">docker run</text>
+  <text x="325" y="201" text-anchor="middle" class="small">direct path</text>
+
+  <rect x="470" y="70" width="180" height="78" class="wrap"/>
+  <text x="560" y="98" text-anchor="middle" class="label">Image selection</text>
+  <text x="560" y="120" text-anchor="middle" class="small">manifest digest</text>
+  <text x="560" y="137" text-anchor="middle" class="small">--tag or --cached</text>
+
+  <rect x="470" y="205" width="180" height="78" class="host"/>
+  <text x="560" y="233" text-anchor="middle" class="label">Host resources</text>
+  <text x="560" y="255" text-anchor="middle" class="small">GPU, mounts, UID</text>
+  <text x="560" y="272" text-anchor="middle" class="small">shm, ulimits</text>
+
+  <rect x="720" y="85" width="190" height="92" class="container"/>
+  <text x="815" y="113" text-anchor="middle" class="label">TAO container</text>
+  <text x="815" y="135" text-anchor="middle" class="small">/tao-pt source mount</text>
+  <text x="815" y="152" text-anchor="middle" class="small">PYTHONPATH + command</text>
+
+  <rect x="720" y="245" width="190" height="78" class="out"/>
+  <text x="815" y="273" text-anchor="middle" class="label">Host outputs</text>
+  <text x="815" y="295" text-anchor="middle" class="small">results, logs</text>
+  <text x="815" y="312" text-anchor="middle" class="small">checkpoints, exports</text>
+
+  <rect x="305" y="335" width="360" height="58" class="host"/>
+  <text x="485" y="360" text-anchor="middle" class="label">Direct Docker equivalent</text>
+  <text x="485" y="380" text-anchor="middle" class="small">same image + same mounts + same TAO command</text>
+
+  <path d="M190 105 H225 V75 H240" class="path"/>
+  <path d="M190 105 H225 V185 H240" class="path"/>
+  <path d="M410 75 H440 V109 H470" class="path"/>
+  <path d="M410 185 H440 V109 H470" class="path"/>
+  <path d="M560 148 V205" class="path"/>
+  <path d="M650 109 H720" class="path"/>
+  <path d="M650 244 H685 V131 H720" class="path"/>
+  <path d="M815 177 V245" class="path"/>
+  <path d="M325 220 V335" class="path"/>
+</svg>

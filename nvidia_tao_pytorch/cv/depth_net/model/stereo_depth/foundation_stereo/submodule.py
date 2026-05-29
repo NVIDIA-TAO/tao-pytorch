@@ -1,21 +1,11 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """Submodule contains small module classes for various parts of FounationStereo"""
 
 import math
 import itertools
+from typing import List, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -29,14 +19,24 @@ torch.backends.cuda.enable_flash_sdp(True)
 class FlashMultiheadAttention(nn.Module):
     """Multihead Attention with Flash Attention."""
 
-    def __init__(self, embed_dim, num_heads):
+    def __init__(self, embed_dim, num_heads, qkv_layout: str = 'standard'):
         """Initializes FlashMultiheadAttention.
 
         Args:
             embed_dim: Embedding dimension.
             num_heads: Number of attention heads.
+            qkv_layout: Reshape layout for Q/K/V before SDPA. 'standard'
+                (default) reshapes to (B, num_heads, L, head_dim) per the
+                PyTorch ``scaled_dot_product_attention`` contract.
+                'upstream_compat' reshapes to (B, L, num_heads, head_dim) —
+                a non-standard layout that the FFS commercial bp2 ckpt was
+                trained with (heads-as-sequence semantics).
         """
         super().__init__()
+        if qkv_layout not in ('standard', 'upstream_compat'):
+            raise ValueError(
+                f"qkv_layout must be 'standard' or 'upstream_compat', got {qkv_layout!r}")
+        self.qkv_layout = qkv_layout
         self.num_heads = num_heads
         self.embed_dim = embed_dim
         self.head_dim = embed_dim // num_heads
@@ -67,14 +67,24 @@ class FlashMultiheadAttention(nn.Module):
         K = self.k_proj(key)
         V = self.v_proj(value)
 
-        Q = Q.view(Q.size(0), self.num_heads, Q.size(1),  self.head_dim)
-        K = K.view(K.size(0), self.num_heads, K.size(1),  self.head_dim)
-        V = V.view(V.size(0), self.num_heads, V.size(1),  self.head_dim)
+        if self.qkv_layout == 'standard':
+            Q = Q.view(Q.size(0), self.num_heads, Q.size(1), self.head_dim)
+            K = K.view(K.size(0), self.num_heads, K.size(1), self.head_dim)
+            V = V.view(V.size(0), self.num_heads, V.size(1), self.head_dim)
+        else:  # 'upstream_compat'
+            Q = Q.view(Q.size(0), Q.size(1), self.num_heads, self.head_dim)
+            K = K.view(K.size(0), K.size(1), self.num_heads, self.head_dim)
+            V = V.view(V.size(0), V.size(1), self.num_heads, self.head_dim)
 
-        with torch.backends.cuda.sdp_kernel(
-                enable_flash=False,
-                enable_math=True,
-                enable_mem_efficient=True):
+        if torch.onnx.is_in_onnx_export():
+            # ONNX trace requires the math backend.
+            with torch.backends.cuda.sdp_kernel(
+                    enable_flash=False,
+                    enable_math=True,
+                    enable_mem_efficient=True):
+                attn_output = F.scaled_dot_product_attention(Q, K, V)
+        else:
+            # train / inference: let PyTorch auto-select.
             attn_output = F.scaled_dot_product_attention(Q, K, V)
 
         attn_output = attn_output.reshape(B, L, -1)
@@ -94,9 +104,12 @@ class FeatureAtt(nn.Module):
     Args:
         cv_chan (int): The number of channels in the cost volume.
         feat_chan (int): The number of channels in the input feature map.
+        norm_type (str, optional): Normalization for the inner Conv. Defaults
+            to ``'instance2d'``. Pass ``'batch2d'`` to load upstream ckpts
+            that store BatchNorm at this position.
     """
 
-    def __init__(self, cv_chan, feat_chan):
+    def __init__(self, cv_chan, feat_chan, norm_type: str = 'instance2d'):
         super().__init__()
 
         # A small sub-network to produce the attention map from the feature map.
@@ -105,7 +118,7 @@ class FeatureAtt(nn.Module):
         # dimension.
         self.feat_att = nn.Sequential(
             Conv(feat_chan, feat_chan // 2,
-                 conv_type='conv2d', norm_type='instance2d',
+                 conv_type='conv2d', norm_type=norm_type,
                  relu=True, kernel_size=1, stride=1, padding=0),
             nn.Conv2d(feat_chan // 2, cv_chan, 1))
 
@@ -158,6 +171,7 @@ class FlashAttentionTransformerEncoderLayer(nn.Module):
         dropout=0.1,
         act=nn.GELU,
         norm=nn.LayerNorm,
+        qkv_layout: str = 'standard',
     ):
         """Initializes FlashAttentionTransformerEncoderLayer.
 
@@ -168,9 +182,10 @@ class FlashAttentionTransformerEncoderLayer(nn.Module):
             dropout: Dropout rate.
             act: Activation function.
             norm: Normalization layer.
+            qkv_layout: Forwarded to FlashMultiheadAttention.
         """
         super().__init__()
-        self.self_attn = FlashMultiheadAttention(embed_dim, num_heads)
+        self.self_attn = FlashMultiheadAttention(embed_dim, num_heads, qkv_layout=qkv_layout)
         self.act = act()
 
         self.linear1 = nn.Linear(embed_dim, dim_feedforward)
@@ -207,13 +222,32 @@ class FlashAttentionTransformerEncoderLayer(nn.Module):
 class HourGlass(nn.Module):
     """HourGlass network module for feature extraction and aggregation."""
 
-    def __init__(self, cfg, in_channels, feat_dims=None):
+    def __init__(self, cfg, in_channels, feat_dims=None,
+                 agg_1_conv_type: str = 'deconv',
+                 atts_max_len_divisor: int = 4,
+                 feat_att_norm_type: str = 'instance2d',
+                 conv_patch_padding: Optional[List[int]] = None,
+                 qkv_layout: str = 'standard'):
         """Initializes HourGlass.
 
         Args:
             cfg: Configuration dictionary.
             in_channels: Number of input channels.
             feat_dims: List of feature dimensions.
+            agg_1_conv_type: Convolution kind for the first ``agg_1`` layer.
+                ``'deconv'`` (default) → ``deconv3d``. ``'conv'`` → ``conv3d``.
+            conv_patch_padding (Optional[List[int]], optional): Padding for the
+                ``conv_patch`` Conv3d. None (default) keeps the legacy
+                ``[1, 1, 0]``. Pass ``[0, 0, 0]`` to match the training repo's
+                FFS forward.
+            atts_max_len_divisor: Divisor applied to ``cfg['max_disparity']`` to
+                size the cost-volume attention's ``max_len``. 4 matches the
+                post-upsample disparity dimension; 16 pairs with
+                ``atts_before_upsample=True``.
+            feat_att_norm_type: Normalization for the inner ``FeatureAtt`` Conv,
+                propagated to all five ``feature_att_*`` children. Defaults to
+                ``'instance2d'``; pass ``'batch2d'`` for upstream ckpts that
+                store BatchNorm at the FeatureAtt position.
         """
         super().__init__()
         self.cfg = cfg
@@ -329,11 +363,12 @@ class HourGlass(nn.Module):
             ),
         )
 
+        agg_1_full_conv_type = "deconv3d" if agg_1_conv_type == 'deconv' else "conv3d"
         self.agg_1 = nn.Sequential(
             Conv(
                 in_channels * 4,
                 in_channels * 2,
-                conv_type="deconv3d",
+                conv_type=agg_1_full_conv_type,
                 norm_type="batch3d",
                 relu=True,
                 kernel_size=1,
@@ -356,35 +391,42 @@ class HourGlass(nn.Module):
                     dim_feedforward=in_channels,
                     norm_first=False,
                     num_transformer=4,
-                    max_len=self.cfg["max_disparity"] // 4,
+                    max_len=self.cfg["max_disparity"] // atts_max_len_divisor,
+                    qkv_layout=qkv_layout,
                 )
             }
         )
 
+        if conv_patch_padding is None:
+            conv_patch_padding = [1, 1, 0]
         self.conv_patch = nn.Sequential(
             nn.Conv3d(
                 in_channels,
                 in_channels,
                 kernel_size=4,
                 stride=4,
-                padding=[1, 1, 0],
+                padding=conv_patch_padding,
                 groups=in_channels,
             ),
             nn.BatchNorm3d(in_channels),
         )
 
-        self.feature_att_8 = FeatureAtt(in_channels * 2, feat_dims[1])
-        self.feature_att_16 = FeatureAtt(in_channels * 4, feat_dims[2])
-        self.feature_att_32 = FeatureAtt(in_channels * 6, feat_dims[3])
-        self.feature_att_up_16 = FeatureAtt(in_channels * 4, feat_dims[2])
-        self.feature_att_up_8 = FeatureAtt(in_channels * 2, feat_dims[1])
+        self.feature_att_8 = FeatureAtt(in_channels * 2, feat_dims[1], norm_type=feat_att_norm_type)
+        self.feature_att_16 = FeatureAtt(in_channels * 4, feat_dims[2], norm_type=feat_att_norm_type)
+        self.feature_att_32 = FeatureAtt(in_channels * 6, feat_dims[3], norm_type=feat_att_norm_type)
+        self.feature_att_up_16 = FeatureAtt(in_channels * 4, feat_dims[2], norm_type=feat_att_norm_type)
+        self.feature_att_up_8 = FeatureAtt(in_channels * 2, feat_dims[1], norm_type=feat_att_norm_type)
 
-    def forward(self, x, features):
+    def forward(self, x, features, atts_before_upsample: bool = False):
         """Forward pass of HourGlass.
 
         Args:
             x: Input tensor.
             features: List of feature tensors.
+            atts_before_upsample: When False (default), the cost-volume
+                attention runs on the trilinear-upsampled cost volume. When
+                True, the attention runs on the downsampled patches and the
+                upsample happens after.
 
         Returns:
             Output tensor.
@@ -410,8 +452,12 @@ class HourGlass(nn.Module):
 
         conv = self.conv1_up(conv1)
         x = self.conv_patch(x)
-        x = F.interpolate(x, scale_factor=4, mode="trilinear", align_corners=False)
-        x = self.atts["cost_vol_disp"](x)
+        if atts_before_upsample:
+            x = self.atts["cost_vol_disp"](x)
+            x = F.interpolate(x, scale_factor=4, mode="trilinear", align_corners=False)
+        else:
+            x = F.interpolate(x, scale_factor=4, mode="trilinear", align_corners=False)
+            x = self.atts["cost_vol_disp"](x)
         conv = conv + x
         conv = self.conv_out(conv)
         return conv
@@ -666,6 +712,7 @@ class CostVolumeDisparityAttention(nn.Module):
         num_transformer=6,
         max_len=512,
         resize_embed=False,
+        qkv_layout: str = 'standard',
     ):
         """Initializes CostVolumeDisparityAttention.
 
@@ -679,6 +726,10 @@ class CostVolumeDisparityAttention(nn.Module):
             num_transformer: Number of transformer layers.
             max_len: Maximum sequence length for positional embedding.
             resize_embed: Whether to resize positional embedding.
+            qkv_layout: Forwarded to FlashMultiheadAttention via the
+                transformer encoder layer. 'standard' (default) for TAO
+                regular FS / mono paths; 'upstream_compat' for the FFS
+                commercial bp2 ckpt.
         """
         super().__init__()
         self.resize_embed = resize_embed
@@ -691,6 +742,7 @@ class CostVolumeDisparityAttention(nn.Module):
                     dim_feedforward=dim_feedforward,
                     act=act,
                     dropout=dropout,
+                    qkv_layout=qkv_layout,
                 )
             )
         self.pos_embed0 = PositionalEmbedding(d_model, max_len=max_len)
@@ -718,7 +770,7 @@ class CostVolumeDisparityAttention(nn.Module):
 class ChannelAttentionEnhancement(nn.Module):
     """Channel Attention Enhancement Module."""
 
-    def __init__(self, in_planes, ratio=16):
+    def __init__(self, in_planes, ratio=16, mid_channels: Optional[int] = None):
         """Initializes ChannelAttentionEnhancement.
 
         From selective-IGEV.
@@ -726,15 +778,20 @@ class ChannelAttentionEnhancement(nn.Module):
         Args:
             in_planes: Input channel dimension.
             ratio: Reduction ratio for the hidden dimension.
+            mid_channels: Explicit override for the hidden (mid) dimension.
+                None (default) keeps the legacy ``in_planes // 16`` formula.
+                When set, ``ratio`` is ignored.
         """
         super(ChannelAttentionEnhancement, self).__init__()
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
         self.max_pool = nn.AdaptiveMaxPool2d(1)
 
+        if mid_channels is None:
+            mid_channels = in_planes // 16
         self.fc = nn.Sequential(
-            nn.Conv2d(in_planes, in_planes // 16, 1, bias=False),
+            nn.Conv2d(in_planes, mid_channels, 1, bias=False),
             nn.ReLU(),
-            nn.Conv2d(in_planes // 16, in_planes, 1, bias=False),
+            nn.Conv2d(mid_channels, in_planes, 1, bias=False),
         )
         self.sigmoid = nn.Sigmoid()
 
@@ -800,20 +857,20 @@ class LayerNorm2d(torch.nn.LayerNorm):
     def forward(self, x) -> torch.Tensor:
         """Forward pass of LayerNorm2d.
 
+        Routes through ``F.layer_norm`` via channels-last permute so ONNX
+        export emits a single ``LayerNormalization`` op.
+
         Args:
-            x (torch.Tensor): Input tensor of shape (B, C, H, W).
+            x (torch.Tensor): Input tensor of shape ``(B, C, H, W)``.
 
         Returns:
-            torch.Tensor: Normalized output tensor.
+            torch.Tensor: Normalized output of the same shape, in the input
+            tensor's dtype.
         """
-        if x.is_contiguous():
-            return (F.layer_norm(x.permute(0, 2, 3, 1),
-                                 self.normalized_shape,
-                                 self.weight, self.bias, self.eps).permute(0, 3, 1, 2).contiguous())
-        s, u = torch.var_mean(x, dim=1, keepdim=True)
-        x = (x - u) * torch.rsqrt(s + self.eps)
-        x = x * self.weight[:, None, None] + self.bias[:, None, None]
-        return x
+        return F.layer_norm(
+            x.permute(0, 2, 3, 1).contiguous(),
+            self.normalized_shape, self.weight, self.bias, self.eps,
+        ).permute(0, 3, 1, 2).contiguous()
 
 
 class LayerNorm3d(torch.nn.LayerNorm):

@@ -1,0 +1,151 @@
+# FastFoundationStereo (FFS) — production reference spec for the bp2 commercial checkpoint.
+#
+# Use this as the starting point for FFS-bp2 train / evaluate / inference / export /
+# gen_trt_engine actions. All fields below are required for the bp2 ckpt to load and
+# run correctly; in particular, `model.max_disparity: 192` and the 15 width override
+# fields cannot be omitted (the TAO schema defaults differ from the bp2 training
+# values and produce silent disparity drift).
+#
+# Path conventions assume the SDK runner / standard TAO container layout. Override
+# `results_dir`, `<action>.checkpoint`, `data_sources[*].data_file`, etc. for your
+# environment.
+
+results_dir: /data/result/new-test
+
+dataset:
+  dataset_name: StereoDataset
+  max_disparity: 192               # bp2 commercial; dataset-side knob (also set under model: below)
+  min_depth: 0.0
+  train_dataset:
+    data_sources:
+      - dataset_name: Middlebury
+        data_file: /data/datasets/stereo/train.txt
+    batch_size: 1
+    workers: 4
+    augmentation:
+      crop_size: [320, 736]
+  val_dataset:
+    data_sources:
+      - dataset_name: Middlebury
+        data_file: /data/datasets/stereo/val.txt
+    batch_size: 1
+    workers: 4
+    augmentation:
+      crop_size: [320, 736]
+  test_dataset:
+    data_sources:
+      - dataset_name: Middlebury
+        data_file: /data/datasets/stereo/test.txt
+    batch_size: 1
+    workers: 4
+    augmentation:
+      crop_size: [480, 736]
+  infer_dataset:
+    data_sources:
+      - dataset_name: GenericDataset
+        data_file: /data/datasets/stereo/test.txt
+    batch_size: 1
+    workers: 4
+    augmentation:
+      crop_size: [480, 736]
+
+model:
+  model_type: FastFoundationStereo
+  encoder: vitl
+  hidden_dims: [128]               # bp2 single-GRU; NOT [128, 128, 128] (full-FS default)
+  n_gru_layers: 1                  # bp2 single GRU layer
+  corr_radius: 4
+  corr_levels: 2
+  n_downsample: 2
+  max_disparity: 192               # CRITICAL — bp2 ckpt match. Schema default is 416 (full-FS); using
+                                   # the default produces a 2x oversized cost volume and shifts disparity
+                                   # out of the trained regime.
+  valid_iters: 8                   # bp2 distilled (vs full-FS 22)
+  train_iters: 22
+  volume_dim: 28                   # bp2 invariant; schema default 32 is for full-FS
+  mixed_precision: false           # deploy parity; FS trainer doesn't support bf16
+  gwc_feature_normalize: true      # bp2 trained with GWC L2-normalize; without it ~7-8% negative disparity
+
+  # 15 bp2 distilled width overrides — all required, do not omit
+  motion_encoder_widths: [56, 96, 16, 12]
+  motion_encoder_final: 48
+  gru_hidden: 60
+  gru_gating_conv_widths: [100, 168]
+  disp_head_input_dim: 60
+  disp_head_intermediate: 36
+  disp_head_pwconv1_widths: [212, 244]
+  mask_widths: [32, 16]
+  stem_2_widths: [12, 16]
+  spx_2_gru_widths: [16, 12, 16, 24]
+  spx_gru_out: 9
+  classifier_mid: 14
+  cnet_conv04_widths: [60, 48]
+  cam_mid_channels: 8
+  cost_agg_conv_patch_padding: [0, 0, 0]
+
+  stereo_backbone:
+    edgenext_pretrained_path: ""   # bp2 ckpt holds backbone weights inline
+    depth_anything_v2_pretrained_path: ""
+    use_bn: false
+    use_clstoken: false
+
+train:
+  num_gpus: 1
+  num_epochs: 1
+  num_nodes: 1
+  log_every_n_steps: 50
+  validation_interval: 1
+  checkpoint_interval: 1
+  precision: fp32                  # FS trainer supports fp32 / fp16; bf16 unsupported
+  pretrained_model_path: /data/checkpoints/model.pth
+  optim:
+    optimizer: AdamW
+    lr_scheduler: MultiStepLR
+    lr: 1.0e-5
+    lr_decay: 0.1
+    warmup_steps: 0
+    lr_step_size: 1000
+
+evaluate:
+  num_gpus: 1
+  batch_size: 1
+  checkpoint: /data/checkpoints/model.pth
+
+inference:
+  save_raw_pfm: true               # pyt path only; deploy inference emits colorized .png only
+  num_gpus: 1
+  num_nodes: 1
+  checkpoint: /data/checkpoints/model.pth
+
+export:
+  gpu_id: 0
+  checkpoint: /data/checkpoints/model.pth
+  onnx_file: /data/checkpoints/model_onnx.onnx
+  on_cpu: false
+  input_channel: 3
+  input_height: 480
+  input_width: 736
+  opset_version: 17
+  batch_size: 1                    # static H/W; -1 enables dynamic batch + (on stereo path) dynamic H/W
+  valid_iters: 8
+  format: onnx
+
+gen_trt_engine:
+  gpu_id: 0
+  onnx_file: /data/checkpoints/model_onnx.onnx
+  trt_engine: /data/checkpoints/model.engine
+  batch_size: 1                    # static; for dynamic, set -1 and the min/opt/max_height/width below
+  tensorrt:
+    data_type: fp16                # static-shape fp16 is the production-validated path
+    workspace_size: 4096           # MB; FFS needs more than the 1024 default
+    min_batch_size: 1
+    opt_batch_size: 1
+    max_batch_size: 1
+  verbose: false
+  # Optional dynamic H/W profile (when batch_size: -1; switch tensorrt.data_type to fp32):
+  # min_height: 320
+  # opt_height: 480
+  # max_height: 1024
+  # min_width: 320
+  # opt_width: 736
+  # max_width: 1536               # >= largest expected input

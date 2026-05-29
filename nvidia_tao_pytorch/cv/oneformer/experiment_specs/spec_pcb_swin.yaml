@@ -1,0 +1,97 @@
+results_dir: 
+
+dataset:
+  train:
+    annotations: 
+    panoptic: 
+    batch_size: 4
+    num_workers: 4
+  val:
+    annotations: 
+    panoptic: 
+    batch_size: 4
+    num_workers: 4
+  test:
+    annotations: 
+    panoptic: 
+    names:
+      - pcb
+    batch_size: 1
+    num_workers: 8
+  image_size: [1920, 1080]
+  label_map: 
+  cutmix_prob: 0.0
+
+
+model:
+  backbone:  
+    name: D2SwinTransformer
+    freeze_at: 0
+    swin:
+      embed_dim: 192
+      depths: [2, 2, 18, 2]
+      num_heads: [6, 12, 24, 48]
+      window_size: 12
+      mlp_ratio: 4.0
+      patch_size: 4
+      patch_norm: true
+      ape: false
+      pretrain_img_size: 384
+      qkv_bias: true
+      qk_scale: null
+      attn_drop_rate: 0.0
+      drop_rate: 0.0
+      drop_path_rate: 0.3
+      out_features: [res2, res3, res4, res5]
+      out_indices: [0, 1, 2, 3]
+      use_checkpoint: false
+  one_former:
+    num_object_queries: 64
+  sem_seg_head:
+    num_classes: 25
+  test:
+    test_topk_per_image: 100
+    object_mask_threshold: 0.8
+
+wandb:
+  enable: true
+  project: Computex OneFormer PCB
+  entity: ''
+  tags:
+  - training
+  - computex
+  reinit: false
+  sync_tensorboard: false
+  save_code: false
+  name: ''
+  run_id: ''
+  
+train:
+  num_epochs: 2000
+  num_gpus: 8
+  num_nodes: 4
+  pretrained_model: 
+  pretrained_backbone: 
+  precision: 32
+  iters_per_epoch: 1500
+  val_check_interval: 1.0      
+  checkpoint_interval: 1
+  checkpoint_interval_unit: epoch
+  optim:
+    lr: 0.0001            
+    lr_scheduler: WarmupPoly
+    warmup_iters: 1500    
+    warmup_factor: 0.001
+  
+evaluate: 
+  checkpoint: 
+  num_gpus: 8
+  iou_per_class: true
+  results_dir: 
+
+inference:
+  mode: instance
+  results_dir: 
+  images_dir: 
+  image_size: [1920, 1080]
+  checkpoint: 

@@ -1,16 +1,5 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 
 """Convolution helper files for Stereo"""
@@ -355,6 +344,18 @@ class Conv(nn.Module):
         self.conv = get_conv_type(conv_type)(in_channels, out_channels, bias=False, **kwargs)
         if norm_type is not None:
             self.norm = get_norm_type(norm_type)(out_channels)
+            # External ckpts may store this norm under ``bn`` or ``IN``; remap at load.
+            self._register_load_state_dict_pre_hook(self._remap_norm_keys)
+
+    def _remap_norm_keys(self, state_dict, prefix, local_metadata, strict,
+                         missing_keys, unexpected_keys, error_msgs):
+        """Rewrite ``<prefix>bn.*`` and ``<prefix>IN.*`` → ``<prefix>norm.*``."""
+        for alias in ('bn', 'IN'):
+            old_pre = prefix + alias + '.'
+            new_pre = prefix + 'norm.'
+            for k in list(state_dict.keys()):
+                if k.startswith(old_pre):
+                    state_dict[new_pre + k[len(old_pre):]] = state_dict.pop(k)
 
     def forward(self, x):
         """Performs the forward pass of the Conv module.
@@ -401,6 +402,18 @@ class Conv2xDownScale(nn.Module):
             is only relevant when `conv_type` is 'deconv3d'. Defaults to `False`.
         use_resnet_layer (bool, optional): If `True`, the second convolutional block is
             a `ResnetBasicBlock`. If `False`, it's a standard `Conv` block. Defaults to `False`.
+        conv2_type (str, optional): Convolution kind for the second block. ``'deconv'``
+            (default) reuses ``conv_type`` so conv2 mirrors conv1. ``'conv'`` maps
+            ``deconv2d``/``deconv3d`` to ``conv2d``/``conv3d`` for conv2 only.
+        rem_channels (Optional[int], optional): Channel count of the ``rem``
+            tensor passed to ``forward(x, rem)``. None (default) keeps the
+            legacy assumption ``rem.channels == out_channels`` and ``conv2``
+            input becomes ``out_channels * 2``. Set explicitly when ``rem``
+            has a different channel count than the conv1 output.
+        conv2_out_channels (Optional[int], optional): Output channel count
+            for ``conv2``. None (default) keeps the legacy formula
+            ``out_channels * mul`` (mul = 2 if keep_concat else 1). Set when
+            the second block needs a non-formulaic output width.
         **kwargs: Additional keyword arguments to be passed to the first `Conv` block's
             constructor (e.g., `padding`, `kernel_size`).
 
@@ -411,7 +424,12 @@ class Conv2xDownScale(nn.Module):
     """
 
     def __init__(self, in_channels, out_channels, norm_type, conv_type, concat=True,
-                 keep_concat=True, relu=True, keep_dispc=False, use_resnet_layer=False, **kwargs):
+                 keep_concat=True, relu=True, keep_dispc=False, use_resnet_layer=False,
+                 conv2_type: str = 'deconv',
+                 rem_channels: Optional[int] = None,
+                 conv2_out_channels: Optional[int] = None,
+                 conv2_relu: bool = False,
+                 **kwargs):
 
         super(Conv2xDownScale, self).__init__()
         self.concat = concat
@@ -433,19 +451,42 @@ class Conv2xDownScale(nn.Module):
             self.conv1 = Conv(in_channels, out_channels, relu, norm_type,
                               conv_type, kernel_size=kernel, stride=2, padding=1, **kwargs)
 
+        # Explicit pairing; safe if conv-type registry grows.
+        _conv2_pair = {
+            'conv2d': 'conv2d',
+            'conv3d': 'conv3d',
+            'deconv2d': 'conv2d',
+            'deconv3d': 'conv3d',
+        }
+        if conv2_type == 'deconv':
+            conv2_full_type = conv_type
+        elif conv2_type == 'conv':
+            if conv_type not in _conv2_pair:
+                raise ValueError(
+                    f"conv_type {conv_type!r} not in supported pairing {sorted(_conv2_pair)}")
+            conv2_full_type = _conv2_pair[conv_type]
+        else:
+            raise ValueError(f"conv2_type must be 'conv' or 'deconv', got {conv2_type!r}")
+
         if self.concat:
             mul = 2 if keep_concat else 1
+            conv2_in = (out_channels + rem_channels
+                        if rem_channels is not None
+                        else out_channels * 2)
+            conv2_out = (conv2_out_channels
+                         if conv2_out_channels is not None
+                         else out_channels * mul)
             if use_resnet_layer:
                 self.conv2 = ResnetBasicBlock(
-                    out_channels * 2, out_channels * mul, kernel_size=3,
+                    conv2_in, conv2_out, kernel_size=3,
                     stride=1, padding=1, norm_layer=nn.InstanceNorm2d)
             else:
                 self.conv2 = Conv(
-                    out_channels * 2, out_channels * mul, relu=False, norm_type=norm_type, conv_type=conv_type,
+                    conv2_in, conv2_out, relu=conv2_relu, norm_type=norm_type, conv_type=conv2_full_type,
                     kernel_size=3, stride=1, padding=1)
         else:
-            self.conv2 = Conv(out_channels, out_channels, relu=False, norm_type=norm_type,
-                              conv_type=conv_type, kernel_size=3, stride=1, padding=1, **kwargs)
+            self.conv2 = Conv(out_channels, out_channels, relu=conv2_relu, norm_type=norm_type,
+                              conv_type=conv2_full_type, kernel_size=3, stride=1, padding=1, **kwargs)
 
     def forward(self, x, rem):
         """Performs the forward pass of the Conv2xDownScale module.

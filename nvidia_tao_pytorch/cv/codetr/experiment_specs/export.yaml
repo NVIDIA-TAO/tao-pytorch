@@ -1,0 +1,31 @@
+encryption_key: tlt_encode
+results_dir: ???
+
+model:
+  backbone: swin_large_patch4_window7_224
+  num_queries: 900
+  num_feature_levels: 4
+  return_interm_indices: [1, 2, 3, 4]
+  two_stage_type: standard
+
+dataset:
+  num_classes: ???
+  augmentation:
+    fixed_random_crop: null
+
+train:
+  activation_checkpoint: False
+  freeze: []
+
+export:
+  gpu_id: 0
+  checkpoint: ???
+  onnx_file: ???
+  input_channel: 3
+  input_width: 640
+  input_height: 640
+  batch_size: -1
+  opset_version: 17
+  on_cpu: False
+  verbose: False
+  serialize_nvdsinfer: False

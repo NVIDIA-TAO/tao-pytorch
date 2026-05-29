@@ -1,16 +1,5 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """This script is responsible for generating default experiment.yaml files from dataclasses."""
 
@@ -35,18 +24,11 @@ python download_specs \
 """
 
 
-# Get the config root from tao-core
-try:
-    import nvidia_tao_core
-    TAO_CORE_ROOT = dirname(dirname(abspath(nvidia_tao_core.__file__)))
-    CONFIG_ROOT = join(TAO_CORE_ROOT, "nvidia_tao_core/config")
-except ImportError:
-    # Fallback: try to find tao-core relative to tao-pytorch
-    # __file__ is in nvidia_tao_pytorch/core/utils/download_specs.py
-    # Need to go up 4 levels to get to tao-pytorch root
-    TAO_PYTORCH_ROOT = dirname(dirname(dirname(dirname(abspath(__file__)))))
-    TAO_CORE_ROOT = join(dirname(TAO_PYTORCH_ROOT), "tao-core")
-    CONFIG_ROOT = join(TAO_CORE_ROOT, "nvidia_tao_core/config")
+# Get the config root from nvidia_tao_pytorch/config/
+# __file__ is nvidia_tao_pytorch/core/utils/default_specs.py
+# Go up 3 levels to nvidia_tao_pytorch/, then into config/
+_NVIDIA_TAO_PYTORCH_DIR = dirname(dirname(dirname(abspath(__file__))))
+CONFIG_ROOT = join(_NVIDIA_TAO_PYTORCH_DIR, "config")
 
 
 def get_supported_modules():
@@ -54,7 +36,7 @@ def get_supported_modules():
     Get list of supported modules from config directory that are also implemented in nvidia_tao_pytorch.
 
     This function checks both:
-    1. Modules defined in nvidia_tao_core/config/
+    1. Modules defined in nvidia_tao_pytorch/config/
     2. Modules actually implemented in nvidia_tao_pytorch (cv, pointcloud, sdg, ssl directories)
 
     Returns:
@@ -64,7 +46,7 @@ def get_supported_modules():
         logging.warning(f"Config root not found at {CONFIG_ROOT}")
         return []
 
-    # Get all config modules from tao-core
+    # Get all config modules from nvidia_tao_pytorch/config/
     config_modules = [
         item for item in listdir(CONFIG_ROOT)
         if item not in ["utils", "__pycache__", "common"] and os.path.isdir(join(CONFIG_ROOT, item))
@@ -103,7 +85,7 @@ def import_module_from_path(module_name):
     Import a module from its full path.
 
     Args:
-        module_name (str): Full module path (e.g., 'nvidia_tao_core.config.classification_pyt.default_config')
+        module_name (str): Full module path (e.g., 'nvidia_tao_pytorch.config.classification_pyt.default_config')
 
     Returns:
         module: The imported module
@@ -179,7 +161,7 @@ def main(cfg: DefaultConfig) -> None:
         logging.warning(f"Output file already exists and will be overwritten: {output_path}")
 
     # Import the module and get the ExperimentConfig dataclass
-    module_path = f"nvidia_tao_core.config.{cfg.module_name}.default_config"
+    module_path = f"nvidia_tao_pytorch.config.{cfg.module_name}.default_config"
     try:
         imported_module = import_module_from_path(module_path)
         if not hasattr(imported_module, 'ExperimentConfig'):

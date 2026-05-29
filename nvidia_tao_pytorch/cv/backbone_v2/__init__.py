@@ -1,16 +1,5 @@
-# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """Backbone module.
 
@@ -113,6 +102,9 @@ from nvidia_tao_pytorch.cv.backbone_v2.swin import (
     swin_base_patch4_window12_384,
     swin_large_patch4_window12_384,
 )
+from nvidia_tao_pytorch.cv.backbone_v2.dinat import (
+    dinat_large_kernel7,
+)
 from nvidia_tao_pytorch.cv.backbone_v2.gcvit import (
     gc_vit_xxtiny,
     gc_vit_xtiny,
@@ -149,12 +141,18 @@ from nvidia_tao_pytorch.cv.backbone_v2.open_clip import (
     vit_h_14_siglip_clipa_224,
 )
 from nvidia_tao_pytorch.cv.backbone_v2.siglip2 import (
-    siglip2_so400m_patch16_naflex,
-    siglip2_so400m_patch14_224,
-    siglip2_so400m_patch14_384,
-    siglip2_so400m_patch16_256,
-    siglip2_so400m_patch16_384,
     siglip2_so400m_patch16_512,
+    siglip2_so400m,
+    siglip2_g_384,
+)
+from nvidia_tao_pytorch.cv.backbone_v2.sam3 import (
+    sam3_default,
+)
+from nvidia_tao_pytorch.cv.backbone_v2.dino_v3 import (
+    dinov3_vit7b16,
+    dinov3_vitl16,
+    dinov3_vitb16,
+    dinov3_vith16plus,
 )
 from nvidia_tao_pytorch.cv.backbone_v2.mit import (
     mit_b0,
@@ -163,6 +161,9 @@ from nvidia_tao_pytorch.cv.backbone_v2.mit import (
     mit_b3,
     mit_b4,
     mit_b5,
+)
+from nvidia_tao_pytorch.cv.backbone_v2.vit_codetr import (
+    vit_large_codetr,
 )
 
 __all__ = [
@@ -241,6 +242,7 @@ __all__ = [
     "swin_large_patch4_window7_224",
     "swin_base_patch4_window12_384",
     "swin_large_patch4_window12_384",
+    "dinat_large_kernel7",
     "gc_vit_xxtiny",
     "gc_vit_xtiny",
     "gc_vit_tiny",
@@ -274,10 +276,13 @@ __all__ = [
     "mit_b3",
     "mit_b4",
     "mit_b5",
-    "siglip2_so400m_patch16_naflex",
-    "siglip2_so400m_patch14_224",
-    "siglip2_so400m_patch14_384",
-    "siglip2_so400m_patch16_256",
-    "siglip2_so400m_patch16_384",
     "siglip2_so400m_patch16_512",
+    "siglip2_so400m",
+    "siglip2_g_384",
+    "sam3_default",
+    "dinov3_vit7b16",
+    "dinov3_vitl16",
+    "dinov3_vitb16",
+    "dinov3_vith16plus",
+    "vit_large_codetr",
 ]

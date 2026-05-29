@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 set -eo pipefail
 cd "$( dirname "${BASH_SOURCE[0]}" )"
@@ -67,21 +69,6 @@ NOTES:
 EOF
     exit 0
 }
-
-# Store the docker directory for cleanup
-DOCKER_DIR="$(pwd)"
-
-# Cleanup function
-cleanup() {
-    if [ -d "$DOCKER_DIR/xformers" ]; then
-        log_info "Cleaning up xformers directory..."
-        rm -rf "$DOCKER_DIR/xformers"
-        log_info "Xformers directory removed"
-    fi
-}
-
-# Set up trap to clean up on exit
-trap cleanup EXIT
 
 # Setup QEMU for cross-platform builds
 setup_qemu() {
@@ -215,34 +202,7 @@ if [ $BUILD_DOCKER = "1" ]; then
     
     # Setup QEMU for cross-platform builds if needed
     setup_qemu "$PLATFORM"
-    
-    # Extract xformers commit hash from Dockerfile
-    log_info "Extracting xformers commit hash from Dockerfile..."
-    XFORMERS_COMMIT=$(grep "ARG XFORMERS_COMMIT_HASH=" Dockerfile | cut -d'=' -f2)
-    log_info "Using xformers commit: $XFORMERS_COMMIT"
-    
-    # Clone xformers
-    if [ -d "xformers" ]; then
-        log_warn "Existing xformers directory found, removing it..."
-        rm -rf xformers
-        log_info "Old xformers directory removed"
-    fi
-    
-    log_info "Cloning xformers repository..."
-    log_info "Executing: git clone ssh://git@gitlab-master.nvidia.com:12051/dl/vllm/xformers.git xformers"
-    git clone ssh://git@gitlab-master.nvidia.com:12051/dl/vllm/xformers.git xformers
-    
-    cd xformers
-    log_info "Checking out commit: $XFORMERS_COMMIT"
-    log_info "Executing: git checkout $XFORMERS_COMMIT"
-    git checkout $XFORMERS_COMMIT
-    
-    log_info "Updating submodules..."
-    log_info "Executing: git submodule update --init --recursive"
-    git submodule update --init --recursive
-    cd ..
-    log_success "Xformers setup complete"
-    
+
     if [ $FORCE = "1" ]; then
         log_warn "Force rebuild enabled - ignoring Docker cache"
         NO_CACHE="--no-cache"

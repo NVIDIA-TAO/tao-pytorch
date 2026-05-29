@@ -1,16 +1,5 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """Distiller module for RTDETR model"""
 import re
@@ -70,12 +59,11 @@ class RtdetrDistiller(Distiller):
         )
 
         resume_ckpt = self.experiment_spec["train"]["resume_training_checkpoint_path"] or get_latest_checkpoint(results_dir)
+        resumed_epoch = 0
         if resume_ckpt:
-            resumed_epoch = re.search('epoch_(\\d+)', resume_ckpt)
-            if resumed_epoch:
-                resumed_epoch = int(resumed_epoch.group(1))
-        else:
-            resumed_epoch = 0
+            match = re.search('epoch_(\\d+)', resume_ckpt)
+            if match:
+                resumed_epoch = int(match.group(1))
         status_logger_callback.epoch_counter = resumed_epoch + 1
         callbacks.append(status_logger_callback)
 
