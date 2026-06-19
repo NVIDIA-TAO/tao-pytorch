@@ -1479,7 +1479,10 @@ class DistillationLoss(nn.Module):
                 t_mask = self._build_mask(teacher_valid_mask, (H, W), device)
             else:
                 t_mask = torch.ones(B, H, W, dtype=torch.bool, device=device)
-            self.phi_norm.update(None, teacher_output, t_mask)
+            # Only accumulate normalization statistics during training so that
+            # validation / sanity-check batches do not pollute the running stats.
+            if self.training:
+                self.phi_norm.update(None, teacher_output, t_mask)
             teacher_output = self.phi_norm.transform_targets(teacher_output)
 
             # align the shape of student and teacher feature maps
@@ -1513,7 +1516,10 @@ class DistillationLoss(nn.Module):
                 t_mask = self._build_mask(teacher_valid_mask, (H, W), device)
             else:
                 t_mask = torch.ones(B, H, W, dtype=torch.bool, device=device)
-            self.phi_norm.update(None, teacher_spatial, t_mask)
+            # Only accumulate normalization statistics during training so that
+            # validation / sanity-check batches do not pollute the running stats.
+            if self.training:
+                self.phi_norm.update(None, teacher_spatial, t_mask)
             teacher_spatial = self.phi_norm.transform_targets(teacher_spatial)
             # align the shape of student and teacher feature maps
 

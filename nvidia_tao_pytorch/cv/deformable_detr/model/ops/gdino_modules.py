@@ -14,7 +14,7 @@ import torch.nn as nn
 from torch.nn.init import constant_, xavier_uniform_
 
 from nvidia_tao_pytorch.cv.deformable_detr.model.ops.functions import MSDeformAttnFunction, load_ops
-from nvidia_tao_pytorch.cv.deformable_detr.model.ops.modules import multi_scale_deformable_attn_pytorch
+from nvidia_tao_pytorch.cv.deformable_detr.model.ops.modules import multi_scale_deformable_attn_pytorch, precise_msda_enabled
 
 
 # helpers
@@ -214,7 +214,9 @@ class GDINOMultiScaleDeformableAttention(nn.Module):
                     value, spatial_shapes, sampling_locations, attention_weights
                 )
         else:
-            if torch.cuda.is_available() and value.is_cuda:
+            # precise_msda routes CUDA tensors through the deterministic pure-PyTorch
+            # path below (the custom CUDA op's atomicAdd backward is non-deterministic).
+            if torch.cuda.is_available() and value.is_cuda and not precise_msda_enabled():
                 half_float = False
                 if value.dtype in [torch.float16, torch.bfloat16]:
                     half_float = value.dtype
@@ -233,9 +235,19 @@ class GDINOMultiScaleDeformableAttention(nn.Module):
                 if half_float:
                     output = output.to(half_float)
             else:
+                half_float = False
+                if value.dtype in [torch.float16, torch.bfloat16]:
+                    half_float = value.dtype
+                    value = value.float()
+                    sampling_locations = sampling_locations.float()
+                    attention_weights = attention_weights.float()
+
                 output = multi_scale_deformable_attn_pytorch(
-                    value, spatial_shapes, sampling_locations, attention_weights
+                    value, spatial_shapes, sampling_locations, attention_weights,
+                    deterministic=precise_msda_enabled()
                 )
+                if half_float:
+                    output = output.to(half_float)
 
         output = output.view(bs, num_query, self.embed_dim)
         output = self.output_proj(output)

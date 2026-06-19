@@ -1,6 +1,5 @@
 build-essential
 curl
-ffmpeg
 gnupg
 libboost-program-options-dev
 libboost-system-dev

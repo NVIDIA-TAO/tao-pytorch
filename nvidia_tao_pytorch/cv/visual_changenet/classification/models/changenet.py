@@ -32,6 +32,7 @@ from nvidia_tao_pytorch.cv.visual_changenet.backbone.fan import fan_model_dict
 from nvidia_tao_pytorch.cv.visual_changenet.backbone.radio import radio_model_dict
 from nvidia_tao_pytorch.cv.visual_changenet.backbone.utils import ptm_adapter, visual_changenet_parser
 from nvidia_tao_pytorch.cv.visual_changenet.backbone.vit_adapter import vit_adapter_model_dict, ViTAdapter
+from nvidia_tao_pytorch.cv.deformable_detr.model.ops.modules import set_precise_msda
 from nvidia_tao_pytorch.cv.visual_changenet.segmentation.models.changenet_utils import (
     MLP,
     conv_diff,
@@ -601,6 +602,9 @@ def build_model(experiment_config,
 
     """
     model_config = experiment_config.model
+    # Opt-in deterministic MSDeformAttn path in the C-RADIO ViT-Adapter
+    # (no-op unless precise_msda=True).
+    set_precise_msda(getattr(model_config, "precise_msda", False))
     dataset_config = experiment_config.dataset.classify
 
     backbone = model_config.backbone['type']

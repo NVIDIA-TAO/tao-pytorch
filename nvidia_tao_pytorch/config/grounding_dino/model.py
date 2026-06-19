@@ -343,6 +343,16 @@ class GDINOModelConfig:
         description="""Flag to set backbone weights as trainable or frozen.
                     When set to `False`, the backbone weights will be frozen.""",
     )
+    precise_msda: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        display_name="Deterministic MSDeformAttn",
+        description="""When True, route MultiScaleDeformableAttention through the
+                    deterministic pure-PyTorch implementation instead of the custom CUDA
+                    op, whose atomicAdd backward has no deterministic kernel. Combined with
+                    train.cudnn.deterministic this yields reproducible training, at some
+                    speed/memory cost. Default False (fused CUDA op, current behavior).""",
+    )
 
     # Text
     text_encoder_type: str = STR_FIELD(

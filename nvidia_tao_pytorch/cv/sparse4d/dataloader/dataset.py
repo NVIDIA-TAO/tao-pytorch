@@ -14,6 +14,7 @@ import copy
 from typing import List, Dict
 from collections import OrderedDict
 import sys
+import subprocess
 import cv2
 import math
 from importlib import import_module
@@ -26,7 +27,7 @@ from spatialai_data_utils.constants import FPS
 from spatialai_data_utils.eval.detection.data_classes import DetectionConfig
 from spatialai_data_utils.eval.tracking.data_classes import TrackingConfig
 from spatialai_data_utils.visualization import COLOR_MAP
-from spatialai_data_utils.utils.data_classes import AICityBox
+from spatialai_data_utils.core.boxes.aicity_box import AICityBox
 from spatialai_data_utils.converters.nusc_results_to_nvschema import convert_sparse4d_to_nvschema
 
 from nvidia_tao_pytorch.core.tlt_logging import logging
@@ -1049,7 +1050,7 @@ class Omniverse3DDetTrackDataset(Dataset):
             detail[f"{metric_prefix}/NDS"] = metrics["nd_score"]
             detail[f"{metric_prefix}/mAP"] = metrics["mean_ap"]
         else:
-            from spatialai_data_utils.eval.tracking.evaluate import AIC24TrackEval
+            from spatialai_data_utils.eval.tracking.aic24_eval import AIC24TrackEval
 
             eval_output_dir = output_dir
             if metric_prefix_override is not None:
@@ -1094,7 +1095,7 @@ class Omniverse3DDetTrackDataset(Dataset):
             eval_dist_fcn: "iou_3d" for 3D IoU matching, "center_distance" for center distance.
             metric_prefix: Prefix for metric keys in the returned dict.
         """
-        from spatialai_data_utils.eval.mtmc.tracking.hota_eval import (
+        from spatialai_data_utils.eval.tracking.hota.hota_eval import (
             evaluate_hota,
             HOTA_FIELDS,
         )
@@ -1283,8 +1284,15 @@ class Omniverse3DDetTrackDataset(Dataset):
         return results_dict
 
     def show(self, results, save_dir=None, show=False, tracking=False, pipeline=None,
-             vis_score_threshold=0.25, n_images_col=6, down_sample=3):
-        """Show results."""
+             vis_score_threshold=0.25, n_images_col=6, down_sample=3, write_video=False):
+        """Show results.
+
+        Visualization is written as a per-frame JPEG image sequence (royalty-free). The
+        legacy MPEG-4 Part 2 ``cv2.VideoWriter`` (fourcc) was removed (TAO-2183 / FF-5):
+        OpenCV is built ``WITH_FFMPEG=OFF`` so it can no longer encode video. Set
+        ``write_video=True`` to additionally stitch the JPEG sequence into a royalty-free
+        VP9/WebM clip via the codec-disabled ffmpeg CLI; it defaults off.
+        """
         save_dir = "./" if save_dir is None else save_dir
         if not tracking:
             save_dir = os.path.join(save_dir, "visual_det")
@@ -1293,8 +1301,7 @@ class Omniverse3DDetTrackDataset(Dataset):
         if not os.path.exists(save_dir):
             os.makedirs(save_dir)
 
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        videoWriter = None
+        frame_paths = []
 
         for i, result in enumerate(tqdm.tqdm(results)):
             if "img_bbox" in result.keys():
@@ -1399,17 +1406,49 @@ class Omniverse3DDetTrackDataset(Dataset):
                 rows.append(row1)
             image = cv2.vconcat(rows)
 
-            # ===== save video =====
-            if videoWriter is None:
-                videoWriter = cv2.VideoWriter(
-                    os.path.join(save_dir, "video.mp4"),
-                    fourcc,
-                    FPS,
-                    image.shape[:2][::-1],
-                )
-            cv2.imwrite(os.path.join(save_dir, f"{i:09}.jpg"), image)
-            videoWriter.write(image)
-        videoWriter.release()
+            # ===== save per-frame visualization (royalty-free JPEG image sequence) =====
+            frame_path = os.path.join(save_dir, f"{i:09}.jpg")
+            cv2.imwrite(frame_path, image)
+            frame_paths.append(frame_path)
+
+        # Optional royalty-free video stitch, gated and OFF by default (TAO-2183 / FF-5).
+        # The MPEG-4 Part 2 cv2.VideoWriter (fourcc) was removed; OpenCV is built
+        # WITH_FFMPEG=OFF so it cannot encode video. When a video is explicitly requested,
+        # stitch the JPEG sequence into royalty-free VP9/WebM via the codec-disabled ffmpeg CLI.
+        if write_video and frame_paths:
+            self._stitch_frames_to_webm(save_dir, fps=int(FPS))
+
+    @staticmethod
+    def _stitch_frames_to_webm(save_dir, fps=10, pattern="%09d.jpg", out_name="video.webm"):
+        """Stitch the per-frame JPEG sequence into a royalty-free VP9/WebM clip.
+
+        Uses the codec-disabled ffmpeg CLI (libvpx-vp9, no audio) over the ``{i:09}.jpg``
+        image sequence written by :meth:`show`. Best-effort: on any failure (ffmpeg absent,
+        encoder missing, etc.) the JPEG image sequence in ``save_dir`` remains the usable
+        artifact and a warning is logged. No royalty-bearing codec is used (TAO-2183 / FF-5).
+        """
+        out_path = os.path.join(save_dir, out_name)
+        cmd = [
+            "ffmpeg", "-y",
+            "-framerate", str(fps),
+            "-start_number", "0",
+            "-i", os.path.join(save_dir, pattern),
+            "-c:v", "libvpx-vp9",
+            "-pix_fmt", "yuv420p",
+            "-an",
+            out_path,
+        ]
+        try:
+            subprocess.run(
+                cmd, check=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            )
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+            detail = e.stderr.decode(errors="ignore") if getattr(e, "stderr", None) else str(e)
+            logging.warning(
+                "VP9 video stitch failed (%s); per-frame JPEGs in %s remain the artifact.",
+                detail, save_dir,
+            )
 
     @staticmethod
     def load_class_config_from_file(config_path):
