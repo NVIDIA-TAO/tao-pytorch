@@ -7,6 +7,7 @@ import os
 # from omegaconf import OmegaConf
 from pytorch_lightning import seed_everything
 from pytorch_lightning.loggers import TensorBoardLogger
+import torch
 import torch.backends.cudnn as cudnn
 
 from nvidia_tao_pytorch.core.cookbooks.tlt_pytorch_cookbook import TLTPyTorchCookbook
@@ -42,8 +43,25 @@ def initialize_train_experiment(cfg, key=None):
     if cfg["train"]["seed"] >= 0:
         seed_everything(cfg["train"]["seed"], workers=True)
 
+    deterministic = cfg["train"]["cudnn"]["deterministic"]
     cudnn.benchmark = cfg["train"]["cudnn"]["benchmark"]
-    cudnn.deterministic = cfg["train"]["cudnn"]["deterministic"]
+    cudnn.deterministic = deterministic
+    if deterministic:
+        # cuBLAS needs a workspace config selected before the first CUDA context
+        # for its GEMM kernels to be deterministic.
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+        # warn_only=True: ops without a deterministic CUDA kernel (e.g. bilinear
+        # F.interpolate backward, used by several TAO models) will warn instead
+        # of raising, so existing training runs keep working.
+        torch.use_deterministic_algorithms(True, warn_only=True)
+        # scaled_dot_product_attention's flash / mem-efficient backends have
+        # non-deterministic backward kernels (only the math backend is
+        # deterministic). Force the math backend so attention-heavy backbones
+        # (e.g. C-RADIO ViT) are reproducible. Slower / more memory, but only
+        # incurred when determinism is requested.
+        torch.backends.cuda.enable_flash_sdp(False)
+        torch.backends.cuda.enable_mem_efficient_sdp(False)
+        torch.backends.cuda.enable_math_sdp(True)
 
     resume_ckpt = cfg["train"]["resume_training_checkpoint_path"] or get_latest_checkpoint(results_dir)
     if resume_ckpt:
@@ -86,7 +104,8 @@ def initialize_train_experiment(cfg, key=None):
                       'default_root_dir': results_dir,
                       'accelerator': 'gpu',
                       # This is false since we define our own ModelCheckpoint callbacks
-                      'enable_checkpointing': False
+                      'enable_checkpointing': False,
+                      'deterministic': "warn" if deterministic else False,
                       }
 
     return resume_ckpt, trainer_kwargs

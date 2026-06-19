@@ -29,8 +29,15 @@ mypy==1.20.2
 natsort==8.4.0
 nltk==3.9.4
 # numpy: pinned in the 26.03 base image (PyTorch 2.11 ships numpy 2.x); do not override.
---extra-index-url https://edge.urm.nvidia.com/artifactory/api/pypi/sw-metropolis-pypi/simple
-spatialai_data_utils==1.0.0
+# spatialai_data_utils is installed in a dedicated --no-deps layer in the Dockerfile (kept
+# out of this bulk resolve so its nuscenes-devkit dep, which pins numpy<2, cannot downgrade
+# the base numpy 2.x). Version 2.0.0 is used: the index's 1.0.0 wheel was re-published and now
+# omits visualization.COLOR_MAP, so it no longer matches the shipped image and breaks the
+# Sparse4D import; 2.0.0 has the full API. (TAO-2183 / FF-5)
+# huggingface_hub pinned <1.0 to match the shipped image (0.36.2): the 26.03 base has since
+# drifted hf_hub to 1.7.2, but transformers 4.57.x (the shipped version) requires hf_hub<1.0,
+# so without this pin transformers<5 backtracks to ancient Rust-built tokenizers and fails.
+huggingface_hub==0.36.2
 --extra-index-url https://pypi.nvidia.com
 nvidia-eff==0.6.6
 nvidia-eff-tao-encryption==0.1.9
@@ -50,9 +57,9 @@ pylint==3.3.7  # held at 3.3.x: 4.x requires isort>=5, nvidia-eff requires isort
 pyquaternion==0.9.9
 pyrr==0.10.3
 scikit-image==0.26.0
-shapely==2.1.2
+shapely==2.1.2  # matches the shipped release/7.0.1 image
 tensorboardX==2.6.5
-transformers<5.0.0
+transformers<5.0.0  # resolves to 4.57.6 (the shipped version) given the huggingface_hub<1.0 pin above
 ujson==5.12.0
 wandb==0.26.1
 webdataset==1.0.2

@@ -13,6 +13,18 @@ from nvidia_tao_pytorch.core.tlt_logging import logging
 from nvidia_tao_pytorch.cv.optical_inspection.dataloader.build_data_loader import build_dataloader
 
 
+# Default (ImageNet) input normalization, and the CLIP/OpenAI normalization that C-RADIO
+# backbones are trained with (baked into the model's input_conditioner). When a C-RADIO
+# backbone is loaded into the VCN ViT-Adapter the conditioner is stripped
+# (load_state_dict(strict=False)), so the matching normalization must be applied in the
+# dataloader instead of the ImageNet default — otherwise the backbone receives
+# out-of-distribution inputs (std off by ~17-23% per channel).
+_IMAGENET_MEAN = [0.485, 0.456, 0.406]
+_IMAGENET_DEFAULT_STDS = ([0.229, 0.224, 0.225], [0.226, 0.226, 0.226])
+_CRADIO_CLIP_MEAN = [0.48145466, 0.4578275, 0.40821073]
+_CRADIO_CLIP_STD = [0.26862954, 0.26130258, 0.27577711]
+
+
 class OIDataModule(pl.LightningDataModule):
     """Lightning DataModule for Optical Inspection."""
 
@@ -30,6 +42,42 @@ class OIDataModule(pl.LightningDataModule):
         else:
             self.dataset_config = experiment_spec.dataset
         self.model_config = experiment_spec.model
+        if changenet:
+            self._apply_cradio_normalization()
+
+    def _apply_cradio_normalization(self):
+        """Use the backbone's expected input normalization for C-RADIO backbones.
+
+        C-RADIO is trained with CLIP/OpenAI pixel normalization (baked into its
+        input_conditioner, which is dropped when loading into the VCN ViT-Adapter). Feed the
+        backbone CLIP-normalized inputs instead of the ImageNet default so it operates
+        in-distribution. Only overrides when the configured normalization is still the
+        ImageNet default, so explicit user settings are respected.
+        """
+        try:
+            backbone_type = str(self.model_config.backbone.type)
+        except Exception:
+            return
+        if "radio" not in backbone_type.lower():
+            return
+        aug = self.dataset_config.get("augmentation_config", None)
+        if aug is None:
+            return
+        cur_mean = [float(x) for x in aug.get("rgb_input_mean", [])]
+        cur_std = [float(x) for x in aug.get("rgb_input_std", [])]
+
+        def _close(a, b):
+            return len(a) == len(b) and all(abs(x - y) < 1e-4 for x, y in zip(a, b))
+
+        is_default = _close(cur_mean, _IMAGENET_MEAN) and any(_close(cur_std, s) for s in _IMAGENET_DEFAULT_STDS)
+        if is_default:
+            aug["rgb_input_mean"] = list(_CRADIO_CLIP_MEAN)
+            aug["rgb_input_std"] = list(_CRADIO_CLIP_STD)
+            logging.info(
+                f"C-RADIO backbone '{backbone_type}' with default ImageNet normalization "
+                f"detected; overriding to CLIP normalization (mean={_CRADIO_CLIP_MEAN}, "
+                f"std={_CRADIO_CLIP_STD}) to match the backbone's training distribution."
+            )
 
     def setup(self, stage: Optional[str] = None):
         """ Prepares for each dataloader

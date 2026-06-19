@@ -204,6 +204,18 @@ class CNModelConfig:
     backbone: BackboneConfig = DATACLASS_FIELD(BackboneConfig())
     decode_head: ChangeNetHeadConfig = DATACLASS_FIELD(ChangeNetHeadConfig())
     classify: CNModelClassifyConfig = DATACLASS_FIELD(CNModelClassifyConfig())
+    precise_msda: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        display_name="Deterministic MSDeformAttn",
+        description=(
+            "When True, route the C-RADIO ViT-Adapter's MultiScaleDeformableAttention "
+            "through the deterministic pure-PyTorch implementation instead of the custom "
+            "CUDA op, whose atomicAdd backward has no deterministic kernel. Combined with "
+            "train.cudnn.deterministic this yields reproducible training, at some "
+            "speed/memory cost. Default False (fused CUDA op, current behavior)."
+        ),
+    )
 
 
 @dataclass

@@ -51,7 +51,6 @@ def run_experiment(cfg):
         strategy=strategy,
         precision=cfg.train.precision,
         sync_batchnorm=True,
-        deterministic=cfg.train.seed,
         **trainer_kwargs
     )
 

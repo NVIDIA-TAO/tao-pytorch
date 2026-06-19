@@ -19,6 +19,29 @@ import os
 from nvidia_tao_pytorch.cv.deformable_detr.model.ops.functions import MSDeformAttnFunction, load_ops
 
 
+# Process-global toggle for the deterministic ("precise") MultiScaleDeformableAttention
+# path, shared by MSDeformAttn (Deformable-DETR / Visual ChangeNet) and the GDINO variant.
+# When enabled, forward routes through the pure-PyTorch implementation
+# (multi_scale_deformable_attn_pytorch with deterministic=True) instead of the custom CUDA
+# op, whose atomicAdd backward has no deterministic kernel. The deterministic path samples
+# with index_select (backward = index_add, which has a deterministic CUDA kernel under
+# torch.use_deterministic_algorithms), so combined with cudnn.deterministic it yields
+# reproducible gradients. Set once at model-build time via set_precise_msda(); opt-in
+# (default off), so existing behavior is unchanged. Held in a dict so the setter mutates
+# state without a module-level `global` statement.
+_PRECISE_MSDA = {"enabled": False}
+
+
+def set_precise_msda(enabled):
+    """Enable/disable the deterministic pure-PyTorch MSDeformAttn path (process-global)."""
+    _PRECISE_MSDA["enabled"] = bool(enabled)
+
+
+def precise_msda_enabled():
+    """Return whether the deterministic ("precise") MSDeformAttn path is enabled."""
+    return _PRECISE_MSDA["enabled"]
+
+
 def _is_power_of_2(n):
     """Check if n is power of 2.
 
@@ -148,7 +171,9 @@ class MSDeformAttn(nn.Module):
                     value, input_spatial_shapes, sampling_locations, attention_weights
                 )
         else:
-            if torch.cuda.is_available() and value.is_cuda:
+            # precise_msda routes CUDA tensors through the deterministic pure-PyTorch path
+            # below (the custom CUDA op's atomicAdd backward is non-deterministic).
+            if torch.cuda.is_available() and value.is_cuda and not precise_msda_enabled():
                 # For mixed precision training
                 half_float = False
                 if value.dtype in [torch.float16, torch.bfloat16]:
@@ -166,15 +191,78 @@ class MSDeformAttn(nn.Module):
                     output = output.to(half_float)
 
             else:
-                # CPU implementation of multi-scale deformable attention
-                output = multi_scale_deformable_attn_pytorch(value, input_spatial_shapes, sampling_locations, attention_weights)
+                # Pure-PyTorch (grid_sample) implementation of multi-scale deformable
+                # attention: used on CPU, and on CUDA when precise_msda is enabled
+                # (deterministic under torch.use_deterministic_algorithms).
+                half_float = False
+                if value.dtype in [torch.float16, torch.bfloat16]:
+                    half_float = value.dtype
+                    value = value.float()
+                    sampling_locations = sampling_locations.float()
+                    attention_weights = attention_weights.float()
+
+                output = multi_scale_deformable_attn_pytorch(
+                    value, input_spatial_shapes, sampling_locations, attention_weights,
+                    deterministic=precise_msda_enabled())
+
+                if half_float:
+                    output = output.to(half_float)
 
         output = output.view(N, Len_q, int(self.d_model * self.ratio))
         output = self.output_proj(output)
         return output
 
 
-def multi_scale_deformable_attn_pytorch(value, value_spatial_shapes, sampling_locations, attention_weights):
+def _grid_sample_bilinear_deterministic(im, grid):
+    """Deterministic drop-in for F.grid_sample(im, grid, mode='bilinear',
+    padding_mode='zeros', align_corners=False).
+
+    F.grid_sample's CUDA backward (grid_sampler_2d_backward_cuda) has no deterministic
+    implementation, so it is the residual source of MSDeformAttn non-determinism even on
+    the pure-PyTorch path. This reimplements bilinear sampling with index_select, whose
+    backward is index_add — which does have a deterministic CUDA kernel under
+    torch.use_deterministic_algorithms(True). Numerically equivalent to grid_sample.
+
+    Args:
+        im (Tensor): [N, C, H, W] feature map.
+        grid (Tensor): [N, Hg, Wg, 2] sampling grid, normalized to [-1, 1].
+
+    Returns:
+        Tensor: [N, C, Hg, Wg] sampled features.
+    """
+    N, C, H, W = im.shape
+    _, Hg, Wg, _ = grid.shape
+    # align_corners=False: normalized [-1,1] -> pixel coords.
+    ix = ((grid[..., 0] + 1) * W - 1) * 0.5
+    iy = ((grid[..., 1] + 1) * H - 1) * 0.5
+    ix0 = torch.floor(ix)
+    iy0 = torch.floor(iy)
+    wx1 = ix - ix0
+    wx0 = 1.0 - wx1
+    wy1 = iy - iy0
+    wy0 = 1.0 - wy1
+
+    flat = im.permute(0, 2, 3, 1).reshape(N * H * W, C)
+    batch_off = (torch.arange(N, device=im.device) * (H * W)).view(N, 1, 1)
+
+    def _corner(ixc, iyc, weight):
+        # zeros padding: out-of-bounds corners contribute nothing.
+        valid = (ixc >= 0) & (ixc <= W - 1) & (iyc >= 0) & (iyc <= H - 1)
+        xi = ixc.clamp(0, W - 1).long()
+        yi = iyc.clamp(0, H - 1).long()
+        lin = (batch_off + yi * W + xi).reshape(-1)
+        sampled = flat.index_select(0, lin).view(N, Hg, Wg, C)
+        return sampled * (valid.to(sampled.dtype) * weight).unsqueeze(-1)
+
+    out = (_corner(ix0, iy0, wx0 * wy0) +
+           _corner(ix0 + 1, iy0, wx1 * wy0) +
+           _corner(ix0, iy0 + 1, wx0 * wy1) +
+           _corner(ix0 + 1, iy0 + 1, wx1 * wy1))
+    return out.permute(0, 3, 1, 2)
+
+
+def multi_scale_deformable_attn_pytorch(value, value_spatial_shapes, sampling_locations,
+                                        attention_weights, deterministic=False):
     """
     Args:
         value (Tensor): [bs, value_length, n_head, c]
@@ -182,6 +270,9 @@ def multi_scale_deformable_attn_pytorch(value, value_spatial_shapes, sampling_lo
         value_level_start_index (Tensor|List): [n_levels]
         sampling_locations (Tensor): [bs, query_length, n_head, n_levels, n_points, 2]
         attention_weights (Tensor): [bs, query_length, n_head, n_levels, n_points]
+        deterministic (bool): if True, use the index_select-based bilinear sampler
+            (deterministic backward under torch.use_deterministic_algorithms) instead of
+            F.grid_sample, whose CUDA backward is non-deterministic.
 
     Returns:
         output (Tensor): [bs, Length_{query}, C]
@@ -201,12 +292,15 @@ def multi_scale_deformable_attn_pytorch(value, value_spatial_shapes, sampling_lo
         sampling_grid_l_ = sampling_grids[:, :, :, level].permute(
             0, 2, 1, 3, 4).flatten(0, 1)
         # N_*M_, D_, Lq_, P_
-        sampling_value_l_ = F.grid_sample(
-            value_l_,
-            sampling_grid_l_,
-            mode='bilinear',
-            padding_mode='zeros',
-            align_corners=False)
+        if deterministic:
+            sampling_value_l_ = _grid_sample_bilinear_deterministic(value_l_, sampling_grid_l_)
+        else:
+            sampling_value_l_ = F.grid_sample(
+                value_l_,
+                sampling_grid_l_,
+                mode='bilinear',
+                padding_mode='zeros',
+                align_corners=False)
         sampling_value_list.append(sampling_value_l_)
     # (N_, Lq_, M_, L_, P_) -> (N_, M_, Lq_, L_, P_) -> (N_*M_, 1, Lq_, L_*P_)
     attention_weights = attention_weights.permute(0, 2, 1, 3, 4).reshape(

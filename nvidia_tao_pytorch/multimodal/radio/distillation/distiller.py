@@ -606,11 +606,58 @@ class MultiTeacherDistiller(Distiller):
             {"params": decay, "weight_decay": weight_decay},
         ]
 
+    @staticmethod
+    def _get_parameter_groups_from_modules(modules, weight_decay, skip_names=()):
+        """Build optimizer parameter groups from a list of modules, de-duplicating params.
+
+        Unlike ``_get_parameter_groups`` this iterates several modules and skips any
+        parameter already seen, so shared tensors are not added to more than one group.
+        """
+        decay = []
+        no_decay = []
+        seen = set()
+
+        for module in modules:
+            for name, param in module.named_parameters():
+                if not param.requires_grad:
+                    continue
+                if id(param) in seen:
+                    continue
+                seen.add(id(param))
+
+                if any(s in name for s in skip_names):
+                    no_decay.append(param)
+                else:
+                    decay.append(param)
+
+        return [
+            {"params": no_decay, "weight_decay": 0.0},
+            {"params": decay, "weight_decay": weight_decay},
+        ]
+
     def configure_optimizers(self):
         """Configure optimizers for training"""
         parameters = self._get_parameter_groups(
             self.model, self.optimizer.weight_decay, self.optimizer.skip_names
         )
+        # The distillation losses own trainable projection heads
+        # (``projection_layer`` / ``projection_layer_summary``) that map student
+        # features into each teacher's space. They live under
+        # ``distillation_loss_fns`` rather than ``self.model``, so they must be
+        # added explicitly or they would receive gradients but never be updated.
+        # Collect only the head modules: DistillationLoss also re-registers the
+        # student and teacher models as submodules, which we must not duplicate
+        # into the optimizer.
+        head_modules = []
+        for loss_fn in self.distillation_loss_fns:
+            if getattr(loss_fn, "projection_layer", None) is not None:
+                head_modules.append(loss_fn.projection_layer)
+            if getattr(loss_fn, "projection_layer_summary", None) is not None:
+                head_modules.append(loss_fn.projection_layer_summary)
+        if head_modules:
+            parameters = parameters + self._get_parameter_groups_from_modules(
+                head_modules, self.optimizer.weight_decay, self.optimizer.skip_names
+            )
         # define optimizers
         if self.optimizer.optim == "sgd":
             self.optimizer_G = optim.SGD(
@@ -778,6 +825,11 @@ class MultiTeacherDistiller(Distiller):
         total_distillation_loss = torch.tensor(0.0, device=loss.device if torch.is_tensor(loss) else 'cpu')
         total_teacher_weight = 0.0
         distill_scale = 1.0
+        # Normalize per-teacher weights by the number of teachers so adding more
+        # teachers does not inflate the overall loss magnitude (and the effective
+        # learning rate). Relative ``loss_lambda`` ratios between teachers are
+        # preserved.
+        num_teachers = len(self.distillation_loss_fns)
         use_multiview = "teacher_views" in batch and len(batch["teacher_views"]) > 0
 
         for idx, (loss_fn, teacher_config) in enumerate(zip(self.distillation_loss_fns, self.teacher_configs)):
@@ -824,7 +876,7 @@ class MultiTeacherDistiller(Distiller):
                 _fwd[f"teacher_{idx}_input_normalized"] = teacher_input.detach().cpu()
                 _fwd[f"teacher_{idx}_loss"] = teacher_distill_loss.detach().cpu()
 
-            teacher_weight = teacher_config['loss_lambda']
+            teacher_weight = teacher_config['loss_lambda'] / num_teachers
             weighted_loss = teacher_weight * teacher_distill_loss * distill_scale
 
             if not torch.isnan(weighted_loss):
@@ -845,7 +897,9 @@ class MultiTeacherDistiller(Distiller):
 
         # Normalize supervised loss weight
         if total_teacher_weight > 0:
-            supervised_weight = 1.0 - total_teacher_weight
+            # Clamp at 0: with multiple teachers total_teacher_weight can exceed
+            # 1.0, which would otherwise make the supervised term weight negative.
+            supervised_weight = max(0.0, 1.0 - total_teacher_weight)
         else:
             supervised_weight = 1.0
 
@@ -1082,10 +1136,20 @@ class MultiTeacherDistiller(Distiller):
         pl.utilities.memory.garbage_collection_cuda()
 
     def on_save_checkpoint(self, checkpoint):
-        """Save the checkpoint but ignore the teacher weights."""
+        """Save the checkpoint but ignore the teacher weights.
+
+        Besides the top-level ``teacher``/``teachers`` modules, ``DistillationLoss``
+        re-registers the teacher (and a duplicate of the student) as submodules,
+        so their weights also appear under ``distillation_loss_fns.*.teacher_model``
+        and ``distillation_loss_fns.*.student_model``. Drop those too: the teacher
+        weights are frozen and the student is already saved under ``model.*``.
+        """
         keys_to_pop = [
             key for key in checkpoint["state_dict"].keys()
-            if key.startswith("teacher") or key.startswith("teachers")
+            if key.startswith("teacher")
+            or key.startswith("teachers")
+            or ".teacher_model." in key
+            or ".student_model." in key
         ]
         for key in keys_to_pop:
             checkpoint["state_dict"].pop(key)

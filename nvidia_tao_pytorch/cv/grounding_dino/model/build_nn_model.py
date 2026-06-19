@@ -11,6 +11,7 @@ from nvidia_tao_pytorch.cv.dino.model.backbone import Joiner
 from nvidia_tao_pytorch.cv.grounding_dino.model.backbone import Backbone
 from nvidia_tao_pytorch.cv.grounding_dino.model.transformer import Transformer
 from nvidia_tao_pytorch.cv.grounding_dino.model.groundingdino import GroundingDINO
+from nvidia_tao_pytorch.cv.deformable_detr.model.ops.modules import set_precise_msda
 
 
 class GDINOModel(nn.Module):
@@ -206,6 +207,8 @@ def build_model(experiment_config,
         model (nn.Module): DINO model.
     """
     model_config = experiment_config.model
+    # Opt-in deterministic MSDeformAttn path (no-op unless precise_msda=True).
+    set_precise_msda(getattr(model_config, "precise_msda", False))
 
     backbone = model_config.backbone
     hidden_dim = model_config.hidden_dim
