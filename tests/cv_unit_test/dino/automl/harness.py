@@ -12,16 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""DINO AutoML integration tests.
-
-These tests intentionally run real short DINO training jobs on a tiny COCO
-dataset.  The harness is written so new TAO Pytorch models can copy the DINO
-case and provide their own spec/model/datamodule pieces before a matching
-tao-skills model exists.
-"""
+"""Reusable DINO AutoML integration-test harness."""
 
 import copy
-import json
 import os
 import site
 import sys
@@ -31,7 +24,29 @@ from pathlib import Path
 import numpy as np
 import pytest
 from omegaconf import OmegaConf
-from PIL import Image
+
+
+REPO_ROOT = Path(__file__).resolve().parents[4]
+MINIMAL_DINO_SPEC = Path(__file__).resolve().parent / "specs" / "dino_minimal.yaml"
+DEFORMABLE_ATTN_OPS = Path("nvidia_tao_pytorch/cv/deformable_detr/model/ops")
+
+
+def _add_tao_automl_source_path():
+    """Prefer an explicit or sibling tao-automl checkout for local repo testing."""
+    candidates = []
+    env_src = os.getenv("TAO_AUTOML_SRC")
+    if env_src:
+        candidates.append(Path(env_src).expanduser())
+    candidates.append(REPO_ROOT.parent / "tao-automl" / "src")
+
+    for candidate in candidates:
+        if (candidate / "tao_automl").exists():
+            sys.path.insert(0, str(candidate))
+            return candidate
+    return None
+
+
+_add_tao_automl_source_path()
 
 torch = pytest.importorskip("torch")
 pl = pytest.importorskip("pytorch_lightning")
@@ -39,20 +54,16 @@ pl_callbacks = pytest.importorskip("pytorch_lightning.callbacks")
 Trainer = pl.Trainer
 Callback = pl_callbacks.Callback
 
-from nvidia_tao_core.config.dino.default_config import ExperimentConfig
-from nvidia_tao_pytorch.cv.deformable_detr.model.ops import functions as deformable_ops_functions
-from nvidia_tao_pytorch.cv.deformable_detr.model.ops import modules as deformable_ops_modules
-from nvidia_tao_pytorch.cv.deformable_detr.dataloader.pl_od_data_module import ODDataModule
-from nvidia_tao_pytorch.cv.dino.model.pl_dino_model import DINOPlModel
+from nvidia_tao_core.config.dino.default_config import ExperimentConfig  # noqa: E402
+from nvidia_tao_pytorch.cv.deformable_detr.dataloader.pl_od_data_module import ODDataModule  # noqa: E402
+from nvidia_tao_pytorch.cv.deformable_detr.model.ops import functions as deformable_ops_functions  # noqa: E402
+from nvidia_tao_pytorch.cv.deformable_detr.model.ops import modules as deformable_ops_modules  # noqa: E402
+from nvidia_tao_pytorch.cv.dino.model.pl_dino_model import DINOPlModel  # noqa: E402
 
-
-REPO_ROOT = Path(__file__).resolve().parents[3]
-DEFORMABLE_ATTN_OPS = Path("nvidia_tao_pytorch/cv/deformable_detr/model/ops")
-SIBLING_AUTOML_SRC = REPO_ROOT.parent / "tao-automl" / "src"
-if SIBLING_AUTOML_SRC.exists():
-    sys.path.insert(0, str(SIBLING_AUTOML_SRC))
-
-pytest.importorskip("tao_automl")
+pytest.importorskip(
+    "tao_automl",
+    reason="Install tao-automl in the image, set TAO_AUTOML_SRC, or place ../tao-automl/src next to tao-pytorch.",
+)
 from tao_automl.brain.factory import AlgorithmParams, BrainFactory  # noqa: E402
 from tao_automl.controller.controller import Controller  # noqa: E402
 from tao_automl.search_space.params import generate_hyperparams_to_search  # noqa: E402
@@ -60,7 +71,7 @@ from tao_automl.state.state_store import StateStore  # noqa: E402
 from tao_automl.types import AutoMLContext, JobStates, Recommendation, ResumeRecommendation  # noqa: E402
 
 
-pytestmark = [
+AUTOML_TEST_MARKS = [
     pytest.mark.automl,
     pytest.mark.integration,
     pytest.mark.dino,
@@ -137,40 +148,24 @@ class DINOAutoMLHarness:
 
     network = "dino"
     metric = "loss"
-    automl_hyperparameters = ("train.optim.lr",)
-    custom_param_ranges = {
-        "train.optim.lr": {
-            "valid_min": 1e-5,
-            "valid_max": 1e-4,
-        },
-    }
 
-    def __init__(self, workspace, dataset_root, annotation_file):
+    def __init__(self, workspace, dataset_root, annotation_file, spec_path=MINIMAL_DINO_SPEC):
         self.workspace = Path(workspace)
         self.dataset_root = Path(dataset_root)
         self.annotation_file = Path(annotation_file)
+        self.spec_path = Path(spec_path)
+        self.spec = OmegaConf.load(self.spec_path)
+        self.automl_hyperparameters = tuple(OmegaConf.to_container(self.spec.automl.hyperparameters, resolve=True))
+        self.custom_param_ranges = OmegaConf.to_container(self.spec.automl.custom_param_ranges, resolve=True)
         self.records: list[TrainingRecord] = []
 
     def base_spec(self, results_dir, num_epochs=1):
-        cfg = OmegaConf.structured(ExperimentConfig())
+        cfg = OmegaConf.merge(
+            OmegaConf.structured(ExperimentConfig()),
+            copy.deepcopy(self.spec.experiment),
+        )
         cfg.results_dir = str(results_dir)
-
-        cfg.train.num_gpus = 1
-        cfg.train.num_nodes = 1
         cfg.train.num_epochs = num_epochs
-        cfg.train.checkpoint_interval = 1
-        cfg.train.validation_interval = 1
-        cfg.train.activation_checkpoint = False
-        cfg.train.precision = "fp32"
-        cfg.train.seed = 1234
-        cfg.train.optim.lr = 2e-5
-        cfg.train.optim.lr_backbone = 2e-6
-        cfg.train.optim.lr_linear_proj_mult = 0.1
-        cfg.train.optim.lr_scheduler = "StepLR"
-        cfg.train.optim.lr_step_size = 1
-        cfg.train.optim.lr_decay = 0.9
-
-        cfg.dataset.dataset_type = "default"
         cfg.dataset.train_data_sources = [
             {"image_dir": str(self.dataset_root), "json_file": str(self.annotation_file)}
         ]
@@ -181,41 +176,6 @@ class DINOAutoMLHarness:
             "image_dir": str(self.dataset_root),
             "json_file": str(self.annotation_file),
         }
-        cfg.dataset.num_classes = 4
-        cfg.dataset.eval_class_ids = [1, 2, 3]
-        cfg.dataset.batch_size = 1
-        cfg.dataset.workers = 0
-        cfg.dataset.pin_memory = False
-        cfg.dataset.augmentation.scales = [64]
-        cfg.dataset.augmentation.train_random_resize = [64]
-        cfg.dataset.augmentation.random_resize_max_size = 64
-        cfg.dataset.augmentation.test_random_resize = 64
-        cfg.dataset.augmentation.train_random_crop_min = 32
-        cfg.dataset.augmentation.train_random_crop_max = 64
-        cfg.dataset.augmentation.horizontal_flip_prob = 0.0
-        cfg.dataset.augmentation.fixed_padding = True
-        cfg.dataset.augmentation.fixed_random_crop = None
-
-        cfg.model.backbone = "resnet_34"
-        cfg.model.pretrained_backbone_path = None
-        cfg.model.train_backbone = False
-        cfg.model.num_feature_levels = 1
-        cfg.model.return_interm_indices = [1]
-        cfg.model.hidden_dim = 256
-        cfg.model.nheads = 4
-        cfg.model.enc_layers = 1
-        cfg.model.dec_layers = 1
-        cfg.model.dim_feedforward = 256
-        cfg.model.dec_n_points = 2
-        cfg.model.enc_n_points = 2
-        cfg.model.num_queries = 8
-        cfg.model.num_select = 8
-        cfg.model.aux_loss = False
-        cfg.model.two_stage_type = "no"
-        cfg.model.use_dn = False
-        cfg.model.dn_number = 4
-        cfg.model.dropout_ratio = 0.0
-
         return cfg
 
     def train(self, rec, target_epoch, resume_checkpoint=None):
@@ -354,205 +314,6 @@ class AutoMLBrainHarness:
 
     def best_record(self):
         return min(self.model_case.records, key=lambda record: record.reported_metric)
-
-
-@pytest.fixture(autouse=True)
-def _require_training_device():
-    if torch.cuda.is_available() or os.getenv("TAO_AUTOML_ALLOW_CPU") == "1":
-        return
-    pytest.skip("DINO AutoML integration tests run real training; set TAO_AUTOML_ALLOW_CPU=1 to run on CPU.")
-
-
-@pytest.fixture()
-def tiny_coco_dataset(tmp_path):
-    dataset_root = tmp_path / "images"
-    dataset_root.mkdir()
-    rng = np.random.default_rng(1234)
-    coco = {
-        "images": [],
-        "annotations": [],
-        "categories": [
-            {"supercategory": "object", "id": 1, "name": "person"},
-            {"supercategory": "object", "id": 2, "name": "face"},
-            {"supercategory": "object", "id": 3, "name": "bag"},
-        ],
-    }
-
-    ann_id = 0
-    for image_id in range(6):
-        image = Image.fromarray(rng.integers(0, 255, size=(64, 64, 3), dtype=np.uint8))
-        file_name = f"sample_{image_id}.jpg"
-        image.save(dataset_root / file_name)
-        coco["images"].append({
-            "id": image_id,
-            "file_name": file_name,
-            "height": 64,
-            "width": 64,
-        })
-        for category_id in (1, 2):
-            x1 = int(rng.integers(1, 32))
-            y1 = int(rng.integers(1, 32))
-            w = int(rng.integers(8, 24))
-            h = int(rng.integers(8, 24))
-            coco["annotations"].append({
-                "image_id": image_id,
-                "category_id": category_id,
-                "id": ann_id,
-                "bbox": [x1, y1, w, h],
-                "area": w * h,
-                "iscrowd": 0,
-            })
-            ann_id += 1
-
-    annotation_file = tmp_path / "annotations.json"
-    annotation_file.write_text(json.dumps(coco))
-    return dataset_root, annotation_file
-
-
-@pytest.fixture()
-def dino_case(tmp_path, tiny_coco_dataset):
-    dataset_root, annotation_file = tiny_coco_dataset
-    return DINOAutoMLHarness(tmp_path / "automl_workspace", dataset_root, annotation_file)
-
-
-def test_dino_automl_bayesian_runs_two_real_training_experiments(dino_case):
-    runner = AutoMLBrainHarness(
-        dino_case,
-        "bayesian",
-        {"automl_max_recommendations": 2},
-    )
-
-    first = runner.next_recommendations()
-    assert len(first) == 1
-    first_record = dino_case.train(first[0], target_epoch=1)
-    assert first_record.started_epochs == [0]
-
-    second = runner.next_recommendations()
-    assert len(second) == 1
-    second_record = dino_case.train(second[0], target_epoch=1)
-    assert second_record.started_epochs == [0]
-    for rec in (first[0], second[0]):
-        assert 1e-5 <= rec.specs["train.optim.lr"] <= 1e-4
-
-    best = runner.best_record()
-    assert best.checkpoint_path.exists()
-    assert len(dino_case.records) == 2
-    assert runner.is_complete()
-
-
-def test_dino_automl_hyperband_promotes_best_rung_from_checkpoint(dino_case):
-    runner = AutoMLBrainHarness(
-        dino_case,
-        "hyperband",
-        {
-            "automl_max_epochs": 2,
-            "automl_reduction_factor": 2,
-            "epoch_multiplier": 1,
-        },
-    )
-
-    first_rung = runner.next_recommendations()
-    assert len(first_rung) == 2
-    assert [rec.early_stop_epoch for rec in first_rung] == [1, 1]
-    first_records = [dino_case.train(rec, target_epoch=rec.early_stop_epoch) for rec in first_rung]
-    assert all(record.started_epochs == [0] for record in first_records)
-
-    best_first_rung = min(first_rung, key=lambda rec: rec.result)
-    promotion = runner.next_recommendations()
-    assert len(promotion) == 1
-    promoted = promotion[0]
-    assert promoted.id == best_first_rung.id
-    assert promoted.resume_from_job_id == best_first_rung.job_id
-    assert promoted.early_stop_epoch == 2
-
-    resumed_record = dino_case.train(
-        promoted,
-        target_epoch=promoted.early_stop_epoch,
-        resume_checkpoint=Path(promoted.resume_from_job_id),
-    )
-    assert resumed_record.started_epochs == [1]
-    assert resumed_record.resume_checkpoint == Path(best_first_rung.job_id)
-
-    runner.finish_if_ready()
-    assert runner.is_complete()
-    assert runner.best_record().checkpoint_path.exists()
-
-
-def test_dino_automl_asha_promotes_best_async_rung_from_checkpoint(dino_case):
-    runner = AutoMLBrainHarness(
-        dino_case,
-        "asha",
-        {
-            "automl_max_epochs": 2,
-            "automl_reduction_factor": 2,
-            "epoch_multiplier": 1,
-            "automl_max_concurrent": 2,
-            "automl_max_trials": 2,
-            "automl_min_top_configs": 1,
-        },
-    )
-
-    first_rung = runner.next_recommendations()
-    assert len(first_rung) == 2
-    assert [rec.early_stop_epoch for rec in first_rung] == [1, 1]
-    [dino_case.train(rec, target_epoch=rec.early_stop_epoch) for rec in first_rung]
-
-    best_first_rung = min(first_rung, key=lambda rec: rec.result)
-    promotion = runner.next_recommendations()
-    assert len(promotion) == 1
-    promoted = promotion[0]
-    assert promoted.id == best_first_rung.id
-    assert promoted.resume_from_job_id == best_first_rung.job_id
-    assert promoted.early_stop_epoch == 2
-
-    resumed_record = dino_case.train(
-        promoted,
-        target_epoch=promoted.early_stop_epoch,
-        resume_checkpoint=Path(promoted.resume_from_job_id),
-    )
-    assert resumed_record.started_epochs == [1]
-
-    runner.finish_if_ready()
-    assert runner.is_complete()
-    assert runner.best_record().checkpoint_path.exists()
-
-
-def test_dino_automl_pbt_resumes_population_and_exploits_best_checkpoint(dino_case):
-    runner = AutoMLBrainHarness(
-        dino_case,
-        "pbt",
-        {
-            "automl_population_size": 2,
-            "automl_max_generations": 2,
-            "automl_eval_interval": 1,
-            "automl_perturbation_factor": 1.1,
-        },
-    )
-
-    first_generation = runner.next_recommendations()
-    assert len(first_generation) == 2
-    [dino_case.train(rec, target_epoch=1) for rec in first_generation]
-    best_first_generation = min(first_generation, key=lambda rec: rec.result)
-
-    next_generation = runner.next_recommendations()
-    assert len(next_generation) == 2
-    assert all(rec.resume_from_job_id for rec in next_generation)
-    exploited = [rec for rec in next_generation if rec.id != best_first_generation.id]
-    assert any(rec.resume_from_job_id == best_first_generation.job_id for rec in exploited)
-
-    resumed_records = [
-        dino_case.train(
-            rec,
-            target_epoch=2,
-            resume_checkpoint=Path(rec.resume_from_job_id),
-        )
-        for rec in next_generation
-    ]
-    assert all(record.started_epochs == [1] for record in resumed_records)
-
-    runner.finish_if_ready()
-    assert runner.is_complete()
-    assert runner.best_record().checkpoint_path.exists()
 
 
 def _apply_flat_overrides(cfg, overrides):

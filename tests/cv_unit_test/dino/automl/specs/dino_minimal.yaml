@@ -1,0 +1,65 @@
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+
+automl:
+  hyperparameters:
+    - train.optim.lr
+  custom_param_ranges:
+    "train.optim.lr":
+      valid_min: 0.00001
+      valid_max: 0.0001
+
+experiment:
+  train:
+    num_gpus: 1
+    num_nodes: 1
+    checkpoint_interval: 1
+    validation_interval: 1
+    activation_checkpoint: false
+    precision: fp32
+    seed: 1234
+    optim:
+      lr: 0.00002
+      lr_backbone: 0.000002
+      lr_linear_proj_mult: 0.1
+      lr_scheduler: StepLR
+      lr_step_size: 1
+      lr_decay: 0.9
+
+  dataset:
+    dataset_type: default
+    num_classes: 4
+    eval_class_ids: [1, 2, 3]
+    batch_size: 1
+    workers: 0
+    pin_memory: false
+    augmentation:
+      scales: [64]
+      train_random_resize: [64]
+      random_resize_max_size: 64
+      test_random_resize: 64
+      train_random_crop_min: 32
+      train_random_crop_max: 64
+      horizontal_flip_prob: 0.0
+      fixed_padding: true
+      fixed_random_crop: null
+
+  model:
+    backbone: resnet_34
+    pretrained_backbone_path: null
+    train_backbone: false
+    num_feature_levels: 1
+    return_interm_indices: [1]
+    hidden_dim: 256
+    nheads: 4
+    enc_layers: 1
+    dec_layers: 1
+    dim_feedforward: 256
+    dec_n_points: 2
+    enc_n_points: 2
+    num_queries: 8
+    num_select: 8
+    aux_loss: false
+    two_stage_type: "no"
+    use_dn: false
+    dn_number: 4
+    dropout_ratio: 0.0
