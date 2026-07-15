@@ -113,6 +113,21 @@ def test_dinov3_256_transform_defaults():
 
 @pytest.mark.config
 @pytest.mark.ssl_unit
+def test_evaluate_block_defaults():
+    """The evaluate block carries the shared eval-suite metrics (KNN on by default)."""
+    cfg = OmegaConf.structured(ExperimentConfig())
+    ev = cfg.evaluate
+    assert ev.knn.enabled is True
+    assert ev.knn.k == 20
+    # DINOv3 matches the SSL train/inference pipeline: ImageNet-normalized inputs.
+    assert ev.knn.imagenet_normalize is True
+    assert ev.segmentation.enabled is False
+    assert ev.retrieval.enabled is False
+    assert ev.cache_dir is None
+
+
+@pytest.mark.config
+@pytest.mark.ssl_unit
 def test_param_map_vit_b():
     """The v3 param map carries the ViT-B (768/12/12, standard MLP) entry."""
     assert map_params["embed_dim"]["vit_b"] == 768

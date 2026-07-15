@@ -246,6 +246,8 @@ class MAEViTAdapter(ModelAdapter):
 # BackboneV2Adapter(model.backbone) — it's a passthrough to backbone_v2's contract.
 ADAPTER_REGISTRY: Dict[str, Type[ModelAdapter]] = {
     "nvdinov2": DinoV2Adapter,            # bespoke: DINOv2 ViT returns a token dict, not backbone_v2
+    "dinov3": DinoV2Adapter,              # DinoV3PlModel(DinoV2PlModel): teacher.backbone returns the
+    #   same x_norm_clstoken/x_norm_patchtokens dict; embed_dim/patch_size come in via cfg.
     "mae": MAEViTAdapter,                 # ViT-MAE encoder (forward_encoder); FCMAE/Hiera TODO (open item #1)
     # RADIO / ViT / FasterViT students: BackboneV2Adapter (backbone_v2 native contract);
     #   only the torch.hub upstream RADIO path needs c-radiov4's bespoke adapter.

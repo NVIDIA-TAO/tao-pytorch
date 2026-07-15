@@ -108,6 +108,33 @@ def test_mae_adapter_contract():
 
 
 @pytest.mark.unit
+def test_dinov3_adapter_contract():
+    """The dinov3 registry entry reuses DinoV2Adapter (same teacher-backbone token dict)."""
+    from nvidia_tao_pytorch.core.evaluation.model_adapter import DinoV2Adapter
+
+    assert ADAPTER_REGISTRY["dinov3"] is DinoV2Adapter
+
+    class _FakeBackbone(nn.Module):
+        def forward(self, x):
+            b = x.shape[0]
+            return {
+                "x_norm_clstoken": torch.randn(b, 48),
+                "x_norm_patchtokens": torch.randn(b, 16, 48),
+            }
+
+    pl_model = nn.Module()
+    pl_model.teacher = nn.ModuleDict({"backbone": _FakeBackbone()})
+    adapter = build_adapter("dinov3", pl_model, patch_size=16, feature_dim=48)
+    assert adapter.patch_size == 16 and adapter.feature_dim == 48
+
+    x = torch.randn(2, 3, 64, 64)
+    summary, feats = adapter(x)
+    assert summary.shape == (2, 48)
+    assert feats.shape == (2, 16, 48)
+    assert features_to_map(feats, x, adapter.patch_size).shape == (2, 48, 4, 4)
+
+
+@pytest.mark.unit
 def test_build_adapter_unknown_network():
     """Unknown network raises a helpful KeyError."""
     with pytest.raises(KeyError):
