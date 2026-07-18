@@ -1,4 +1,6 @@
 # syntax=docker/dockerfile:1.7
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 # Optimized Tier-2 base image. Functionally identical to docker/Dockerfile, but
 # the heavy from-source builds (ORT, torch-scatter, WarpConvNet) are pulled
 # from pre-built artifact images instead of compiled inline. xformers is

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 # FROM nvcr.io/nvstaging/tao/tao_pytorch_base_image@sha256:23c2385c3d9232cf0e8b4d37d13fc7e9c9db8fece5c0f6475e5f7924dc6ac06a
 # Select base image based on architecture
 ARG TARGETARCH # provided by Docker if using BuildKit. Else pass in explicitly.
@@ -32,7 +34,7 @@ COPY release/docker/entrypoint.d/* /opt/nvidia/entrypoint.d/
 
 # Installing TAO-Core
 COPY tao-core tao-core
-RUN cd tao-core && bash release/python/build_wheel.sh && \
+RUN cd tao-core && pip install --upgrade pip setuptools wheel && python setup.py bdist_wheel && \
     find dist/ -name "nvidia_tao_core*.whl" -type f | xargs -n 1 pip install && \
     cp nvidia_tao_core/microservices/nginx.conf /etc/nginx/ && \
     cd .. && rm -rf tao-core

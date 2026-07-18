@@ -1,4 +1,6 @@
 # syntax=docker/dockerfile:1.7
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 # Build torch-scatter wheel from source against the base image's torch.
 # Output: /wheels/torch_scatter-*.whl in a FROM scratch final image.
 
