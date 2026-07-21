@@ -13,6 +13,7 @@ from nvidia_tao_pytorch.config.sparse4d.default_config import ExperimentConfig
 from nvidia_tao_pytorch.cv.sparse4d.dataloader.pl_sparse4d_data_module import Sparse4DDataModule
 from nvidia_tao_pytorch.cv.sparse4d.model.sparse4d_pl_model import Sparse4DPlModel
 from nvidia_tao_pytorch.cv.sparse4d.utils.misc import load_pretrained_weights
+from nvidia_tao_pytorch.cv.sparse4d.scripts import train as train_script
 
 pytestmark = pytest.mark.skipif(
     ("aarch64" in machine().lower()) or ("arm" in machine().lower()),
@@ -99,6 +100,46 @@ def test_trainer_fit(_train_spec):
                       fast_dev_run=FAST_DEV_RUN)
 
     trainer.fit(pt_model, dm)
+
+
+def test_run_experiment_uses_step_budget_as_only_stop_condition(monkeypatch):
+    """A resumed Sparse4D run must consume its increased step budget."""
+    cfg = OmegaConf.structured(ExperimentConfig())
+    cfg.train.num_epochs = 2
+    cfg.train.num_nodes = 1
+    cfg.train.num_gpus = 1
+    cfg.train.pretrained_model_path = None
+    cfg.dataset.batch_size = 1
+    cfg.dataset.num_frames = 3
+    cfg.dataset.num_bev_groups = 1
+
+    captured = {}
+
+    class _Trainer:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def fit(self, model, dm, ckpt_path=None):
+            captured["ckpt_path"] = ckpt_path
+
+    monkeypatch.setattr(
+        train_script,
+        "initialize_train_experiment",
+        lambda experiment_config, key: (
+            "/tmp/epoch_1.pth",
+            {"devices": [0], "max_epochs": cfg.train.num_epochs},
+        ),
+    )
+    monkeypatch.setattr(train_script, "Sparse4DDataModule", lambda experiment_config: object())
+    monkeypatch.setattr(train_script, "Sparse4DPlModel", lambda experiment_config: object())
+    monkeypatch.setattr(train_script, "LearningRateMonitor", lambda **kwargs: object())
+    monkeypatch.setattr(train_script, "Trainer", _Trainer)
+
+    train_script.run_experiment(cfg, key="")
+
+    assert captured["max_epochs"] == -1
+    assert captured["max_steps"] == 6
+    assert captured["ckpt_path"] == "/tmp/epoch_1.pth"
 
 
 @pytest.mark.cv_unit
