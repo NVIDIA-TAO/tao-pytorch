@@ -1,10 +1,47 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+default_install_hook_types:
+- pre-commit
+- pre-push
 repos:
-  - repo: local
-    hooks:
-      - id: update-readme-supported-commands
-        name: Update README supported commands
-        description: Regenerate the supported-commands table in README.md from setup.py entrypoints.
-        entry: python3 tools/update_readme_supported_commands.py
-        language: system
-        pass_filenames: false
-        files: ^(setup\.py|tools/update_readme_supported_commands\.py|nvidia_tao_pytorch/.+/scripts/.+\.py|README\.md)$
+- repo: local
+  hooks:
+  - id: license-header
+    name: license header
+    description: Every source file must carry an SPDX license header.
+    entry: python3 .github/hooks/check_license_header.py
+    language: system
+    files: \.(py|sh)$
+    stages:
+    - pre-push
+  - id: pylint
+    name: pylint
+    description: Static analysis, configured by .pylintrc.
+    entry: pylint --rcfile .pylintrc
+    language: system
+    types:
+    - python
+    files: ^(nvidia_tao_pytorch/)
+    stages:
+    - pre-push
+  - id: pydocstyle
+    name: pydocstyle
+    description: Docstring conventions.
+    entry: pydocstyle --ignore=D4,D107,D200,D203,D205,D210,D212,D213,D301,D400,D401
+    language: system
+    types:
+    - python
+    files: ^(nvidia_tao_pytorch/)
+    stages:
+    - pre-push
+  - id: flake8
+    name: flake8
+    description: Style and lint checks.
+    entry: flake8 --ignore=E24,W504,E501,C400,C403,C408,C409,C414,C413,C416,C417,C419
+    language: system
+    types:
+    - python
+    files: ^(nvidia_tao_pytorch/)
+    stages:
+    - pre-push
