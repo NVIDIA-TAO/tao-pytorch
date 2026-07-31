@@ -6,6 +6,9 @@
 
 import numpy as np
 import torch
+import torch.distributed as dist
+
+from nvidia_tao_pytorch.core.distributed.comm import is_dist_avail_and_initialized
 
 
 class MeanIoUMeter:
@@ -150,8 +153,43 @@ class MeanIoUMeter:
             )
             self.update(area_intersect, area_union, area_pred_label, area_label)
 
-    def get_scores(self):
-        """get scores from confusion matrix"""
+    def _globally_reduce_sufficient_statistics(self, device=None):
+        """Sum metric sufficient statistics across all distributed ranks."""
+        statistics = np.stack(
+            (
+                self.area_intersect,
+                self.area_union,
+                self.area_pred_label,
+                self.area_label,
+            )
+        )
+        if not is_dist_avail_and_initialized():
+            return tuple(statistics)
+
+        if device is None:
+            backend = str(dist.get_backend()).lower()
+            device = (
+                torch.device("cuda", torch.cuda.current_device())
+                if "nccl" in backend
+                else torch.device("cpu")
+            )
+        reduced = torch.as_tensor(
+            statistics,
+            dtype=torch.float64,
+            device=device,
+        )
+        dist.all_reduce(reduced, op=dist.ReduceOp.SUM)
+        return tuple(reduced.cpu().numpy())
+
+    def get_scores(self, device=None):
+        """Get globally aggregated scores from sufficient statistics."""
+        area_intersect, area_union, area_pred_label, area_label = (
+            self._globally_reduce_sufficient_statistics(device=device)
+        )
         return self.total_area_to_metrics(
-            self.area_intersect, self.area_union, self.area_pred_label, self.area_label, n_class=self.n_class
+            area_intersect,
+            area_union,
+            area_pred_label,
+            area_label,
+            n_class=self.n_class,
         )
