@@ -81,6 +81,7 @@ train:
     warmup_factor: 0.001
   
 evaluate: 
+  task: semantic
   checkpoint: 
   num_gpus: 8
   iou_per_class: true

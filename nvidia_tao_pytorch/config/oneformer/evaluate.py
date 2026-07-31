@@ -19,6 +19,17 @@ from nvidia_tao_pytorch.config.utils.types import (
 class OneFormerEvaluateConfig(EvaluateConfig):
     """Evaluation configuration for OneFormer."""
 
+    task: str = STR_FIELD(
+        value="semantic",
+        default_value="semantic",
+        valid_options="semantic,panoptic",
+        description=(
+            "Task-specific evaluation protocol. 'semantic' reports mIoU and "
+            "'panoptic' reports COCO-style Panoptic Quality (PQ)."
+        ),
+        display_name="Evaluation task",
+        popular="yes",
+    )
     num_gpus: int = INT_FIELD(
         value=1,
         valid_min=1,

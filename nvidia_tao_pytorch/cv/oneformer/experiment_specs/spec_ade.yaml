@@ -58,3 +58,6 @@ train:
   pretrained_backbone:
   precision: 16-mixed
   iters_per_epoch: 15000
+
+evaluate:
+  task: semantic
