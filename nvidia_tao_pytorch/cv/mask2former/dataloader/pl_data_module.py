@@ -26,6 +26,9 @@ class SemSegmDataModule(pl.LightningDataModule):
         super().__init__()
         self.data_cfg = data_cfg
         self.calib_dataset = None
+        self.train_dataset = None
+        self.val_dataset = None
+        self.test_dataset = None
 
     def setup(self, stage: Optional[str] = None):
         """Setup the datasets for different stages."""
@@ -53,38 +56,49 @@ class SemSegmDataModule(pl.LightningDataModule):
                     "quant_calibration_dataset.images_dir must be provided for calibration stage."
                 )
 
+    def _build_dataset(self, split, is_training):
+        """Build one task dataset and preserve it for evaluator access."""
+        split_cfg = getattr(self.data_cfg, split)
+        evaluation_split = "val" if is_training else split
+        if split_cfg.type == 'ade':
+            dataset = ADEDataset(
+                split_cfg.annot_file,
+                split_cfg.root_dir,
+                self.data_cfg,
+                is_training=is_training,
+                evaluation_split=evaluation_split,
+            )
+        elif split_cfg.type == 'coco':
+            dataset = COCODataset(
+                split_cfg.instance_json,
+                split_cfg.img_dir,
+                cfg=self.data_cfg,
+                is_training=is_training,
+                evaluation_split=evaluation_split,
+            )
+        elif split_cfg.type == 'coco_panoptic':
+            dataset = COCOPanopticDataset(
+                split_cfg.panoptic_json,
+                split_cfg.img_dir,
+                split_cfg.panoptic_dir,
+                cfg=self.data_cfg,
+                is_training=is_training,
+                evaluation_split=evaluation_split,
+            )
+        else:
+            raise NotImplementedError(
+                f"The dataset type ({split_cfg.type}) is not supported."
+            )
+        setattr(self, f"{split}_dataset", dataset)
+        return dataset
+
     def train_dataloader(self):
         """Build the dataloader for training.
 
         Returns:
             train_loader: PyTorch DataLoader used for training.
         """
-        if self.data_cfg.train.type == 'ade':
-            dataset_train = ADEDataset(
-                self.data_cfg.train.annot_file,
-                self.data_cfg.train.root_dir,
-                self.data_cfg,
-                is_training=True,
-            )
-        elif self.data_cfg.train.type == 'coco':
-            dataset_train = COCODataset(
-                self.data_cfg.train.instance_json,
-                self.data_cfg.train.img_dir,
-                cfg=self.data_cfg,
-                is_training=True,
-            )
-        elif self.data_cfg.train.type == 'coco_panoptic':
-            dataset_train = COCOPanopticDataset(
-                self.data_cfg.train.panoptic_json,
-                self.data_cfg.train.img_dir,
-                self.data_cfg.train.panoptic_dir,
-                cfg=self.data_cfg,
-                is_training=True,
-            )
-        else:
-            raise NotImplementedError(
-                f"The dataset type ({self.data_cfg.train.type}) is not supported."
-            )
+        dataset_train = self._build_dataset("train", is_training=True)
 
         train_sampler = None
         if is_dist_avail_and_initialized():
@@ -110,32 +124,7 @@ class SemSegmDataModule(pl.LightningDataModule):
         Returns:
             val_loader: PyTorch DataLoader used for validation.
         """
-        if self.data_cfg.val.type == 'ade':
-            dataset_val = ADEDataset(
-                self.data_cfg.val.annot_file,
-                self.data_cfg.val.root_dir,
-                self.data_cfg,
-                is_training=False,
-            )
-        elif self.data_cfg.val.type == 'coco':
-            dataset_val = COCODataset(
-                self.data_cfg.val.instance_json,
-                self.data_cfg.val.img_dir,
-                cfg=self.data_cfg,
-                is_training=False,
-            )
-        elif self.data_cfg.val.type == 'coco_panoptic':
-            dataset_val = COCOPanopticDataset(
-                self.data_cfg.val.panoptic_json,
-                self.data_cfg.val.img_dir,
-                self.data_cfg.val.panoptic_dir,
-                cfg=self.data_cfg,
-                is_training=False,
-            )
-        else:
-            raise NotImplementedError(
-                f"The dataset type ({self.data_cfg.val.type}) is not supported."
-            )
+        dataset_val = self._build_dataset("val", is_training=False)
 
         val_sampler = None
         if is_dist_avail_and_initialized():
@@ -149,7 +138,7 @@ class SemSegmDataModule(pl.LightningDataModule):
             shuffle=False,
             collate_fn=dataset_val.collate_fn,
             num_workers=self.data_cfg.val.num_workers,
-            drop_last=True,
+            drop_last=False,
             pin_memory=True,
             sampler=val_sampler)
         return val_loader
@@ -160,7 +149,21 @@ class SemSegmDataModule(pl.LightningDataModule):
         Returns:
             PyTorch DataLoader used for evaluation.
         """
-        return self.val_dataloader()
+        dataset_test = self._build_dataset("test", is_training=False)
+        if is_dist_avail_and_initialized():
+            test_sampler = torch.utils.data.distributed.DistributedSampler(
+                dataset_test)
+        else:
+            test_sampler = torch.utils.data.SequentialSampler(dataset_test)
+        return DataLoader(
+            dataset_test,
+            batch_size=self.data_cfg.test.batch_size,
+            shuffle=False,
+            collate_fn=dataset_test.collate_fn,
+            num_workers=self.data_cfg.test.num_workers,
+            drop_last=False,
+            pin_memory=True,
+            sampler=test_sampler)
 
     def predict_dataloader(self):
         """Build the dataloader for inference.

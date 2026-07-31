@@ -29,9 +29,15 @@ logger = logging.getLogger(__name__)
 class BaseDataset(Dataset):
     """Base Dataset."""
 
-    def __init__(self, cfg):
+    def __init__(self, cfg, evaluation_split="val"):
         """Init."""
         self.cfg = cfg
+        if evaluation_split not in {"val", "test"}:
+            raise ValueError(
+                "evaluation_split must be either 'val' or 'test', "
+                f"got {evaluation_split!r}."
+            )
+        self.evaluation_split = evaluation_split
         self.segm_downsampling_rate = 4
         # max down sampling rate of network to avoid rounding during conv or pooling
         self.padding_constant = 2**5
@@ -103,6 +109,12 @@ class BaseDataset(Dataset):
         new_w = int(self.round2nearest_multiple(w, self.padding_constant))
         return new_h - orig_size[0], new_w - orig_size[1]
 
+    def get_target_size(self, is_training):
+        """Return the configured target size for the active data split."""
+        if is_training:
+            return self.cfg.train.target_size
+        return getattr(self.cfg, self.evaluation_split).target_size
+
 
 class COCOPanopticDataset(BaseDataset):
     """Base class for loading COCO Panoptic format labels."""
@@ -110,7 +122,8 @@ class COCOPanopticDataset(BaseDataset):
     def __init__(self, ann_path, img_dir,
                  panoptic_dir,
                  cfg=None,
-                 is_training=False):
+                 is_training=False,
+                 evaluation_split="val"):
         """Initialize dataset.
 
         Args:
@@ -119,7 +132,7 @@ class COCOPanopticDataset(BaseDataset):
             panoptic_dir (str): directory of panoptic segmentation images
             cfg (Hydra config): Dataset configuration.
         """
-        super().__init__(cfg)
+        super().__init__(cfg, evaluation_split=evaluation_split)
         self.ann_path = ann_path
         self.img_dir = img_dir
         self.panoptic_dir = panoptic_dir
@@ -173,7 +186,7 @@ class COCOPanopticDataset(BaseDataset):
         """Per item."""
         ann = self.raw_annot['annotations'][idx]
         filename = self.id2img[ann['image_id']]['file_name']
-        target_size = self.cfg.train.target_size if self.is_training else self.cfg.val.target_size
+        target_size = self.get_target_size(self.is_training)
         img = self.get_image(filename, root_dir=self.img_dir,
                              target_size=target_size)
         pan_segm = self.get_mask(ann['file_name'], self.panoptic_dir, mode="RGB",
@@ -263,7 +276,8 @@ class COCODataset(BaseDataset):
 
     def __init__(self, ann_path, img_dir,
                  cfg=None,
-                 is_training=False):
+                 is_training=False,
+                 evaluation_split="val"):
         """Initialize dataset.
 
         Args:
@@ -271,7 +285,7 @@ class COCODataset(BaseDataset):
             img_dir (str): raw image directory
             cfg (Hydra config): Dataset configuration.
         """
-        super().__init__(cfg)
+        super().__init__(cfg, evaluation_split=evaluation_split)
         self.ann_path = ann_path
         self.img_dir = img_dir
         self.is_training = is_training
@@ -287,8 +301,12 @@ class COCODataset(BaseDataset):
     def get_category_mapping(self):
         """Map category index in json to 1 based index."""
         self.stuff_dataset_id_to_contiguous_id = {}
+        self.contiguous_id_to_dataset_id = {}
         for i, cat in enumerate(self.coco.dataset['categories']):
             self.stuff_dataset_id_to_contiguous_id[cat["id"]] = i + 1
+            # Model inference indices are zero-based after the no-object class
+            # is removed. COCO evaluation requires the original dataset IDs.
+            self.contiguous_id_to_dataset_id[i] = cat["id"]
 
     def _get_train_transforms(self, orig_size):
         random_flip = RandomHorizontalFlip(orig_size, prob=0.5)
@@ -355,23 +373,24 @@ class COCODataset(BaseDataset):
         filename = image_info['file_name']
         annotations_ids = self.coco.getAnnIds(imgIds=self.image_ids[idx], iscrowd=False)
 
-        target_size = self.cfg.train.target_size if self.is_training else self.cfg.val.target_size
+        target_size = self.get_target_size(self.is_training)
         img = self.get_image(filename, root_dir=self.img_dir, target_size=target_size)
         pan_segm, labels, ids = self.get_gt(image_info, annotations_ids, target_size=target_size)
 
         # data augmentation
-        orig_size = img.shape[:2]
+        transform_input_size = img.shape[:2]
         if self.is_training:
-            transforms = self._get_train_transforms(orig_size)
+            transforms = self._get_train_transforms(transform_input_size)
             for transform in transforms:
                 img, pan_segm = apply_transform(img, pan_segm, transform)
             random_crop = RandomCrop(img.shape[:2], self.cfg.augmentation.train_crop_size, pan_segm)
             img, pan_segm = apply_transform(img, pan_segm, random_crop)
             dh, dw = self.get_padding_offset(img.shape[:2], self.cfg.augmentation.train_crop_size)
         else:
-            transform = self._get_test_transforms(orig_size)
+            transform = self._get_test_transforms(transform_input_size)
             img, pan_segm = apply_transform(img, pan_segm, transform)
             dh, dw = self.get_padding_offset(img.shape[:2])
+        resized_size = tuple(int(value) for value in img.shape[:2])
         # fixed padding
         if dh > 0 or dw > 0:
             pad = PadTransform(0, 0, dw, dh, pad_value=0, seg_pad_value=0)
@@ -411,6 +430,16 @@ class COCODataset(BaseDataset):
             'masks': masks,
             'labels':  torch.from_numpy(labels)}
         data['segm'] = segm
+        data['info'] = {
+            'image_id': int(image_info['id']),
+            'filename': filename,
+            'original_size': (
+                int(image_info['height']),
+                int(image_info['width']),
+            ),
+            'resized_size': resized_size,
+            'padding': (int(dh), int(dw)),
+        }
         return data
 
     def collate_fn(self, batch):
@@ -419,15 +448,18 @@ class COCODataset(BaseDataset):
         images = []
         targets = []
         segms = []
+        info = []
 
         for item in batch:
             images.append(item['image'])
             targets.append(item['target'])
             segms.append(item['segm'])
+            info.append(item['info'])
 
         out['images'] = torch.stack(images)
         out['targets'] = targets
         out['segms'] = torch.stack(segms)
+        out['info'] = info
         return out
 
 
@@ -438,9 +470,10 @@ class ADEDataset(BaseDataset):
                  gt_list_or_file,
                  root_dir=None,
                  cfg=None,
-                 is_training=False):
+                 is_training=False,
+                 evaluation_split="val"):
         """Init."""
-        super().__init__(cfg)
+        super().__init__(cfg, evaluation_split=evaluation_split)
         self.root_dir = root_dir or ''
         self.is_training = is_training
         # parse the input list
@@ -491,7 +524,7 @@ class ADEDataset(BaseDataset):
         image_path = os.path.join(self.root_dir, this_record['img'])
         segm_path = os.path.join(self.root_dir, this_record['segm'])
 
-        target_size = self.cfg.train.target_size if self.is_training else self.cfg.val.target_size
+        target_size = self.get_target_size(self.is_training)
         img = self.get_image(image_path, target_size=target_size)
         segm = self.get_mask(segm_path, target_size=target_size)
         orig_size = img.shape[:2]
