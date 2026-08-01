@@ -8,7 +8,6 @@ import torch.nn as nn
 
 from nvidia_tao_pytorch.core.distributed.comm import get_global_rank
 from nvidia_tao_pytorch.core.tlt_logging import logging
-from nvidia_tao_pytorch.core.utils.ptm_utils import load_pretrained_weights
 
 from nvidia_tao_pytorch.cv.segformer.model.backbones import (
     cradio_vit_adapter_model_dict,
@@ -17,6 +16,7 @@ from nvidia_tao_pytorch.cv.segformer.model.backbones import (
     vit_adapter_model_dict,
 )
 from nvidia_tao_pytorch.cv.segformer.model.decode_heads.segformer_head import TAOSegFormerHead
+from nvidia_tao_pytorch.cv.segformer.utils.checkpoint import initialize_pretrained_backbone_weights
 
 
 class SegFormer(nn.Module):
@@ -105,20 +105,12 @@ class SegFormer(nn.Module):
         else:
             raise NotImplementedError('Bacbkbone name [%s] is not supported' % self.model_name)
 
-        # TODO: @hong-yu, add parser and ptm_adapter for segformer
-        segformer_parser = None
-        ptm_adapter = None
         # Load pretrained weights
         if pretrained_backbone_path:
-            state_dict = load_pretrained_weights(
+            initialize_pretrained_backbone_weights(
+                self.backbone,
                 pretrained_backbone_path,
-                parser=segformer_parser,
-                ptm_adapter=ptm_adapter
             )
-            msg = self.backbone.load_state_dict(state_dict, strict=False)
-            if get_global_rank() == 0:
-                logging.info(f"Loaded pretrained weights from {pretrained_backbone_path}")
-                logging.warning(f"{msg}")
 
         # Transformer Decoder
         self.decoder = TAOSegFormerHead(

@@ -11,7 +11,12 @@ import torch
 from torch import nn
 
 from nvidia_tao_pytorch.cv.segformer.scripts import train
-from nvidia_tao_pytorch.cv.segformer.utils.checkpoint import initialize_pretrained_weights
+from nvidia_tao_pytorch.cv.segformer.utils import checkpoint
+from nvidia_tao_pytorch.cv.segformer.utils.checkpoint import (
+    PRETRAINED_LOAD_REPORT_PREFIX,
+    initialize_pretrained_backbone_weights,
+    initialize_pretrained_weights,
+)
 
 
 class _TinySegFormer(nn.Module):
@@ -123,6 +128,81 @@ def test_no_compatible_tensor_fails_without_mutating_model():
 
     for key, value in pl_model.model.state_dict().items():
         assert torch.equal(value, original_state[key])
+
+
+@pytest.mark.cv_unit
+@pytest.mark.segformer
+def test_backbone_loader_strips_only_leading_checkpoint_namespaces():
+    """Official FAN wrappers map to a bare backbone without altering internals."""
+    backbone = nn.Module()
+    backbone.patch_embed = nn.Module()
+    backbone.patch_embed.backbone = nn.Linear(2, 2)
+    weight = torch.full_like(backbone.patch_embed.backbone.weight, 11.0)
+    bias = torch.full_like(backbone.patch_embed.backbone.bias, -5.0)
+
+    report = initialize_pretrained_backbone_weights(
+        backbone,
+        {
+            "model.backbone.patch_embed.backbone.weight": weight,
+            "module.model.backbone.patch_embed.backbone.bias": bias,
+            "head.weight": torch.ones(3, 2),
+        },
+    )
+
+    assert report.loaded_keys == (
+        "patch_embed.backbone.bias",
+        "patch_embed.backbone.weight",
+    )
+    assert report.unmatched_keys == ("head.weight",)
+    assert torch.equal(backbone.patch_embed.backbone.weight, weight)
+    assert torch.equal(backbone.patch_embed.backbone.bias, bias)
+
+
+@pytest.mark.cv_unit
+@pytest.mark.segformer
+def test_backbone_loader_accepts_bare_keys_and_rejects_zero_matches():
+    """Bare PTMs remain supported and unrelated PTMs fail closed."""
+    backbone = nn.Linear(2, 2)
+    weight = torch.full_like(backbone.weight, 13.0)
+
+    report = initialize_pretrained_backbone_weights(
+        backbone,
+        {"weight": weight},
+    )
+    assert report.loaded_keys == ("weight",)
+    assert torch.equal(backbone.weight, weight)
+
+    with pytest.raises(RuntimeError, match="configured backbone"):
+        initialize_pretrained_backbone_weights(
+            backbone,
+            {"decoder.weight": torch.ones(2, 2)},
+        )
+
+
+@pytest.mark.cv_unit
+@pytest.mark.segformer
+def test_positive_load_emits_compact_structured_receipt(monkeypatch):
+    """Qualification can prove a nonzero exact-component tensor load."""
+    backbone = nn.Linear(2, 2)
+    info = mock.Mock()
+    monkeypatch.setattr(checkpoint.logging, "info", info)
+
+    report = initialize_pretrained_backbone_weights(
+        backbone,
+        {"backbone.weight": torch.ones_like(backbone.weight)},
+    )
+
+    receipt_calls = [
+        call
+        for call in info.call_args_list
+        if call.args and call.args[0] == "%s%s"
+    ]
+    assert len(receipt_calls) == 1
+    prefix, payload = receipt_calls[0].args[1:]
+    assert prefix == PRETRAINED_LOAD_REPORT_PREFIX
+    assert '"component":"backbone"' in payload
+    assert '"loaded_tensor_count":1' in payload
+    assert len(report.loaded_keys) == 1
 
 
 @pytest.mark.cv_unit
