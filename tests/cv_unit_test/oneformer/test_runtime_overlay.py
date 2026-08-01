@@ -57,11 +57,13 @@ def _fake_overlay(tmp_path, *, base=b"base", patched=b"patched"):
     (overlay / "MANIFEST.json").write_text(
         json.dumps(manifest), encoding="utf-8"
     )
-    site_packages = tmp_path / "site-packages"
+    base_site_packages = tmp_path / "base-site-packages"
+    base_target = base_site_packages / "nvidia_tao_pytorch" / "target.py"
+    base_target.parent.mkdir(parents=True)
+    base_target.write_bytes(base)
+    site_packages = tmp_path / "overlay-site-packages"
     target = site_packages / "nvidia_tao_pytorch" / "target.py"
-    target.parent.mkdir(parents=True)
-    target.write_bytes(base)
-    return overlay, site_packages, target
+    return overlay, base_site_packages, site_packages, base_target, target
 
 
 def test_overlay_payload_contains_every_runtime_fix():
@@ -71,7 +73,6 @@ def test_overlay_payload_contains_every_runtime_fix():
         "nvidia_tao_pytorch/config/oneformer/evaluate.py",
         "nvidia_tao_pytorch/cv/oneformer/dataloader/datasets.py",
         "nvidia_tao_pytorch/cv/oneformer/model/pl_oneformer.py",
-        "nvidia_tao_pytorch/cv/oneformer/scripts/train.py",
         "nvidia_tao_pytorch/cv/oneformer/utils/checkpoint.py",
         "nvidia_tao_pytorch/cv/oneformer/utils/metric_reduction.py",
         "nvidia_tao_pytorch/cv/oneformer/utils/panoptic_quality.py",
@@ -83,39 +84,107 @@ def test_overlay_payload_contains_every_runtime_fix():
 
 def test_overlay_installer_verifies_base_and_writes_receipt(tmp_path, monkeypatch):
     """A recognized base is atomically replaced and recorded."""
-    overlay, site_packages, target = _fake_overlay(tmp_path)
+    overlay, base_site, site_packages, base_target, target = _fake_overlay(
+        tmp_path
+    )
     monkeypatch.setattr(installer.importlib.util, "find_spec", lambda _: object())
     receipt_path = tmp_path / "receipt.json"
 
     receipt = installer.install(
-        overlay, site_packages, receipt_path, dry_run=False
+        overlay,
+        base_site,
+        site_packages,
+        receipt_path,
+        dry_run=False,
     )
 
     assert target.read_bytes() == b"patched"
+    assert base_target.read_bytes() == b"base"
     assert receipt["actions"][0]["action"] == "replace_base"
+    assert receipt["base_site_packages"] == str(base_site)
+    assert receipt["site_packages"] == str(site_packages)
     assert json.loads(receipt_path.read_text(encoding="utf-8")) == receipt
 
 
 def test_overlay_installer_rejects_unknown_container_base(tmp_path, monkeypatch):
     """An unexpected installed source hash fails before mutation."""
-    overlay, site_packages, target = _fake_overlay(tmp_path)
-    target.write_bytes(b"unknown")
+    overlay, base_site, site_packages, base_target, target = _fake_overlay(
+        tmp_path
+    )
+    base_target.write_bytes(b"unknown")
     monkeypatch.setattr(installer.importlib.util, "find_spec", lambda _: object())
 
     with pytest.raises(RuntimeError, match="base hash mismatch"):
         installer.install(
-            overlay, site_packages, tmp_path / "receipt.json", dry_run=False
+            overlay,
+            base_site,
+            site_packages,
+            tmp_path / "receipt.json",
+            dry_run=False,
         )
-    assert target.read_bytes() == b"unknown"
+    assert base_target.read_bytes() == b"unknown"
+    assert not target.exists()
 
 
 def test_overlay_installer_enforces_panoptic_dependency(tmp_path, monkeypatch):
     """The dependency gate fails before writing any patched file."""
-    overlay, site_packages, target = _fake_overlay(tmp_path)
+    overlay, base_site, site_packages, base_target, target = _fake_overlay(
+        tmp_path
+    )
     monkeypatch.setattr(installer.importlib.util, "find_spec", lambda _: None)
 
     with pytest.raises(RuntimeError, match="does not provide panopticapi"):
         installer.install(
-            overlay, site_packages, tmp_path / "receipt.json", dry_run=False
+            overlay,
+            base_site,
+            site_packages,
+            tmp_path / "receipt.json",
+            dry_run=False,
         )
-    assert target.read_bytes() == b"base"
+    assert base_target.read_bytes() == b"base"
+    assert not target.exists()
+
+
+def test_overlay_installer_never_audits_the_empty_output_tree(
+    tmp_path, monkeypatch
+):
+    """The writable overlay cannot impersonate the pinned package root."""
+    overlay, _, site_packages, _, target = _fake_overlay(tmp_path)
+    monkeypatch.setattr(installer.importlib.util, "find_spec", lambda _: object())
+
+    with pytest.raises(RuntimeError, match="Pinned TAO PyTorch package root"):
+        installer.install(
+            overlay,
+            site_packages,
+            site_packages,
+            tmp_path / "receipt.json",
+            dry_run=False,
+        )
+    assert not target.exists()
+
+
+def test_overlay_installer_adds_a_new_file_only_when_base_is_absent(
+    tmp_path, monkeypatch
+):
+    """New runtime helpers are written to the overlay, not the SQSH tree."""
+    overlay, base_site, site_packages, base_target, target = _fake_overlay(
+        tmp_path
+    )
+    base_target.unlink()
+    manifest_path = overlay / "MANIFEST.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["files"][0]["base_sha256"] = None
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    monkeypatch.setattr(installer.importlib.util, "find_spec", lambda _: object())
+
+    receipt = installer.install(
+        overlay,
+        base_site,
+        site_packages,
+        tmp_path / "receipt.json",
+        dry_run=False,
+    )
+
+    assert receipt["actions"][0]["action"] == "install_new"
+    assert not base_target.exists()
+    assert target.read_bytes() == b"patched"

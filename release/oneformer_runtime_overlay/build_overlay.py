@@ -30,21 +30,8 @@ CONTAINER = {
 }
 PAYLOAD_PATHS = (
     "nvidia_tao_pytorch/config/oneformer/evaluate.py",
-    "nvidia_tao_pytorch/cv/oneformer/README.md",
     "nvidia_tao_pytorch/cv/oneformer/dataloader/datasets.py",
-    "nvidia_tao_pytorch/cv/oneformer/experiment_specs/spec_ade.yaml",
-    "nvidia_tao_pytorch/cv/oneformer/experiment_specs/spec_coco.yaml",
-    "nvidia_tao_pytorch/cv/oneformer/experiment_specs/spec_its.yaml",
-    "nvidia_tao_pytorch/cv/oneformer/experiment_specs/spec_its_dinat.yaml",
-    "nvidia_tao_pytorch/cv/oneformer/experiment_specs/spec_its_radio.yaml",
-    "nvidia_tao_pytorch/cv/oneformer/experiment_specs/spec_its_radio_v4.yaml",
-    "nvidia_tao_pytorch/cv/oneformer/experiment_specs/spec_its_swin.yaml",
-    "nvidia_tao_pytorch/cv/oneformer/experiment_specs/spec_pcb_dinat.yaml",
-    "nvidia_tao_pytorch/cv/oneformer/experiment_specs/spec_pcb_swin.yaml",
     "nvidia_tao_pytorch/cv/oneformer/model/pl_oneformer.py",
-    "nvidia_tao_pytorch/cv/oneformer/scripts/evaluate.py",
-    "nvidia_tao_pytorch/cv/oneformer/scripts/train.py",
-    "nvidia_tao_pytorch/cv/oneformer/utils/__init__.py",
     "nvidia_tao_pytorch/cv/oneformer/utils/checkpoint.py",
     "nvidia_tao_pytorch/cv/oneformer/utils/metric_reduction.py",
     "nvidia_tao_pytorch/cv/oneformer/utils/panoptic_quality.py",
@@ -113,7 +100,7 @@ def build_overlay(repo_root, output):
         payload[f"payload/{path}"] = data
 
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "artifact_type": "tao_pytorch_source_overlay",
         "scope": "oneformer_runtime_product_fixes",
         "source": {
@@ -138,6 +125,8 @@ def build_overlay(repo_root, output):
             "status_writer": "global_rank_zero",
             "model_runs_during_build": 0,
             "slurm_jobs_submitted_during_build": 0,
+            "base_audit_root": CONTAINER["site_packages"],
+            "overlay_output_root": "ephemeral_pythonpath_site_packages",
         },
         "files": files,
     }

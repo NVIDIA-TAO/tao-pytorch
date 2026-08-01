@@ -9,9 +9,11 @@ sha256 e36640f9ae7a03bc80828cf7de93bd6bdbbb0fecf509a71a243be0ab5b497fc2
 size   28860358656
 ```
 
-The installer validates every installed base-file hash before modifying the
-ephemeral container root. It also fails before installation when
-`panopticapi` is unavailable. It never patches an unrecognized TAO build.
+The installer validates every base-file hash directly against the immutable
+package root in the pinned container, then writes patched files into a separate
+ephemeral site-packages tree placed first on `PYTHONPATH`. It never audits the
+empty output tree as if that were the base, never mutates the SQSH package
+root, and fails before installation when `panopticapi` is unavailable.
 
 ## Reproducible build
 
@@ -73,9 +75,12 @@ srun \
   --container-writable \
   bash -lc '
     set -euo pipefail
+    OVERLAY_SITE="$(mktemp -d)/site-packages"
     python /opt/oneformer-runtime-overlay/install_overlay.py \
-      --site-packages /usr/local/lib/python3.12/dist-packages \
+      --base-site-packages /usr/local/lib/python3.12/dist-packages \
+      --site-packages "$OVERLAY_SITE" \
       --receipt "'"$RESULTS"'/oneformer-runtime-overlay-receipt.json"
+    export PYTHONPATH="$OVERLAY_SITE${PYTHONPATH:+:$PYTHONPATH}"
     oneformer train -e "'"$SPEC"'" \
       train.num_gpus=8 \
       evaluate.task=panoptic \
