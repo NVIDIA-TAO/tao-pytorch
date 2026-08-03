@@ -36,7 +36,7 @@ def _create_torchao_mocks():
         def __init__(self, module_fqn_to_config):  # noqa: D401 - emulate torchao signature
             self.module_fqn_to_config = module_fqn_to_config
 
-    def _dummy_quantize_(model, cfg):  # noqa: D401 - emulate torchao signature
+    def _dummy_quantize_(model, cfg, **kwargs):  # noqa: D401 - emulate torchao signature
         # In-place no-op; return the model
         return model
 

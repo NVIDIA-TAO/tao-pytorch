@@ -6,6 +6,7 @@
 import pytest
 import torch
 import torch.nn as nn
+import sys
 from unittest.mock import Mock, patch
 
 from nvidia_tao_pytorch.core.quantization.utils import match_layer, create_quantized_model_from_config
@@ -159,6 +160,17 @@ class DummyLightning(nn.Module):
 
     def load_state_dict(self, state_dict):
         self.loaded_state_dict = state_dict
+
+
+class DummyWrappedLightning(nn.Module):
+    def __init__(self, experiment_config, **kwargs):
+        super().__init__()
+        self.experiment_config = experiment_config
+        self.kwargs = kwargs
+        self.model = nn.Linear(10, 1)
+
+    def forward(self, x):
+        return self.model(x)
 
 
 class MockConfig:
@@ -343,6 +355,90 @@ def test_create_quantized_model_from_config_modelopt_backend(mock_quantizer_clas
         # Verify ModelQuantizer was called correctly
         mock_quantizer_class.assert_called_once_with(exp_cfg.quantize)
         mock_quantizer.quantize_model.assert_called_once()
+
+
+@patch('nvidia_tao_pytorch.core.quantization.quantizer.ModelQuantizer')
+def test_create_quantized_model_from_config_modelopt_restore(mock_quantizer_class, tmp_path, mock_all_backend_dependencies):
+    """Test ModelOpt checkpoints are restored with modelopt_state metadata."""
+    exp_cfg = make_experiment_config(backend="modelopt.pytorch")
+    ckpt_path = tmp_path / "modelopt_model.pth"
+    restored_model = nn.Linear(10, 1)
+    mock_modelopt = Mock()
+    mock_torch = Mock()
+    mock_mto = Mock()
+    mock_modelopt.torch = mock_torch
+    mock_torch.opt = mock_mto
+    mock_mto.restore.return_value = restored_model
+
+    with patch('torch.load') as mock_load, patch.dict(
+        sys.modules,
+        {
+            'modelopt': mock_modelopt,
+            'modelopt.torch': mock_torch,
+            'modelopt.torch.opt': mock_mto,
+        },
+        clear=False,
+    ):
+        mock_load.return_value = {
+            "modelopt_state": {"enabled": True},
+            "model_state_dict": {"weight": torch.tensor(42)},
+        }
+
+        model = create_quantized_model_from_config(
+            str(ckpt_path),
+            DummyWrappedLightning,
+            experiment_config=exp_cfg
+        )
+
+    assert isinstance(model, DummyWrappedLightning), f"Expected DummyWrappedLightning, got {type(model).__name__}"
+    assert model.model is restored_model, "Wrapped network should be restored with ModelOpt state"
+    mock_mto.restore.assert_called_once()
+    restore_args, restore_kwargs = mock_mto.restore.call_args
+    assert isinstance(restore_args[0], nn.Linear), "ModelOpt restore should target the wrapped nn.Module"
+    assert restore_args[1] == str(ckpt_path)
+    assert restore_kwargs["map_location"] == "cpu"
+    mock_quantizer_class.assert_not_called()
+
+
+@patch('nvidia_tao_pytorch.core.quantization.quantizer.ModelQuantizer')
+def test_create_quantized_model_from_config_modelopt_restore_from_checkpoint_metadata(
+    mock_quantizer_class, tmp_path, mock_all_backend_dependencies
+):
+    """ModelOpt checkpoint metadata should override a stale torchao eval spec."""
+    exp_cfg = make_experiment_config(backend="torchao")
+    ckpt_path = tmp_path / "modelopt_model.pth"
+    restored_model = nn.Linear(10, 1)
+    mock_modelopt = Mock()
+    mock_torch = Mock()
+    mock_mto = Mock()
+    mock_modelopt.torch = mock_torch
+    mock_torch.opt = mock_mto
+    mock_mto.restore.return_value = restored_model
+
+    with patch('torch.load') as mock_load, patch.dict(
+        sys.modules,
+        {
+            'modelopt': mock_modelopt,
+            'modelopt.torch': mock_torch,
+            'modelopt.torch.opt': mock_mto,
+        },
+        clear=False,
+    ):
+        mock_load.return_value = {
+            "modelopt_state": {"enabled": True},
+            "model_state_dict": {"weight": torch.tensor(42)},
+        }
+
+        model = create_quantized_model_from_config(
+            str(ckpt_path),
+            DummyWrappedLightning,
+            experiment_config=exp_cfg
+        )
+
+    assert isinstance(model, DummyWrappedLightning), f"Expected DummyWrappedLightning, got {type(model).__name__}"
+    assert model.model is restored_model, "ModelOpt metadata should restore the wrapped nn.Module"
+    mock_mto.restore.assert_called_once()
+    mock_quantizer_class.assert_not_called()
 
 
 @patch('nvidia_tao_pytorch.core.quantization.quantizer.ModelQuantizer')
