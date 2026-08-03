@@ -47,7 +47,7 @@ class ChangeNetHeadConfig:
 class BackboneConfig:
     """Configuration parameters for Backbone."""
 
-    type: str = STR_FIELD(value="fan_small_12_p4_hybrid", default_value="fan_small_12_p4_hybrid", description="Backbone architure", display_name="Backbone architectures", valid_options="fan_tiny_8_p4_hybrid,fan_small_12_p4_hybrid,fan_base_16_p4_hybrid,fan_large_16_p4_hybrid,vit_large_nvdinov2", automl_enabled="TRUE")
+    type: str = STR_FIELD(value="fan_small_12_p4_hybrid", default_value="fan_small_12_p4_hybrid", description="Backbone architure", display_name="Backbone architectures", valid_options="fan_tiny_8_p4_hybrid,fan_small_12_p4_hybrid,fan_base_16_p4_hybrid,fan_large_16_p4_hybrid,vit_large_nvdinov2,vit_small_dinov3,vit_small_plus_dinov3,vit_base_dinov3,vit_large_dinov3,vit_huge_plus_dinov3", automl_enabled="TRUE")
     feat_downsample: bool = BOOL_FIELD(value=False, default_value=False, display_name="Feature downsample", description="Feature downsample")
     pretrained_backbone_path: Optional[str] = STR_FIELD(value=None, default_value="", description="Path to the pretrained model")
     freeze_backbone: bool = BOOL_FIELD(value=False, default_value=False, description="Flag to freeze backbone", automl_enabled="TRUE")

@@ -28,6 +28,7 @@ from nvidia_tao_pytorch.core.utils.pos_embed_interpolation import interpolate_pa
 from nvidia_tao_pytorch.core.utils.ptm_utils import load_pretrained_weights
 from nvidia_tao_pytorch.cv.backbone_v2.dino_v2 import DINOV2
 from nvidia_tao_pytorch.cv.visual_changenet.backbone.dino_v2 import vit_model_dict
+from nvidia_tao_pytorch.cv.visual_changenet.backbone.dino_v3 import dinov3_model_dict
 from nvidia_tao_pytorch.cv.visual_changenet.backbone.fan import fan_model_dict
 from nvidia_tao_pytorch.cv.visual_changenet.backbone.radio import radio_model_dict
 from nvidia_tao_pytorch.cv.visual_changenet.backbone.utils import ptm_adapter, visual_changenet_parser
@@ -456,6 +457,22 @@ class ChangeNetClassify(nn.Module):
                     freeze_at=freeze_at,
                     export=export,
                 )
+        elif 'dinov3' in self.model_name:
+            assert output_shape[0] == output_shape[1], 'ViT Backbones only support square input image where input_width == input_height'
+            if self.difference_module == 'learnable':
+                self.backbone = vit_adapter_model_dict[self.model_name](
+                    out_indices=return_interm_indices,
+                    resolution=output_shape[0],
+                    activation_checkpoint=activation_checkpoint,
+                    use_summary_token=use_summary_token,
+                    freeze_at=freeze_at,
+                    export=export,
+                )
+            elif self.difference_module == 'euclidean':
+                self.backbone = dinov3_model_dict[self.model_name](
+                    freeze_at=freeze_at,
+                    export=export,
+                )
         elif 'vit' in self.model_name:
             assert output_shape[0] == output_shape[1], 'ViT Backbones only support square input image where input_width == input_height'
             if self.difference_module == 'learnable':
@@ -617,6 +634,11 @@ def build_model(experiment_config,
                     "fan_small_12_p4_hybrid": [128, 256, 384, 384],
                     "fan_base_16_p4_hybrid": [128, 256, 448, 448],
                     "vit_large_nvdinov2": [1024, 1024, 1024, 1024],
+                    "vit_small_dinov3": [384, 384, 384, 384],
+                    "vit_small_plus_dinov3": [384, 384, 384, 384],
+                    "vit_base_dinov3": [768, 768, 768, 768],
+                    "vit_large_dinov3": [1024, 1024, 1024, 1024],
+                    "vit_huge_plus_dinov3": [1280, 1280, 1280, 1280],
                     "c_radio_p1_vit_huge_patch16_224_mlpnorm": [1280, 1280, 1280, 1280],
                     "c_radio_p2_vit_huge_patch16_224_mlpnorm": [1280, 1280, 1280, 1280],
                     "c_radio_p3_vit_huge_patch16_224_mlpnorm": [1280, 1280, 1280, 1280],

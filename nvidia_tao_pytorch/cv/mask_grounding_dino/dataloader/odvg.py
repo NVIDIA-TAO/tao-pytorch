@@ -55,6 +55,7 @@ class ODVGDataset(VisionDataset):
         target_transform: Optional[Callable] = None,
         transforms: Optional[Callable] = None,
         has_mask: bool = False,
+        deterministic_label_order: bool = True,
     ) -> None:
         """Initialize ODVG dataset.
         Args:
@@ -73,6 +74,7 @@ class ODVGDataset(VisionDataset):
         self.dataset_mode = "OD" if label_map_anno else "VG"
         self.has_mask = has_mask
         self.max_labels = max_labels
+        self.deterministic_label_order = deterministic_label_order
         self.cap_lists = None
         self.captions = None
 
@@ -243,10 +245,11 @@ class ODVGDataset(VisionDataset):
             # neg bbox labels
             neg_labels = self.label_index.difference(pos_labels)
 
-            vg_labels = list(pos_labels)
+            vg_labels = sorted(pos_labels) if self.deterministic_label_order else list(pos_labels)
             num_to_add = min(len(neg_labels), self.max_labels - len(pos_labels))
             if num_to_add > 0:
-                vg_labels.extend(random.sample(neg_labels, num_to_add))
+                neg_pool = sorted(neg_labels) if self.deterministic_label_order else tuple(neg_labels)
+                vg_labels.extend(random.sample(neg_pool, num_to_add))
 
             # shuffle
             for i in range(len(vg_labels) - 1, 0, -1):

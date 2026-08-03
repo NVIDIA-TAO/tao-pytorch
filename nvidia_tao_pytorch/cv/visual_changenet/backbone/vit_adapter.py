@@ -15,6 +15,13 @@ from torch.nn.init import normal_
 from nvidia_tao_pytorch.cv.backbone_v2.radio import RADIO
 from nvidia_tao_pytorch.cv.backbone_v2.vit import VisionTransformer
 from nvidia_tao_pytorch.cv.deformable_detr.model.ops.modules import MSDeformAttn
+from nvidia_tao_pytorch.cv.visual_changenet.backbone.dino_v3 import (
+    vit_base_dinov3,
+    vit_huge_plus_dinov3,
+    vit_large_dinov3,
+    vit_small_dinov3,
+    vit_small_plus_dinov3,
+)
 from nvidia_tao_pytorch.cv.visual_changenet.backbone.adapter_modules import (
     InteractionBlock,
     SpatialPriorModule,
@@ -773,6 +780,11 @@ def c_radio_v2_vit_base_patch16_224(
 
 
 vit_adapter_model_dict = {
+    "vit_small_dinov3": vit_small_dinov3,
+    "vit_small_plus_dinov3": vit_small_plus_dinov3,
+    "vit_base_dinov3": vit_base_dinov3,
+    "vit_large_dinov3": vit_large_dinov3,
+    "vit_huge_plus_dinov3": vit_huge_plus_dinov3,
     "vit_large_nvdinov2": vit_large_nvdinov2,
     "vit_large_dinov2": vit_large_dinov2,  # TODO: @zbhat check EVA/dinov2 support
     "c_radio_p1_vit_huge_patch16_224_mlpnorm": c_radio_p1_vit_huge_patch16_224_mlpnorm,

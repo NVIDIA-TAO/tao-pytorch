@@ -356,6 +356,13 @@ class Projection:
 class NVPanoptix3DModelConfig:
     """NVPanoptix3D model config."""
 
+    precise_msda: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        display_name="precise MSDeformAttn",
+        description="Enable the deterministic (bitwise-reproducible) MSDeformAttn backward kernel. "
+                    "Small (~+8%) training overhead; required for reproducible training."
+    )
     backbone: Backbone = DATACLASS_FIELD(
         Backbone(),
         description="Configuration hyper parameters for the NVPanoptix3D Backbone.",

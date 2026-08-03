@@ -245,6 +245,11 @@ class StyleganPlModel(TAOLightningModule):
         super().__init__(experiment_spec)
 
         self.checkpoint_filename = 'styleganxl_model'
+        # Best-checkpoint default: monitor FID (logged as "fid_score" in
+        # on_validation_epoch_end). Lower FID is better. This module's configure_callbacks
+        # calls super(), so it already gets the best-checkpoint plumbing.
+        self.monitor_metric = "fid_score"
+        self.monitor_mode = "min"
         self.dm = dm
         self.cudnn_benchmark = True
 

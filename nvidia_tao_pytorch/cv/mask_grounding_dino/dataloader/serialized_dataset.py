@@ -63,12 +63,15 @@ def load_coco_jsonl(jsonl_file: str, image_root: str, labelmap_file: str = None)
     return dataset_dicts
 
 
-def build_shm_dataset(data_sources, transforms, max_labels=80):
+def build_shm_dataset(data_sources, transforms, max_labels=80, deterministic_label_order=True):
     """Preload the COCO ann lists to prevent memory leakage from Python.
 
     Args:
         data_sources (str): list of different data sources.
         transforms (dict): augmentations to apply.
+        max_labels (int): number of pos labels + sampled neg labels.
+        deterministic_label_order (bool): canonicalize caption/label order with sorted()
+            so it is reproducible across process launches (independent of PYTHONHASHSEED).
     """
     # grab all the json files and concate them into one single dataset
     # data_source_list = build_data_source_lists(data_sources)
@@ -87,7 +90,8 @@ def build_shm_dataset(data_sources, transforms, max_labels=80):
     dataset = ODVGSerializedDatasetFromList(
         dataset_list,
         transforms=transforms,
-        max_labels=max_labels
+        max_labels=max_labels,
+        deterministic_label_order=deterministic_label_order
     )
     return dataset
 
@@ -98,7 +102,7 @@ class ODVGSerializedDatasetFromList(torch.utils.data.Dataset):
     shared RAM from master process instead of making a copy in each subprocess.
     """
 
-    def __init__(self, lst, transforms=None, max_labels=80, has_mask=True):
+    def __init__(self, lst, transforms=None, max_labels=80, has_mask=True, deterministic_label_order=True):
         """Initialize the Serialized Shared Memory ODVG-based Dataset.
 
         Reference from this blog: https://ppwwyyxx.com/blog/2022/Demystify-RAM-Usage-in-Multiprocess-DataLoader/
@@ -107,10 +111,13 @@ class ODVGSerializedDatasetFromList(torch.utils.data.Dataset):
             lst (list): list of dataset dicts.
             transforms (dict): augmentations to apply.
             max_labels (int): number of pos labels + sampled neg labels
+            deterministic_label_order (bool): canonicalize caption/label order with sorted()
+                so it is reproducible across process launches (independent of PYTHONHASHSEED).
         """
         self.transforms = transforms
         self.max_labels = max_labels
         self.has_mask = has_mask
+        self.deterministic_label_order = deterministic_label_order
         self.metas = TorchShmSerializedList(lst)
 
     def prepare_vg_annotations(self, anno, instances, h, w):
@@ -247,10 +254,11 @@ class ODVGSerializedDatasetFromList(torch.utils.data.Dataset):
             # neg bbox labels
             neg_labels = label_index.difference(pos_labels)
 
-            vg_labels = list(pos_labels)
+            vg_labels = sorted(pos_labels) if self.deterministic_label_order else list(pos_labels)
             num_to_add = min(len(neg_labels), self.max_labels - len(pos_labels))
             if num_to_add > 0:
-                vg_labels.extend(random.sample(tuple(neg_labels), num_to_add))
+                neg_pool = sorted(neg_labels) if self.deterministic_label_order else tuple(neg_labels)
+                vg_labels.extend(random.sample(neg_pool, num_to_add))
 
             # shuffle
             for i in range(len(vg_labels) - 1, 0, -1):

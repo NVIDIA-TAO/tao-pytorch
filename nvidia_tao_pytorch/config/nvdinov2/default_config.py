@@ -72,7 +72,7 @@ class DataPathFormat:
     images_dir: str = STR_FIELD(
         value="",
         default_value="",
-        description="Path to images directory for dataset",
+        description="Path to the extracted images directory for the dataset (not an archive such as .tar.gz)",
         display_name="image directory"
     )
 

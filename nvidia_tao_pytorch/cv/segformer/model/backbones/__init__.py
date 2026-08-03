@@ -12,6 +12,13 @@ from nvidia_tao_pytorch.cv.backbone_v2.mit import (
     mit_b5,
 )
 from nvidia_tao_pytorch.cv.segformer.model.backbones.dino_v2 import vit_giant_nvdinov2, vit_large_nvdinov2
+from nvidia_tao_pytorch.cv.segformer.model.backbones.dino_v3 import (
+    vit_small_dinov3,
+    vit_small_plus_dinov3,
+    vit_base_dinov3,
+    vit_huge_plus_dinov3,
+    vit_large_dinov3,
+)
 from nvidia_tao_pytorch.cv.segformer.model.backbones.fan import (
     fan_base_16_p4_hybrid,
     fan_large_16_p4_hybrid,
@@ -33,6 +40,11 @@ from nvidia_tao_pytorch.cv.segformer.model.backbones.radio import (
 vit_adapter_model_dict = {
     "vit_large_nvdinov2": vit_large_nvdinov2,
     "vit_giant_nvdinov2": vit_giant_nvdinov2,
+    "vit_small_dinov3": vit_small_dinov3,
+    "vit_small_plus_dinov3": vit_small_plus_dinov3,
+    "vit_base_dinov3": vit_base_dinov3,
+    "vit_large_dinov3": vit_large_dinov3,
+    "vit_huge_plus_dinov3": vit_huge_plus_dinov3,
     "vit_base_nvclip_16_siglip": vit_base_nvclip_16_siglip,
     "vit_huge_nvclip_14_siglip": vit_huge_nvclip_14_siglip,
 }

@@ -3,15 +3,35 @@
 
 """Setup script to build the TLT launcher package."""
 
+import importlib.util
 import os
 import platform
 import setuptools
 
-from release.python.utils import utils
 from torch.utils.cpp_extension import BuildExtension
 
 
 _IS_X86_64 = platform.machine() in ("x86_64", "AMD64")
+
+
+def _load_release_utils():
+    """Load packaging helpers from this checkout instead of any installed package."""
+    utils_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "release",
+        "python",
+        "utils",
+        "utils.py"
+    )
+    spec = importlib.util.spec_from_file_location("tao_pytorch_release_utils", utils_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not load release utils from {utils_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+utils = _load_release_utils()
 
 
 def _spatial_transform_cxx_flags():
@@ -90,6 +110,7 @@ setuptools.setup(
             # SDG entry point
             'stylegan_xl=nvidia_tao_pytorch.sdg.stylegan_xl.entrypoint.stylegan_xl:main',
             'nvdinov2=nvidia_tao_pytorch.ssl.nvdinov2.entrypoint.nvdinov2:main',
+            'dinov3=nvidia_tao_pytorch.ssl.dinov3.entrypoint.dinov3:main',
             'mae=nvidia_tao_pytorch.ssl.mae.entrypoint.mae:main',
             # Multimodal entry point
             'clip=nvidia_tao_pytorch.multimodal.clip.entrypoint.clip:main',

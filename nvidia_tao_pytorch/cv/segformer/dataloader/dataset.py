@@ -18,7 +18,7 @@ class SFDataset(Dataset):
     SegFormer Dataset
     """
 
-    def __init__(self, root_dir, augmentation=None, split='train', img_size=256, label_transform=None, to_tensor=True, color_map=None):
+    def __init__(self, root_dir, augmentation=None, split='train', img_size=256, label_transform=None, to_tensor=True, color_map=None, load_mask=True):
         """Initialize
 
         Args:
@@ -29,15 +29,19 @@ class SFDataset(Dataset):
             label_transform (str): The label transformation to apply. valid values are 'norm', None. If 'norm', the RGB will be normalized to [0, 1] before calling color_map.
             to_tensor (bool): Convert the image to tensor.
             color_map (dict): The color map to use for RGB to train label transformation.
+            load_mask (bool): Whether ground-truth masks are available and should be loaded.
+                True for the train/val/test (evaluate) splits; the predict/inference split has
+                no masks, so the data module passes False (returns image-only samples).
         """
         super(SFDataset, self).__init__()
         self.root_dir = root_dir
         self.img_size = img_size
         self.split = split  # train | val | test
         self.label_transform = label_transform
+        self.load_mask = load_mask
         self.img_name_list = sorted(os.listdir(os.path.join(self.root_dir, "images", self.split)))
 
-        if self.split in ["train", "val"]:
+        if self.load_mask:
             self.mask_name_list = sorted(os.listdir(os.path.join(self.root_dir, "masks", self.split)))
             assert len(self.img_name_list) == len(self.mask_name_list), "Number of images and masks should be the same."
 
@@ -82,7 +86,7 @@ class SFDataset(Dataset):
         img_path = self.get_img_path(self.root_dir, "images", self.split, name)
         img = np.asarray(Image.open(img_path).convert('RGB'))
 
-        if self.split in ["train", "val"]:
+        if self.load_mask:
             mask_name = self.mask_name_list[index]
             mask_path = self.get_img_path(self.root_dir, "masks", self.split, mask_name)
 

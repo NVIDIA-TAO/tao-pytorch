@@ -46,6 +46,7 @@ class ODVGDataModule(pl.LightningDataModule):
         self.batch_size = dataset_config["batch_size"]
         self.num_workers = dataset_config["workers"]
         self.max_labels = dataset_config["max_labels"]
+        self.deterministic_label_order = dataset_config["deterministic_label_order"]
         self.pin_memory = dataset_config["pin_memory"]
         self.subtask_config = subtask_config
         # Placeholder for calibration dataset
@@ -126,9 +127,11 @@ class ODVGDataModule(pl.LightningDataModule):
             # We need to instantitate this inside train_dataloader
             # instead of setup when the multiprocessing has already been spawned.
             local_broadcast_process_authkey()
-            self.train_dataset = build_shm_dataset(train_data_sources, train_transform, max_labels=self.max_labels)
+            self.train_dataset = build_shm_dataset(train_data_sources, train_transform, max_labels=self.max_labels,
+                                                   deterministic_label_order=self.deterministic_label_order)
         else:
-            self.train_dataset = build_odvg(train_data_sources, train_transform, max_labels=self.max_labels)
+            self.train_dataset = build_odvg(train_data_sources, train_transform, max_labels=self.max_labels,
+                                            deterministic_label_order=self.deterministic_label_order)
 
         if is_dist_avail_and_initialized():
             self.train_sampler = torch.utils.data.distributed.DistributedSampler(self.train_dataset, shuffle=True)

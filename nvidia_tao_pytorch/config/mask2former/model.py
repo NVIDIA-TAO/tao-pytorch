@@ -374,6 +374,13 @@ class Mask2FormerModelConfig:
         display_name="export",
         description="A flag to enable export mode."
     )
+    precise_msda: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        display_name="precise MSDeformAttn",
+        description="Enable the deterministic (bitwise-reproducible) MSDeformAttn backward kernel. "
+                    "Small (~+8%) training overhead; required for reproducible training."
+    )
     backbone: Backbone = DATACLASS_FIELD(
         Backbone(),
         descripton="Configuration hyper parameters for the Mask2Former Backbone.",

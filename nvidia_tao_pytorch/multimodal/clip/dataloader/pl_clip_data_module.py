@@ -60,8 +60,18 @@ class CLIPDataModule(pl.LightningDataModule):
         train_type = self.dataset_config.train.type
 
         if train_type == 'custom':
+            train_datasets = self.dataset_config.train.datasets
+            balance_query_types = getattr(
+                self.dataset_config.train, 'balance_query_types', False
+            )
+            unique_caption_per_batch = getattr(
+                self.dataset_config.train, 'unique_caption_per_batch', True
+            )
+            include_attribute_metadata = getattr(
+                self.dataset_config.train, 'include_attribute_metadata', False
+            )
             self.train_dataset = get_custom_dataloader(
-                datasets=self.dataset_config.train.datasets,
+                datasets=train_datasets,
                 transform=self.preprocess_train,
                 tokenizer=self.tokenizer,
                 batch_size=self.dataset_config.train.batch_size,
@@ -70,7 +80,10 @@ class CLIPDataModule(pl.LightningDataModule):
                 shuffle=True,
                 pin_memory=self.dataset_config.pin_memory,
                 is_distributed=is_distributed,
-                mode='train'
+                mode='train',
+                balance_query_types=balance_query_types,
+                unique_caption_per_batch=unique_caption_per_batch,
+                include_attribute_metadata=include_attribute_metadata,
             )
         elif train_type == 'wds':
             self.train_dataset = get_train_dataloader(
@@ -103,6 +116,9 @@ class CLIPDataModule(pl.LightningDataModule):
                 "to enable retrieval evaluation during training."
             )
             return
+        metadata_match_eval = getattr(
+            val_cfg, 'metadata_match_eval', False
+        )
 
         self.val_dataset = get_custom_dataloader(
             datasets=val_cfg.datasets,
@@ -114,7 +130,8 @@ class CLIPDataModule(pl.LightningDataModule):
             shuffle=False,
             pin_memory=self.dataset_config.pin_memory,
             is_distributed=None,
-            mode='val'
+            mode='val',
+            include_attribute_metadata=metadata_match_eval,
         )
         logging.info(f"Validation dataloader: {len(val_cfg.datasets)} dataset(s), "
                      f"{len(self.val_dataset.dataset)} samples")
