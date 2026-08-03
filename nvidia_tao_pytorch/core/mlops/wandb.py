@@ -37,7 +37,6 @@ def alert(title, text, duration=300, level=0, is_rank_zero=True):
 
 def is_wandb_initialized():
     """Check if wandb has been initialized."""
-    global _WANDB_INITIALIZED  # pylint: disable=W0602,W0603
     return _WANDB_INITIALIZED
 
 

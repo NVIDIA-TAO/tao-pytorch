@@ -19,6 +19,7 @@ import os
 import cv2
 
 from nvidia_tao_pytorch.cv.oneformer.model.oneformer_model import OneFormerModel
+from nvidia_tao_pytorch.cv.deformable_detr.model.ops.modules import set_precise_msda
 from nvidia_tao_pytorch.cv.oneformer.utils.criterion import SetCriterion
 from nvidia_tao_pytorch.cv.mask2former.utils.lr_scheduler import WarmupPolyLR
 from nvidia_tao_pytorch.cv.oneformer.utils.matcher import HungarianMatcher
@@ -169,6 +170,8 @@ class OneformerPlModule(TAOLightningModule):
             )
 
     def _build_model(self):
+        # Opt-in deterministic MSDeformAttn path (no-op unless precise_msda=True).
+        set_precise_msda(getattr(self.model_config, "precise_msda", False))
         self.model = OneFormerModel(self.cfg)
         if hasattr(self.cfg, "train") and hasattr(self.cfg.train, "freeze"):
             freezed_modules = []

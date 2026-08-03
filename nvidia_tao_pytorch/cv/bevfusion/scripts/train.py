@@ -19,6 +19,7 @@ from nvidia_tao_pytorch.cv.bevfusion.evaluation import TAO3DMetric # noqa pylint
 from nvidia_tao_pytorch.cv.bevfusion.model import *  # noqa pylint: disable=W0401, W0614, W0611
 from nvidia_tao_pytorch.cv.bevfusion.datasets import *  # noqa pylint: disable=W0401, W0614, W0611
 from nvidia_tao_pytorch.cv.bevfusion.utils.logger import TAOBEVFusionLoggerHook  # noqa pylint: disable=W0401, W0614, W0611
+from nvidia_tao_pytorch.cv.bevfusion.utils.misc import cleanup_runner
 
 
 def run_experiment(experiment_config):
@@ -29,8 +30,11 @@ def run_experiment(experiment_config):
     train_cfg = Config(train_cfg)
     # build runner
     runner = Runner.from_cfg(train_cfg)
-    # run training
-    runner.train()
+    try:
+        # run training
+        runner.train()
+    finally:
+        cleanup_runner(runner)
 
 
 spec_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

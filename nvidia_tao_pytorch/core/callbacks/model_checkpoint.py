@@ -15,7 +15,8 @@ class TAOExceptionCheckpoint(OnExceptionCheckpoint):
 
     Extending Lightning's OnExceptionCheckpoint since it (in v.2.3.0) only supports saving
     to a provided path. We want to extend its capabilities to also symlink the *_latest.pth
-    file to this dumped checkpoint.
+    file to this dumped checkpoint. Distributed exceptions skip this save because Lightning's
+    checkpoint path contains collectives that a rank-local failure cannot safely enter.
     """
 
     CHECKPOINT_NAME_LAST = ""
@@ -25,7 +26,10 @@ class TAOExceptionCheckpoint(OnExceptionCheckpoint):
         super().__init__(dirpath)
 
     def on_exception(self, trainer: "pl.Trainer", *_: Any, **__: Any) -> None:
-        """Overriden function that saves and links the checkpoint"""
+        """Save and link an exception checkpoint for single-process training."""
+        if trainer.world_size > 1:
+            return
+
         self.filename = f"model_epoch_{trainer.current_epoch:03d}_step_{trainer.global_step:05d}"
         super().on_exception(trainer)
         ModelCheckpoint._link_checkpoint(trainer, self.ckpt_path, os.path.join(self.dirpath, self.CHECKPOINT_NAME_LAST + self.FILE_EXTENSION))

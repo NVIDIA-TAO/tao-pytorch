@@ -297,8 +297,10 @@ def get_siglip2_model(version: str, pretrained_backbone_path: Optional[str] = No
     the wrapped backbone.
 
     Args:
-        version (str): One of ``'siglip2'``, ``'siglip2-so400m'``,
-            ``'siglip2-so400m-512'``, ``'siglip2-g'``, or ``'siglip2-g-384'``.
+        version (str): Supported SigLIP2 alias such as
+            ``'siglip2-so400m-patch16-256'``,
+            ``'siglip2-so400m-patch16-naflex'``, ``'siglip2-so400m'``
+            (NaFlex), ``'siglip2-so400m-512'``, or ``'siglip2-g-384'``.
         pretrained_backbone_path (str, optional): Local path to a HuggingFace
             snapshot directory (containing ``config.json``, weights, and
             processor files) for the chosen ``version``. When ``None`` (the
@@ -312,12 +314,38 @@ def get_siglip2_model(version: str, pretrained_backbone_path: Optional[str] = No
         KeyError: If ``version`` is not a recognized release alias.
     """
     version_map = {
-        'siglip2-so400m-512': ('google/siglip2-so400m-patch16-512', False, 16),
+        'siglip2-so400m-patch16-naflex': (
+            'google/siglip2-so400m-patch16-naflex', True, 16,
+        ),
+        'siglip2-so400m-patch14-224': (
+            'google/siglip2-so400m-patch14-224', False, 14,
+        ),
+        'siglip2-so400m-patch14-384': (
+            'google/siglip2-so400m-patch14-384', False, 14,
+        ),
+        'siglip2-so400m-patch16-256': (
+            'google/siglip2-so400m-patch16-256', False, 16,
+        ),
+        'siglip2-so400m-patch16-384': (
+            'google/siglip2-so400m-patch16-384', False, 16,
+        ),
+        'siglip2-so400m-patch16-512': (
+            'google/siglip2-so400m-patch16-512', False, 16,
+        ),
+        'siglip2-so400m-512': (
+            'google/siglip2-so400m-patch16-512', False, 16,
+        ),
         'siglip2-so400m': ('google/siglip2-so400m-patch16-naflex', True, 16),
         'siglip2-g-384': ('google/siglip2-giant-opt-patch16-384', False, 16),
     }
     version_map['siglip2'] = version_map['siglip2-so400m']
     version_map['siglip2-g'] = version_map['siglip2-g-384']
+
+    if version not in version_map:
+        raise KeyError(
+            f"Unknown SigLIP2 version '{version}'. "
+            f"Supported: {sorted(version_map)}"
+        )
 
     version, is_dynamic, patch_size = version_map[version]
 

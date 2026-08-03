@@ -9,6 +9,11 @@ train:
   precision: fp16
   pretrained_model_path: null
   loss_type: siglip  # siglip or clip
+  siglip_loss_dist_impl: gather  # metadata masking supports local or gather
+  # none, attribute_match_ignore, or attribute_plus_accessory_match_ignore
+  siglip_loss_mask_mode: none
+  triplet_loss_weight: 0.0  # set > 0 to enable triplet loss
+  triplet_margin: 0.2
   optim:
     optimizer_type: adamw  # adamw, lamb, or sgd
     vision_lr: 1e-4
@@ -24,28 +29,34 @@ dataset:
   seed: 42
   train:
     type: custom  # custom or wds
+    balance_query_types: false  # true + per-dataset train_pairs.json balances query types
+    unique_caption_per_batch: true  # enforce unique captions when balance_query_types is true
+    # Required when siglip_loss_mask_mode is enabled.
+    include_attribute_metadata: false
     datasets:
     - image_dir: ???
       caption_dir: ???
       caption_file_suffix: .txt
       image_list_file: null  # Optional: text file listing image filenames
+      train_pairs_file: null  # Optional per dataset block; required for that block when balance_query_types is true
+      attribute_pairs_file: null  # Optional explicit split-aligned metadata file
     batch_size: 16
     num_workers: 8
   val:
     datasets: []  # Same format as train.datasets
+    metadata_match_eval: false  # Multiple datasets require identical metadata vocabularies
+    metadata_match_mode: scalar_attributes  # scalar_attributes or scalar_plus_accessories
     batch_size: 16
     num_workers: 8
-  augmentation:
-    scale: [0.4, 1.0]
-    color_jitter: [0.8, 0.32, 0.32, 0.32, 0.08]  # [prob, brightness, contrast, saturation, hue]
-    grayscale: 0.2
 
 model:
   type: ???  # siglip2-so400m-patch16-256, c-radio_v3-h, etc.
-  canonicalize_text: false 
+  canonicalize_text: false
 
 evaluate:
   checkpoint: ???
+  datasets: []  # Optional direct PAS export; otherwise uses dataset.val.datasets
+  pas_ground_truth_mode: paired_caption  # paired_caption, scalar_attributes, or scalar_plus_accessories
   batch_size: 16
 
 inference:

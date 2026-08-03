@@ -20,6 +20,7 @@ from torch.optim.lr_scheduler import MultiStepLR
 from nvidia_tao_pytorch.core.lightning.tao_lightning_module import TAOLightningModule
 import nvidia_tao_pytorch.core.loggers.api_logging as status_logging
 from nvidia_tao_pytorch.cv.mask2former.model.mask2former import MaskFormerModel
+from nvidia_tao_pytorch.cv.deformable_detr.model.ops.modules import set_precise_msda
 from nvidia_tao_pytorch.cv.mask2former.utils.criterion import SetCriterion
 from nvidia_tao_pytorch.cv.mask2former.utils.lr_scheduler import WarmupPolyLR
 from nvidia_tao_pytorch.cv.mask2former.utils.matcher import HungarianMatcher
@@ -176,6 +177,8 @@ class Mask2formerPlModule(TAOLightningModule):
 
     def _build_model(self):
         """Internal function to build the model."""
+        # Opt-in deterministic MSDeformAttn path (no-op unless precise_msda=True).
+        set_precise_msda(getattr(self.model_config, "precise_msda", False))
         self.model = MaskFormerModel(self.experiment_spec)
 
         # freeze modules

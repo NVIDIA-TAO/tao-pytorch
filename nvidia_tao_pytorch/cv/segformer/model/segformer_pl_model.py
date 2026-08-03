@@ -85,6 +85,10 @@ class SegFormerPlModel(TAOLightningModule):
         self.color_map = id_color_map
 
         self.checkpoint_filename = 'segformer_model'
+        # Best-checkpoint default: monitor mean IoU (logged as "val_miou" in
+        # on_validation_epoch_end). Higher is better.
+        self.monitor_metric = "val_miou"
+        self.monitor_mode = "max"
 
     def _build_model(self, export):
         """Internal function to build the model."""

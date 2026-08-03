@@ -3,6 +3,38 @@
 
 """BEVFusion Misc utility Function"""
 
+import gc
+import logging
+
+
+def cleanup_runner(runner=None):
+    """Release MMEngine/CUDA resources before process teardown."""
+    logger = logging.getLogger(__name__)
+    try:
+        if runner is not None:
+            for attr_name in ("train_loop", "val_loop", "test_loop"):
+                loop = getattr(runner, attr_name, None)
+                dataloader = getattr(loop, "dataloader", None)
+                if dataloader is not None:
+                    setattr(loop, "dataloader", None)
+    except Exception as exc:  # noqa: broad-exception-caught
+        logger.debug("BEVFusion runner dataloader cleanup failed: %s", exc)
+
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
+    except Exception as exc:  # noqa: broad-exception-caught
+        logger.debug("BEVFusion CUDA/distributed cleanup failed: %s", exc)
+
+    gc.collect()
+
 
 def sanity_check(config):
     """sanity check for config setup"""

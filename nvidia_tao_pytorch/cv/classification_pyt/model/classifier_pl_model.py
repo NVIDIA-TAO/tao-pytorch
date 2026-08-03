@@ -50,6 +50,11 @@ class ClassifierPlModel(TAOLightningModule):
         self.checkpoint_filename = "classifier_model"
         self.dataset_config = self.experiment_spec.dataset
         self.model_config = self.experiment_spec.model
+        # Best-checkpoint default: monitor top-1 validation accuracy. The accuracy
+        # metric is logged per-k as "val_acc_{topk}" (see _build_model/valid_acc),
+        # so the monitored key is keyed off the first configured topk value.
+        self.monitor_metric = f"val_acc_{self.model_config.head.topk[0]}"
+        self.monitor_mode = "max"
         self.train_config = self.experiment_spec.train
         self.eval_config = self.experiment_spec.evaluate
         self.infer_config = self.experiment_spec.inference
@@ -152,6 +157,10 @@ class ClassifierPlModel(TAOLightningModule):
             enable_version_counter=False,
         )
         callbacks.append(checkpoint_callback)
+        # Best-checkpoint saving (additive by default, or replacing the periodic
+        # callback when train.checkpointer.replace_periodic is enabled).
+        # This module overrides configure_callbacks, so wire the shared helper here too.
+        callbacks = self._configure_best_checkpoint(callbacks, results_dir)
         lr_monitor = LearningRateMonitor(logging_interval="step")
         callbacks.append(lr_monitor)
         return callbacks

@@ -31,6 +31,7 @@ dataset:
   max_labels: ???  # use for COCO-like detection dataset
   batch_size: 8
   workers: 16
+  # deterministic_label_order: true  # canonicalize ODVG caption/label order for run-to-run reproducibility (default: true)
 model:
   # pretrained_backbone_path: ???  # uncomment if pretraining
   backbone: swin_tiny_224_1k

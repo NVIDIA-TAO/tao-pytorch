@@ -27,6 +27,59 @@ class CuDNNConfig:
 
 
 @dataclass
+class CheckpointerConfig:
+    """Config for monitoring a metric and saving the best checkpoint(s).
+
+    By default this is additive to periodic checkpointing: when ``enable_topk`` is
+    set, a separate monitored ``ModelCheckpoint`` ranks checkpoints by a metric.
+    Set ``replace_periodic`` to keep only the single metric-best checkpoint instead;
+    that checkpoint then owns the existing ``*_latest`` symlink. Exception
+    checkpointing remains independent in either mode.
+    """
+
+    enable_topk: bool = BOOL_FIELD(
+        value=False, default_value=False,
+        display_name="Enable best-checkpoint saving",
+        description="Save checkpoint(s) ranked by a monitored metric. This is "
+                    "additive to periodic checkpoints unless replace_periodic is enabled.",
+    )
+    replace_periodic: bool = BOOL_FIELD(
+        value=False, default_value=False,
+        display_name="Replace periodic checkpoints",
+        description="When best-checkpoint saving is enabled, replace the unbounded "
+                    "periodic checkpoint callback with one metric-best checkpoint and "
+                    "make it own the existing *_latest symlink. This mode always keeps "
+                    "exactly one best checkpoint, regardless of save_top_k.",
+    )
+    monitor: Optional[str] = STR_FIELD(
+        value=None,
+        display_name="Monitored metric",
+        description="Override the network's default monitored metric (e.g. val_loss, "
+                    "val_acc, val_miou, mAP). Leave unset to use the network default.",
+    )
+    mode: Optional[str] = STR_FIELD(
+        value=None, valid_options="min,max",
+        display_name="Monitor mode",
+        description="Override direction. 'min' for losses, 'max' for accuracy/mAP/mIoU. "
+                    "Leave unset to use the network default.",
+    )
+    save_top_k: int = INT_FIELD(
+        value=1, default_value=1, valid_min=1,
+        display_name="Number of best checkpoints",
+        description="How many best checkpoints to keep (1 = only the single best).",
+    )
+    filename: str = STR_FIELD(
+        value="model_best_{epoch:03d}", default_value="model_best_{epoch:03d}",
+        display_name="Best-checkpoint filename pattern",
+    )
+    dirpath: Optional[str] = STR_FIELD(
+        value=None,
+        description="Directory for best checkpoints. Defaults to results_dir.",
+    )
+    auto_insert_metric_name: bool = BOOL_FIELD(value=False, default_value=False)
+
+
+@dataclass
 class TrainConfig:
     """Common train experiment config."""
 
@@ -104,6 +157,7 @@ class TrainConfig:
         description="""
         Path to where all the assets generated from a task are stored.
         """)
+    checkpointer: CheckpointerConfig = DATACLASS_FIELD(CheckpointerConfig())
 
 
 @dataclass

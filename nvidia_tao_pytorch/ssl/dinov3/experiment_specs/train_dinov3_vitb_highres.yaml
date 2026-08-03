@@ -1,0 +1,95 @@
+encryption_key: tlt_encode
+
+# DINOv3 Phase 1 — high-resolution (768) adaptation with Gram anchoring ON.
+# Continue from a Phase 0 (256-res) adapted checkpoint and fine-tune dense features at 768.
+# See ssl/dinov3/docs (Phase 1 plan). This is a SHORT phase; watch dense-feature quality.
+results_dir: /data/scratch/users/vpraveen/dinov3_vitb_highres
+model:
+  distill:
+    enable: False
+    disable_masking: False
+    pretrained_non_distill_pl_model_path: null
+  centering_method: "sinkhorn"
+  backbone:
+    teacher_type: "vit_b"
+    student_type: "vit_b"
+    num_register_tokens: 4
+    drop_path_rate: 0.4
+    patch_size: 16
+    # High resolution. RoPE2D normalizes coords to [-1,1] so the 48x48 grid needs no interp.
+    img_size: 768
+    rope_theta: 100.0
+  head:
+    num_layers: 3
+    hidden_dim: 2048
+    bottleneck_dim: 384
+  gram:
+    # Gram anchoring ON for the high-res phase (paper: high-res / long-schedule tool).
+    enable: True
+    w_gram: 2.0
+    start_step: 0
+    # Early-EMA Gram teacher refreshed periodically (vs the Phase 0 frozen-from-pretrained snapshot).
+    teacher_source: "ema"
+    refresh_interval: 10000
+    # Gram teacher resolution multiple. 2.0 matches the paper but at 768 the teacher runs at
+    # 1536 (96x96=9216 tokens) -> heavy. Start at 1.0 (Gram at the student's 768) and raise to
+    # 1.5/2.0 only if memory allows. The teacher grid is avg-pooled back to the student grid.
+    teacher_scale: 1.0
+  lora:
+    enable: False
+
+dataset:
+  train_dataset:
+    images_dir: /data/scratch/users/vpraveen/dinov3_vitb_highres/data
+  # 768 is ~9x the 256 attention cost; keep the batch small (raise with FSDP/grad-ckpt).
+  batch_size: 4
+  workers: 8
+  transform:
+    n_global_crops: 2
+    global_crops_scale: [0.32, 1.0]
+    global_crops_size: 768
+    n_local_crops: 8
+    local_crops_scale: [0.05, 0.32]
+    # Local crops a multiple of patch 16 (336/16 = 21).
+    local_crops_size: 336
+
+train:
+  resume_training_checkpoint_path: null
+  # Seed from a Phase 0 256-adapted backbone (student/teacher .pth or full Lightning ckpt).
+  pretrained_model_path: /data/scratch/users/vpraveen/dinov3_vitb_v1/train/teacher_epoch_XXX_step_YYYYY.pth
+  # xformers memory_efficient_attention has no deterministic backward kernel.
+  cudnn:
+    deterministic: False
+    benchmark: True
+  num_nodes: 1
+  num_gpus: 1
+  # Short high-res phase.
+  num_epochs: 2
+  checkpoint_interval: 1
+  layerwise_decay: 1.0
+  clip_grad_norm: 3.0
+  optim:
+    optim: "adamw"
+  schedulers:
+    learning_rate:
+      val_base: "${eval: '5e-5 * (${dataset.batch_size} * ${train.num_gpus} * ${train.num_nodes} / 1024) ** (1/2)'}"
+      val_final: 1e-6
+      warm_up_steps: 2000
+    last_layer_learning_rate:
+      val_base: "${eval: '5e-5 * (${dataset.batch_size} * ${train.num_gpus} * ${train.num_nodes} / 1024) ** (1/2)'}"
+      val_final: 1e-6
+      warm_up_steps: 2000
+      freeze_steps: 500
+    weight_decay:
+      val_base: 0.04
+      val_final: 0.2
+    momentum:
+      val_base: 0.9999
+      val_final: 1.0
+    teacher_temperature:
+      val_base: 0.07
+      val_final: 0.07
+      val_start: 0.04
+      warm_up_steps: 7500
+  num_prototypes: 131072
+  results_dir: "${results_dir}/train"

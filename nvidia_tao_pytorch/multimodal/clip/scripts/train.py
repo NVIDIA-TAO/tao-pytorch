@@ -6,6 +6,16 @@
 import os
 from datetime import timedelta
 
+# This first import binds rank 0 and relaunched child ranks before any
+# CUDA-aware dependencies can create a context. Keep it ahead of those imports.
+# isort: off
+from nvidia_tao_pytorch.core.utils import (  # noqa: F401
+    cuda_device as _cuda_device,
+)
+# isort: on
+
+from lightning_fabric.utilities.distributed import _init_dist_connection
+from lightning_fabric.utilities.seed import reset_seed
 from nvidia_tao_pytorch.core.decorators.workflow import monitor_status
 from nvidia_tao_pytorch.core.hydra.hydra_runner import hydra_runner
 from nvidia_tao_pytorch.core.initialize_experiments import (
@@ -32,6 +42,22 @@ from nvidia_tao_pytorch.multimodal.clip.utils.utils import (
 
 from pytorch_lightning import Trainer
 from pytorch_lightning.strategies import DDPStrategy
+
+
+class _RankLocalDDPStrategy(DDPStrategy):
+    """Initialize NCCL lazily after the process is bound to its local GPU."""
+
+    def setup_distributed(self) -> None:
+        """Initialize ranks and NCCL without eager CUDA device binding."""
+        reset_seed()
+        self.set_world_ranks()
+        self._process_group_backend = self._get_process_group_backend()
+        assert self.cluster_environment is not None
+        _init_dist_connection(
+            self.cluster_environment,
+            self._process_group_backend,
+            timeout=self._timeout,
+        )
 
 
 def run_experiment(experiment_config, key):
@@ -92,12 +118,12 @@ def run_experiment(experiment_config, key):
     if len(trainer_kwargs['devices']) > 1:
         ds = distributed_strategy.lower()
         if ds == "ddp" and grad_ckpt:
-            strategy = DDPStrategy(
+            strategy = _RankLocalDDPStrategy(
                 timeout=nccl_timeout,
                 find_unused_parameters=False,
             )
         elif ds == "ddp" and not grad_ckpt:
-            strategy = DDPStrategy(
+            strategy = _RankLocalDDPStrategy(
                 timeout=nccl_timeout,
                 find_unused_parameters=True,
             )

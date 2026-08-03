@@ -7,7 +7,8 @@ set -eo pipefail
 
 registry="nvcr.io"
 pytorch_version="2.1.0"
-tao_version="6.25.7"
+# Keep in sync with release/python/version.py and release/docker/Dockerfile (TAO_TOOLKIT_VERSION).
+tao_version="7.0.1"
 repository="nvstaging/tao/tao-toolkit-pyt"
 build_id="01"
 tag="v${tao_version}-pyt${pytorch_version}-py3-${build_id}"
@@ -89,12 +90,20 @@ if [ $BUILD_DOCKER = "1" ]; then
           mkdir -p $wheel_dir
         fi
         echo "Building source code wheel ..."
+        # --no-tty so the wheel build works in non-interactive/CI contexts. Without it,
+        # tao_pt runs `docker run -it`, which aborts with "the input device is not a TTY".
         # tao_pt --env 'TORCH_CUDA_ARCH_LIST="5.3 6.0 6.1 7.0 7.5 8.0 8.6 9.0"' -- bash /tao-pt/release/docker/build_wheel.sh
-        tao_pt -- python setup.py bdist_wheel
+        tao_pt --no-tty -- python setup.py bdist_wheel
+        # tao_pt swallows the container's exit code (see runner/tao_pt.py), so verify the
+        # wheel was actually produced before trying to COPY it into the image.
+        if ! ls ${wheel_dir}/*.whl >/dev/null 2>&1; then
+            echo "ERROR: wheel build produced no artifact in ${wheel_dir}. Aborting." >&2
+            exit 1
+        fi
     else
         echo "Skipping wheel builds ..."
     fi
-    
+
     docker build --pull -f $NV_TAO_PYTORCH_TOP/release/docker/Dockerfile -t $registry/$repository:$tag $NO_CACHE --network=host $NV_TAO_PYTORCH_TOP/.
 
     if [ $PUSH_DOCKER = "1" ]; then
@@ -112,7 +121,7 @@ if [ $BUILD_DOCKER = "1" ]; then
     else
         echo "Skipping wheel cleaning ..."
     fi
-elif [ $RUN_DOCKER ="1" ]; then
+elif [ "$RUN_DOCKER" = "1" ]; then
     echo "Running docker interactively..."
     docker run --gpus all -v $HOME/tlt-experiments:/workspace/tlt-experiments \
                           --network=host \

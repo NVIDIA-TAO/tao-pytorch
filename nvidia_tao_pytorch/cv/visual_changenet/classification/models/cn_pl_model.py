@@ -194,7 +194,14 @@ class ChangeNetPlModel(TAOLightningModule):
 
     def on_train_epoch_end(self):
         """Log Training metrics to status.json"""
-        average_train_loss = self.trainer.logged_metrics["train_loss_epoch"].item()
+        train_loss_epoch = self.trainer.logged_metrics.get("train_loss_epoch")
+        if train_loss_epoch is None:
+            # Lightning can replay this hook immediately after restoring a
+            # validation-end checkpoint, before the resumed epoch has produced
+            # any training batches or metrics. There is nothing to aggregate in
+            # that case; the next real epoch-end hook performs normal logging.
+            return
+        average_train_loss = train_loss_epoch.item()
 
         train_accuracy = self.train_metrics.compute()['total_accuracy'].item()
         train_false_positive_rate = self.train_metrics.compute()['false_alarm'].item()

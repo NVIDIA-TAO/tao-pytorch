@@ -155,12 +155,12 @@ def prune(opt):
     # load model
     print('loading pretrained model from %s' % opt.saved_model)
     ckpt = load_checkpoint(opt.saved_model, key=opt.encryption_key, to_cpu=True)
-    if not isinstance(ckpt, Model):
-        model = Model(opt)
-        state_dict = ckpt
-        model.load_state_dict(state_dict)
+    model = Model(opt)
+    if isinstance(ckpt, Model):
+        state_dict = ckpt.state_dict()
     else:
-        model = ckpt
+        state_dict = ckpt
+    model.load_state_dict(state_dict)
 
     model = model.to(device)
 

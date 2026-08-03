@@ -305,6 +305,22 @@ class CLIPDataPathConfig:
         display_name="Caption File Suffix",
     )
 
+    train_pairs_file: Optional[str] = STR_FIELD(
+        value=None,
+        default_value=None,
+        description="Optional train_pairs.json metadata file used for balanced PAS query-type sampling.",
+        display_name="Train Pairs File",
+    )
+    attribute_pairs_file: Optional[str] = STR_FIELD(
+        value=None,
+        default_value=None,
+        description=(
+            "Optional split-aligned pairs metadata file used for "
+            "metadata-aware validation."
+        ),
+        display_name="Attribute Pairs File",
+    )
+
 
 @dataclass
 class CLIPWDSConfig:
@@ -355,8 +371,6 @@ class CLIPDataLoaderConfig:
         description="Number of data loading worker processes.",
         display_name="Number of Workers",
     )
-
-
 @dataclass
 class CLIPTrainDataConfig(CLIPDataLoaderConfig):
     """Training data configuration with additional options for dataset type."""
@@ -380,12 +394,59 @@ class CLIPTrainDataConfig(CLIPDataLoaderConfig):
         display_name="Batch Size",
     )
 
+    balance_query_types: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        description="Balance CLIP training batches across query types using train_pairs_file metadata.",
+        display_name="Balance Query Types",
+    )
+    unique_caption_per_batch: bool = BOOL_FIELD(
+        value=True,
+        default_value=True,
+        description=(
+            "When balance_query_types is enabled, enforce at most one row per caption "
+            "string in each batch. Disable for very large PAS-Aug datasets to avoid "
+            "expensive unique-caption batch construction."
+        ),
+        display_name="Unique Caption per Batch",
+    )
+    include_attribute_metadata: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        description=(
+            "Include image/text attribute tensors in custom training batches. "
+            "Required when siglip_loss_mask_mode is enabled."
+        ),
+        display_name="Include Attribute Metadata",
+    )
+
 
 @dataclass
 class CLIPValDataConfig(CLIPDataLoaderConfig):
     """Validation data configuration for retrieval evaluation."""
 
-    pass
+    metadata_match_eval: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        description=(
+            "Use attribute metadata to define text-to-image validation "
+            "positives. Multiple datasets must use identical attribute and "
+            "accessory vocabularies. When False, validation keeps paired "
+            "diagonal ground truth."
+        ),
+        display_name="Metadata Match Evaluation",
+    )
+    metadata_match_mode: str = STR_FIELD(
+        value="scalar_attributes",
+        default_value="scalar_attributes",
+        valid_options="scalar_attributes,scalar_plus_accessories",
+        description=(
+            "Metadata compatibility used for text-to-image validation. "
+            "'scalar_plus_accessories' also requires every query accessory "
+            "to be present in the image."
+        ),
+        display_name="Metadata Match Mode",
+    )
 
 
 @dataclass
@@ -503,6 +564,52 @@ class CLIPTrainConfig(TrainConfig):
         description="Contrastive loss function: 'siglip' (sigmoid) or 'clip' (softmax).",
         display_name="Loss Type",
     )
+    siglip_loss_dist_impl: str = STR_FIELD(
+        value="gather",
+        default_value="gather",
+        valid_options="bidir,shift,reduce,gather,local",
+        description="Distributed implementation for SigLIP loss negative exchange. "
+                    "Use 'local' to disable cross-rank negative exchange. "
+                    "Only used when loss_type is 'siglip'.",
+        display_name="SigLIP Loss Distributed Implementation",
+    )
+    siglip_loss_mask_mode: str = STR_FIELD(
+        value="none",
+        default_value="none",
+        valid_options=(
+            "none,attribute_match_ignore,"
+            "attribute_plus_accessory_match_ignore"
+        ),
+        description=(
+            "Optional metadata-based masking mode for SigLIP loss. "
+            "'none' keeps existing behavior; 'attribute_match_ignore' ignores "
+            "off-diagonal negatives whose attributes match the text query; "
+            "'attribute_plus_accessory_match_ignore' additionally requires "
+            "all query accessories to be present in the image. "
+            "Metadata masking supports siglip_loss_dist_impl='local' or "
+            "'gather' and requires "
+            "include_attribute_metadata=True on the custom training dataset."
+        ),
+        display_name="SigLIP Loss Mask Mode",
+    )
+    triplet_loss_weight: float = FLOAT_FIELD(
+        value=0.0,
+        default_value=0.0,
+        valid_min=0.0,
+        description=(
+            "Weight for auxiliary batch-hard image-text triplet loss. "
+            "Set to 0 to disable."
+        ),
+        display_name="Triplet Loss Weight",
+    )
+    triplet_margin: float = FLOAT_FIELD(
+        value=0.2,
+        default_value=0.2,
+        valid_min=0.0,
+        description="Margin for auxiliary batch-hard image-text triplet loss.",
+        display_name="Triplet Margin",
+    )
+
     precision: str = STR_FIELD(
         value="fp16",
         default_value="fp16",
@@ -590,6 +697,26 @@ class CLIPInferenceEvalConfig(CLIPDataLoaderConfig):
         default_value=None,
         description="Path to text file with prompts for text embedding extraction.",
         display_name="Text File",
+    )
+
+
+@dataclass
+class CLIPEvaluateConfig(CLIPInferenceEvalConfig):
+    """Configuration specific to CLIP evaluation."""
+
+    pas_ground_truth_mode: str = STR_FIELD(
+        value="paired_caption",
+        default_value="paired_caption",
+        valid_options=(
+            "paired_caption,scalar_attributes,"
+            "scalar_plus_accessories"
+        ),
+        description=(
+            "Ground-truth policy for direct PAS text-to-image evaluation. "
+            "'paired_caption' uses exact-caption pairs; scalar modes derive "
+            "positives from exported attributes and optional accessories."
+        ),
+        display_name="PAS Ground Truth Mode",
     )
 
 
@@ -738,8 +865,8 @@ class CLIPExperimentConfig(CommonExperimentConfig):
         CLIPTrainConfig(),
         description="Training config.",
     )
-    evaluate: CLIPInferenceEvalConfig = DATACLASS_FIELD(
-        CLIPInferenceEvalConfig(),
+    evaluate: CLIPEvaluateConfig = DATACLASS_FIELD(
+        CLIPEvaluateConfig(),
         description="Evaluation config.",
     )
     inference: CLIPInferenceEvalConfig = DATACLASS_FIELD(

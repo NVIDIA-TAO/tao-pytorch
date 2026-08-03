@@ -30,6 +30,7 @@ from nvidia_tao_pytorch.cv.backbone_v2.nn.norm import FrozenBatchNorm2d
 from nvidia_tao_pytorch.cv.visual_changenet.backbone.fan import fan_model_dict
 from nvidia_tao_pytorch.cv.visual_changenet.backbone.utils import ptm_adapter, visual_changenet_parser
 from nvidia_tao_pytorch.cv.visual_changenet.backbone.vit_adapter import vit_adapter_model_dict
+from nvidia_tao_pytorch.cv.deformable_detr.model.ops.modules import set_precise_msda
 from nvidia_tao_pytorch.cv.visual_changenet.segmentation.models.changenet_utils import (
     MLP,
     ConvLayer,
@@ -341,6 +342,16 @@ class ChangeNetSegment(nn.Module):
                 freeze_at=freeze_at,
                 export=export,
             )
+        elif 'dinov3' in self.model_name:
+            assert img_size % 32 == 0, "Input image resolution must be a multiple of 32 for ViT-Adapter"
+            self.backbone = vit_adapter_model_dict[self.model_name](
+                out_indices=return_interm_indices,
+                resolution=img_size,
+                activation_checkpoint=activation_checkpoint,
+                use_summary_token=use_summary_token,
+                freeze_at=freeze_at,
+                export=export,
+            )
         elif 'vit' in self.model_name:
             assert img_size % 32 == 0, "Input image resolution must be a multiple of 32 for ViT-Adapter"
             self.backbone = vit_adapter_model_dict[self.model_name](
@@ -359,7 +370,8 @@ class ChangeNetSegment(nn.Module):
                 parser=visual_changenet_parser,
                 ptm_adapter=ptm_adapter,
             )
-            if "vit" in self.model_name and "radio" not in self.model_name:
+            # DINOv3 uses RoPE (no pos_embed) and native patch16 weights: no interpolation needed.
+            if "vit" in self.model_name and "radio" not in self.model_name and "dinov3" not in self.model_name:
                 pretrained_backbone_ckp = interpolate_vit_checkpoint(
                     checkpoint=pretrained_backbone_ckp,
                     target_patch_size=16,
@@ -413,6 +425,10 @@ def build_model(experiment_config,
 
     """
     model_config = experiment_config.model
+    # Opt-in deterministic MSDeformAttn path in the C-RADIO / ViT-Adapter backbones
+    # (vit_adapter_model_dict). No-op unless precise_msda=True. Mirrors the classification
+    # build_model so segmentation runs with a ViT-Adapter backbone are also reproducible.
+    set_precise_msda(getattr(model_config, "precise_msda", False))
     dataset_config = experiment_config.dataset.segment
 
     backbone = model_config.backbone['type']
@@ -425,6 +441,11 @@ def build_model(experiment_config,
                     "fan_small_12_p4_hybrid": [128, 256, 384, 384],
                     "fan_base_16_p4_hybrid": [128, 256, 448, 448],
                     "vit_large_nvdinov2": [1024, 1024, 1024, 1024],
+                    "vit_small_dinov3": [384, 384, 384, 384],
+                    "vit_small_plus_dinov3": [384, 384, 384, 384],
+                    "vit_base_dinov3": [768, 768, 768, 768],
+                    "vit_large_dinov3": [1024, 1024, 1024, 1024],
+                    "vit_huge_plus_dinov3": [1280, 1280, 1280, 1280],
                     "c_radio_p1_vit_huge_patch16_224_mlpnorm": [1280, 1280, 1280, 1280],
                     "c_radio_p2_vit_huge_patch16_224_mlpnorm": [1280, 1280, 1280, 1280],
                     "c_radio_p3_vit_huge_patch16_224_mlpnorm": [1280, 1280, 1280, 1280],

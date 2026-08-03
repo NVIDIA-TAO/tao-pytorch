@@ -223,6 +223,18 @@ class GDINODatasetConfig:
         valid_max="inf",
         display_name="max labels"
     )
+    deterministic_label_order: bool = BOOL_FIELD(
+        value=True,
+        default_value=True,
+        display_name="deterministic label order",
+        description=(
+            "If True, canonicalize the per-sample caption/label order with sorted() so that the "
+            "caption token order is reproducible across process launches, independent of the "
+            "PYTHONHASHSEED that governs Python set-iteration order. The seeded per-item shuffle "
+            "still provides caption-order augmentation diversity; only the hash-seed dependence is "
+            "removed. Set False to restore the legacy (non-deterministic) set-iteration order."
+        )
+    )
     eval_class_ids: Optional[List[int]] = LIST_FIELD(
         arrList=None,
         default_value=[1],

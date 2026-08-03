@@ -269,7 +269,14 @@ class TorchAOBackend(PyTorchQuantizerBase):
 
         quantized_model = copy.deepcopy(model)
 
-        quantize_(quantized_model, ao_cfg, **self._backend_kwargs)
+        quantize_kwargs = dict(self._backend_kwargs)
+        if quantize_kwargs.get("filter_fn") is not None:
+            self._logger.warning(
+                "Ignoring TorchAO filter_fn because per-module quantization requires filter_fn=None."
+            )
+        quantize_kwargs["filter_fn"] = None
+
+        quantize_(quantized_model, ao_cfg, **quantize_kwargs)
 
         return quantized_model
 

@@ -123,19 +123,52 @@ def create_quantized_model_from_config(model_path: str, model_class, **model_kwa
     # Extract experiment_config from model_kwargs
     experiment_config = model_kwargs.pop('experiment_config')
 
-    # Import ModelQuantizer here to avoid circular import
+    # Build model wrapper.
+    model = model_class(experiment_config, **model_kwargs)
+
+    # Load quantized checkpoint.
+    state_dict = torch.load(model_path, map_location="cpu")
+
+    # Handle ModelOpt checkpoints produced by modelopt.torch.opt.save(). Quantize
+    # scripts save the underlying nn.Module, not the Lightning wrapper, so restore
+    # into model.model when present.
+    backend = getattr(experiment_config.quantize, 'backend', None)
+    is_modelopt_checkpoint = (
+        isinstance(state_dict, dict) and
+        "modelopt_state" in state_dict and
+        "model_state_dict" in state_dict
+    )
+    if is_modelopt_checkpoint:
+        if backend != "modelopt.pytorch":
+            logging.warning(
+                "ModelOpt checkpoint metadata found while quantize.backend is %s; "
+                "restoring with ModelOpt based on checkpoint contents.",
+                backend,
+            )
+        try:
+            import modelopt.torch.opt as mto
+        except Exception as exc:
+            raise ImportError(
+                "modelopt is required to restore ModelOpt PyTorch quantized checkpoints. "
+                "Install nvidia-modelopt or use an environment that includes ModelOpt."
+            ) from exc
+
+        restore_target = getattr(model, "model", None)
+        if isinstance(restore_target, nn.Module):
+            model.model = mto.restore(restore_target, model_path, map_location="cpu")
+        else:
+            model = mto.restore(model, model_path, map_location="cpu")
+        logging.info("ModelOpt quantized model restored successfully.")
+        return model
+
+    # Import ModelQuantizer here to avoid circular import.
     from nvidia_tao_pytorch.core.quantization.quantizer import ModelQuantizer
 
-    # Build quantized model
-    model = model_class(experiment_config, **model_kwargs)
+    # Legacy artifacts keep only a state dict; rebuild the quantized graph from
+    # config and then load the saved weights.
     quantizer = ModelQuantizer(experiment_config.quantize)
     model = quantizer.quantize_model(model)
 
-    # Load quantized state dict
-    state_dict = torch.load(model_path, map_location="cpu")
-
-    # Handle ModelOpt backend artifacts
-    backend = getattr(experiment_config.quantize, 'backend', None)
     if backend == "modelopt.pytorch" and isinstance(state_dict, dict) and "model_state_dict" in state_dict:
         state_dict = state_dict["model_state_dict"]
 

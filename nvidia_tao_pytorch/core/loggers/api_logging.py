@@ -11,8 +11,6 @@ import os
 
 import numpy as np
 
-from nvidia_tao_core.microservices.handlers.cloud_handlers.utils import status_callback
-
 from torch import distributed as torch_distributed
 from pytorch_lightning.utilities import rank_zero_only, rank_zero_warn
 
@@ -28,6 +26,17 @@ def _json_default(obj):
 
 
 logger = logging.getLogger(__name__)
+
+
+def _status_callback(data_string):
+    """Send status callback when tao-core microservice dependencies are available."""
+    try:
+        # pylint: disable=import-outside-toplevel
+        from nvidia_tao_core.microservices.handlers.cloud_handlers.utils import status_callback
+    except ImportError as exc:
+        logger.debug("Skipping cloud status callback: %s", exc)
+        return
+    status_callback(data_string)
 
 
 class Verbosity():
@@ -213,7 +222,7 @@ class BaseLogger(object):
                 data["kpi"] = self.kpi
 
             data_string = self.format_data(data)
-            status_callback(data_string)
+            _status_callback(data_string)
             self.log(verbosity_level, data_string)
             self.flush()
 

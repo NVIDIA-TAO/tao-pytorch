@@ -234,7 +234,30 @@ class GDINOMultiScaleDeformableAttention(nn.Module):
                 )
                 if half_float:
                     output = output.to(half_float)
+            elif torch.cuda.is_available() and value.is_cuda:
+                # precise_msda + CUDA: fast deterministic KERNEL (fixed-point int
+                # atomics in the backward). Fused-speed forward + bitwise-reproducible
+                # backward -- supersedes the slow index_select pytorch path.
+                half_float = False
+                if value.dtype in [torch.float16, torch.bfloat16]:
+                    half_float = value.dtype
+                    value = value.float()
+                    sampling_locations = sampling_locations.float()
+                    attention_weights = attention_weights.float()
+
+                output = MSDeformAttnFunction.apply(
+                    value,
+                    spatial_shapes,
+                    level_start_index,
+                    sampling_locations,
+                    attention_weights,
+                    self.im2col_step,
+                    True,  # deterministic backward
+                )
+                if half_float:
+                    output = output.to(half_float)
             else:
+                # CPU fallback: deterministic pure-PyTorch path.
                 half_float = False
                 if value.dtype in [torch.float16, torch.bfloat16]:
                     half_float = value.dtype

@@ -13,7 +13,7 @@ import torch.nn.functional as F
 from torch.nn.init import xavier_uniform_, constant_
 
 from nvidia_tao_pytorch.cv.deformable_detr.model.ops.functions import MSDeformAttnFunction, load_ops
-from nvidia_tao_pytorch.cv.deformable_detr.model.ops.modules import _is_power_of_2, multi_scale_deformable_attn_pytorch
+from nvidia_tao_pytorch.cv.deformable_detr.model.ops.modules import _is_power_of_2, multi_scale_deformable_attn_pytorch, precise_msda_enabled
 
 
 class MSDeformAttn(nn.Module):
@@ -129,7 +129,10 @@ class MSDeformAttn(nn.Module):
                     value, input_spatial_shapes, sampling_locations, attention_weights
                 )
         else:
-            if torch.cuda.is_available() and value.is_cuda:
+            # precise_msda routes CUDA tensors through the deterministic ("precise")
+            # MSDeformAttn kernel below (the custom CUDA op's atomicAdd backward is
+            # non-deterministic).
+            if torch.cuda.is_available() and value.is_cuda and not precise_msda_enabled():
                 # For mixed precision training
                 if value.dtype == torch.float16:
                     output = MSDeformAttnFunction.apply(
@@ -141,9 +144,28 @@ class MSDeformAttn(nn.Module):
                     output = MSDeformAttnFunction.apply(
                         value, input_spatial_shapes, input_level_start_index,
                         sampling_locations, attention_weights, self.im2col_step)
+            elif torch.cuda.is_available() and value.is_cuda:
+                # precise_msda + CUDA: fast deterministic KERNEL (fixed-point int
+                # atomics in the backward). Fused-speed forward + bitwise-reproducible
+                # backward.
+                half_float = False
+                if value.dtype in [torch.float16, torch.bfloat16]:
+                    half_float = value.dtype
+                    value = value.float()
+                    sampling_locations = sampling_locations.float()
+                    attention_weights = attention_weights.float()
+
+                output = MSDeformAttnFunction.apply(
+                    value, input_spatial_shapes, input_level_start_index,
+                    sampling_locations, attention_weights, self.im2col_step, True)  # deterministic backward
+
+                if half_float:
+                    output = output.to(half_float)
             else:
                 # CPU implementation of multi-scale deformable attention
-                output = multi_scale_deformable_attn_pytorch(value, input_spatial_shapes, sampling_locations, attention_weights)
+                output = multi_scale_deformable_attn_pytorch(
+                    value, input_spatial_shapes, sampling_locations, attention_weights,
+                    deterministic=precise_msda_enabled())
 
         output = output.view(N, Len_q, int(self.d_model * self.ratio))
         output = self.output_proj(output)

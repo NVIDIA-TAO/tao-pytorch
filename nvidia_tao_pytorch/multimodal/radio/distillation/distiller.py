@@ -106,6 +106,12 @@ class MultiTeacherDistiller(Distiller):
         self.register_buffer(
             "_student_std", torch.tensor(OPENAI_CLIP_STD).view(1, 3, 1, 1)
         )
+        # Best-checkpoint default: monitor kNN top-1 probe accuracy (logged as "knn_top1"
+        # in on_validation_epoch_end). Set after super().__init__ so it is not overwritten.
+        # Note: knn_top1 is only logged when kNN eval runs; otherwise pass an explicit
+        # train.checkpointer.monitor.
+        self.monitor_metric = "knn_top1"
+        self.monitor_mode = "max"
 
     def configure_callbacks(self) -> Sequence[Callback] | pl.Callback:
         """Configures logging and checkpoint-saving callbacks"""
@@ -163,6 +169,10 @@ class MultiTeacherDistiller(Distiller):
             enable_version_counter=False,
         )
         callbacks.append(checkpoint_callback)
+        # Best-checkpoint saving (additive by default, or replacing the periodic
+        # callback when train.checkpointer.replace_periodic is enabled).
+        # This module overrides configure_callbacks without super(), so call the shared helper.
+        callbacks = self._configure_best_checkpoint(callbacks, results_dir)
         return callbacks
 
     def _parse_teacher_configs(self):

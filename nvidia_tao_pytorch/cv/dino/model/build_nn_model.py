@@ -10,6 +10,7 @@ from nvidia_tao_pytorch.cv.dino.model.deformable_transformer import DeformableTr
 from nvidia_tao_pytorch.cv.dino.model.dino import DINO
 
 from nvidia_tao_pytorch.cv.dino.model.position_encoding import PositionEmbeddingSineHW, PositionEmbeddingSineHWExport
+from nvidia_tao_pytorch.cv.deformable_detr.model.ops.modules import set_precise_msda
 
 
 class DINOModel(nn.Module):
@@ -261,6 +262,9 @@ def build_model(experiment_config,
         model (nn.Module): DINO model.
     """
     model_config = experiment_config.model
+    # Opt-in deterministic MSDeformAttn path (no-op unless precise_msda=True).
+    set_precise_msda(getattr(model_config, "precise_msda", False))
+
     dataset_config = experiment_config.dataset
     num_classes = dataset_config.num_classes
     backbone = model_config.backbone
