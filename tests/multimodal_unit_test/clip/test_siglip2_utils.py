@@ -11,6 +11,53 @@ from nvidia_tao_pytorch.multimodal.clip.model.transforms import SigLIP2ImageTran
 
 
 @pytest.mark.multimodal_unit
+class TestSigLIP2BackboneVersions:
+    """Test SigLIP2 backbone version resolution without model downloads."""
+
+    def test_supported_hf_versions_are_mapped(self, monkeypatch):
+        """Test that full SigLIP2 release names resolve to the right HF repos."""
+        from nvidia_tao_pytorch.cv.backbone_v2 import siglip2 as siglip2_module
+
+        seen_sources = []
+        seen_wrapper_args = []
+
+        def fake_from_pretrained(source, trust_remote_code):
+            seen_sources.append((source, trust_remote_code))
+            return object()
+
+        class DummyProcessor:
+            pass
+
+        class DummyWrapper:
+            def __init__(
+                self, model, tokenizer, num_classes, is_dynamic, patch_size
+            ):
+                seen_wrapper_args.append((num_classes, is_dynamic, patch_size))
+
+        monkeypatch.setattr(
+            siglip2_module.AutoModel, "from_pretrained", fake_from_pretrained
+        )
+        monkeypatch.setattr(
+            siglip2_module.AutoProcessor,
+            "from_pretrained",
+            lambda source, trust_remote_code: DummyProcessor(),
+        )
+        monkeypatch.setattr(siglip2_module, "SigLIP2Wrapper", DummyWrapper)
+
+        siglip2_module.get_siglip2_model("siglip2-so400m-patch14-224")
+        siglip2_module.get_siglip2_model("siglip2-so400m-patch16-naflex")
+
+        assert seen_sources == [
+            ("google/siglip2-so400m-patch14-224", True),
+            ("google/siglip2-so400m-patch16-naflex", True),
+        ]
+        assert seen_wrapper_args == [
+            (0, False, 14),
+            (0, True, 16),
+        ]
+
+
+@pytest.mark.multimodal_unit
 class TestSigLIP2ImageTransform:
     """Test SigLIP2ImageTransform class."""
 
@@ -105,3 +152,53 @@ class TestBuildSigLIP2ModelValidation:
         # Error should mention available models
         for model_name in siglip2_model_configs.keys():
             assert model_name in str(exc_info.value)
+
+
+@pytest.mark.multimodal_unit
+class TestBatchHardTripletLoss:
+    """Test auxiliary batch-hard image-text triplet loss."""
+
+    def test_single_sample_batch_returns_zero(self):
+        """Single-sample batches have no negatives, so loss is zero."""
+        from nvidia_tao_pytorch.multimodal.clip.model.pl_clip_model import (
+            _batch_hard_image_text_triplet_loss,
+        )
+
+        image_features = torch.tensor([[1.0, 0.0]])
+        text_features = torch.tensor([[1.0, 0.0]])
+
+        loss = _batch_hard_image_text_triplet_loss(
+            image_features, text_features, margin=0.2
+        )
+
+        assert loss.item() == 0.0
+
+    def test_separated_pairs_have_zero_loss(self):
+        """Perfectly aligned orthogonal pairs satisfy the margin."""
+        from nvidia_tao_pytorch.multimodal.clip.model.pl_clip_model import (
+            _batch_hard_image_text_triplet_loss,
+        )
+
+        image_features = torch.eye(3)
+        text_features = torch.eye(3)
+
+        loss = _batch_hard_image_text_triplet_loss(
+            image_features, text_features, margin=0.2
+        )
+
+        assert torch.isclose(loss, torch.tensor(0.0))
+
+    def test_swapped_pairs_have_positive_loss(self):
+        """Swapped pairs make negatives more similar than positives."""
+        from nvidia_tao_pytorch.multimodal.clip.model.pl_clip_model import (
+            _batch_hard_image_text_triplet_loss,
+        )
+
+        image_features = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+        text_features = torch.tensor([[0.0, 1.0], [1.0, 0.0]])
+
+        loss = _batch_hard_image_text_triplet_loss(
+            image_features, text_features, margin=0.2
+        )
+
+        assert loss.item() > 0.0

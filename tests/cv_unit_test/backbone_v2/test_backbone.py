@@ -15,6 +15,7 @@ from nvidia_tao_pytorch.cv.backbone_v2 import (
     convnext,
     convnext_v2,
     dino_v2,
+    dino_v3,
     efficientvit,
     fan,
     fastervit,
@@ -55,6 +56,18 @@ TEST_TOPOLOGIES = [
         ),
         id="vit_large_patch14_dinov2_swiglu",
     ),
+    # DINOV3.
+    pytest.param(
+        (
+            dino_v3.dinov3_vitb16,
+            "dinov3_base_lvd1689m.safetensors",  # From TIMM.
+            (1, 768),
+            [0.4872, 0.5306, 0.9414, -0.0965, -0.2063],
+        ),
+        id="dinov3_vitb16",
+    ),
+    pytest.param((dino_v3.dinov3_vits16, None, None, None), id="dinov3_vits16"),
+    pytest.param((dino_v3.dinov3_vits16plus, None, None, None), id="dinov3_vits16plus"),
     # EfficientViT.
     pytest.param((efficientvit.efficientvit_b0, None, None, None), id="efficientvit_b0"),
     pytest.param((efficientvit.efficientvit_l0, None, None, None), id="efficientvit_l0"),
@@ -178,6 +191,25 @@ LARGE_BACKBONES = [
     # DINOV2.
     pytest.param(
         (dino_v2.vit_giant_patch14_reg4_dinov2_swiglu, None, None, None), id="vit_giant_patch14_reg4_dinov2_swiglu"
+    ),
+    # DINOV3.
+    pytest.param(
+        (
+            dino_v3.dinov3_vith16plus,
+            "dinov3_huge_plus_lvd1689m.safetensors",  # From TIMM.
+            (1, 1280),
+            [-0.1892, 0.0466, 0.1439, 0.2925, 0.0699],
+        ),
+        id="dinov3_vith16plus",
+    ),
+    pytest.param(
+        (
+            dino_v3.dinov3_vit7b16,
+            None,
+            (1, 4096),
+            None,
+        ),
+        id="dinov3_vit7b16",
     ),
     # RADIO.
     pytest.param(

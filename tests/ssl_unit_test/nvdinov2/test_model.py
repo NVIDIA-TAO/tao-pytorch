@@ -58,3 +58,35 @@ def test_nvdionv2_model(_test_batch):
             teacher_dino_centered=teacher_dino_centered,
             teacher_ibot_centered=teacher_ibot_centered,
         )
+
+
+requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA GPU")
+
+
+@requires_cuda
+@pytest.mark.ssl_unit
+def test_nvdinov2_attention_fallback_fp16_finite_under_overflow():
+    """The shared non-xformers fallback (used on Blackwell) stays finite under 16-mixed autocast.
+
+    Regression for bug 6460915: with qk_norm=False and large-magnitude activations the fp16 score
+    matmul saturates to inf and softmax(inf)=NaN. The base MemoryEfficientAttention._fallback_attention
+    must compute the scores/softmax in fp32 so both nvdinov2 and dinov3 stay finite on Blackwell.
+    """
+    from nvidia_tao_pytorch.ssl.nvdinov2.model.layers.attention import MemoryEfficientAttention
+    torch.manual_seed(0)
+    attn = MemoryEfficientAttention(
+        dim=768, num_heads=12, qkv_bias=False, qk_norm=False, attn_drop=0.0, proj_drop=0.0,
+    ).cuda().eval()
+
+    x = torch.randn(2, 197, 768).cuda() * 256.0  # overflow-scale (stands in for pretrained magnitudes)
+
+    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+        out_bf16 = attn(x, use_custom_attention=False)
+    assert torch.isfinite(out_bf16.float()).all(), "bf16 control unexpectedly non-finite"
+
+    with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16):
+        out_fp16 = attn(x, use_custom_attention=False)
+    assert torch.isfinite(out_fp16.float()).all(), (
+        "fp16 (16-mixed) base fallback attention produced non-finite output -- the unnormalized QK "
+        "score matmul overflowed fp16 (65504) and softmax(inf)=NaN. Compute scores/softmax in fp32."
+    )

@@ -1,0 +1,11 @@
+[run]
+parallel = True
+source=
+## tao-pytorch
+    /usr/local/lib/python3.12/dist-packages/nvidia_tao_pytorch
+## tao-deploy
+    /usr/local/lib/python3.12/dist-packages/nvidia_tao_deploy
+## tao-dataservices
+    /usr/local/lib/python3.12/dist-packages/nvidia_tao_ds
+## tao-tf2
+    /usr/local/lib/python3.12/dist-packages/nvidia_tao_tf2

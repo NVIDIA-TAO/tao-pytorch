@@ -25,6 +25,8 @@ TEST_TOPOLOGIES = [
     ("vit_large_nvdinov2"),
     ("c_radio_p3_vit_huge_patch16_224_mlpnorm"),
     ("c_radio_v2_vit_base_patch16_224"),
+    ("vit_small_dinov3"),
+    ("vit_small_plus_dinov3"),
 ]
 TEST_TOPOLOGIES_CLASSIFICATION_PTM = [
     # classification_pyt, visual_changenet
