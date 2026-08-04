@@ -1,0 +1,15 @@
+name: Cherry-pick to release
+
+# Thin caller for the org-wide cherry-pick bot (logic in NVIDIA-TAO/.github).
+# Requires org-level secrets TAO_CHERRY_PICK_BOT_APP_ID / TAO_CHERRY_PICK_BOT_PRIVATE_KEY.
+on:
+  pull_request_target:
+    types: [closed]
+
+jobs:
+  cherry-pick:
+    if: >-
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.base.ref == 'main'
+    uses: NVIDIA-TAO/.github/.github/workflows/cherry-pick.yml@main
+    secrets: inherit
