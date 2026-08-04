@@ -3,18 +3,29 @@
 
 default_install_hook_types:
 - pre-commit
-- pre-push
+- commit-msg
 repos:
+- repo: https://github.com/trufflesecurity/trufflehog
+  rev: v3.96.0
+  hooks:
+  - id: trufflehog
+    name: TruffleHog secret scan
+    description: No credential may be committed.
+    entry: trufflehog filesystem --results=verified,unknown --fail --no-update
+    language: golang
+    pass_filenames: true
+    stages:
+    - pre-commit
 - repo: local
   hooks:
   - id: license-header
     name: license header
     description: Every source file must carry an SPDX license header.
-    entry: python3 .github/hooks/check_license_header.py
-    language: system
+    entry: python .github/hooks/check_license_header.py
+    language: python
     files: \.(py|sh)$
     stages:
-    - pre-push
+    - pre-commit
   - id: pylint
     name: pylint
     description: Static analysis, configured by .pylintrc.
@@ -24,7 +35,7 @@ repos:
     - python
     files: ^(nvidia_tao_pytorch/)
     stages:
-    - pre-push
+    - pre-commit
   - id: pydocstyle
     name: pydocstyle
     description: Docstring conventions.
@@ -34,7 +45,7 @@ repos:
     - python
     files: ^(nvidia_tao_pytorch/)
     stages:
-    - pre-push
+    - pre-commit
   - id: flake8
     name: flake8
     description: Style and lint checks.
@@ -44,4 +55,11 @@ repos:
     - python
     files: ^(nvidia_tao_pytorch/)
     stages:
-    - pre-push
+    - pre-commit
+  - id: dco-signoff
+    name: DCO sign-off check
+    description: Every commit must carry a Developer Certificate of Origin sign-off.
+    entry: python .github/hooks/check_dco_signoff.py
+    language: python
+    stages:
+    - commit-msg

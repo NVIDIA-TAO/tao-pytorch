@@ -3,12 +3,16 @@
 
 # Git hooks
 
-`pre-push` checks the files your push adds or modifies:
+Scripts run by [pre-commit](https://pre-commit.com). The hook list lives in
+`.pre-commit-config.yaml` at the repository root.
 
-- **License headers** — every changed `.py` and `.sh` file must carry an SPDX
-  header (`check_license_header.py`).
-- **pylint**, **pydocstyle**, **flake8** — static analysis of changed Python
-  files under the package source.
+- `check_license_header.py` — every changed `.py` and `.sh` file must carry an
+  SPDX header. Runs at the `pre-commit` stage.
+- `check_dco_signoff.py` — every commit message must carry a `Signed-off-by`
+  trailer. Runs at the `commit-msg` stage.
+
+pylint, pydocstyle and flake8 run at the `pre-commit` stage as well, on changed
+Python files under the package source.
 
 ## Enable
 
@@ -16,8 +20,11 @@ Git does not enable repository-tracked hooks automatically. Run this once per
 clone:
 
 ```bash
-git config core.hooksPath .github/hooks
+pip install pre-commit
+pre-commit install
 ```
+
+`pre-commit install` wires up both the `pre-commit` and `commit-msg` hook types.
 
 Install the linters if you do not have them:
 
@@ -25,19 +32,27 @@ Install the linters if you do not have them:
 pip install pylint pydocstyle flake8
 ```
 
-## Bypass
+### Migrating from the old pre-push hook
 
-The hook is a local convenience check, not an enforcement gate. To skip it for
-one push:
+Earlier revisions shipped a `pre-push` script enabled with `git config
+core.hooksPath .github/hooks`. That script has been removed and its checks now
+run at commit time. `core.hooksPath` overrides `.git/hooks`, which is where
+`pre-commit install` writes, so unset it or the new hooks will never run:
 
 ```bash
-git push --no-verify
-# or
-SKIP_LINT=1 git push
+git config --unset core.hooksPath
+pre-commit install
+```
+
+## Bypass
+
+To skip the checks for one commit:
+
+```bash
+git commit --no-verify
 ```
 
 ## Configuration
 
-pylint reads `.pylintrc` at the repository root. The pydocstyle and flake8
-ignore lists live at the top of `pre-push`, alongside the list of file suffixes
-that require a license header.
+Hook definitions, tool arguments and file scopes live in
+`.pre-commit-config.yaml`. pylint reads `.pylintrc` at the repository root.

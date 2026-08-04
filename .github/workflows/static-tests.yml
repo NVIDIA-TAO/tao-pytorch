@@ -1,0 +1,35 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Static Tests
+
+on:
+  pull_request:
+
+jobs:
+  static-tests:
+    name: Static Tests (lint, docstrings, license headers)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install pre-commit and linters
+        run: pip install pre-commit pylint pydocstyle flake8
+
+      - name: Run pre-commit on the pull request's changed files
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          SKIP: trufflehog
+        run: |
+          set -euo pipefail
+          BASE="$(git merge-base "${BASE_SHA}" HEAD)"
+          pre-commit run --from-ref "${BASE}" --to-ref HEAD --show-diff-on-failure

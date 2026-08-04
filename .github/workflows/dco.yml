@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: DCO
+
+on:
+  pull_request:
+
+jobs:
+  dco:
+    name: DCO Sign-off
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Check DCO sign-off
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          BASE="$(git merge-base "${BASE_SHA}" HEAD)"
+          COMMITS="$(git rev-list --no-merges "${BASE}..HEAD")"
+          if [ -z "${COMMITS}" ]; then
+            echo "No commits to check."
+            exit 0
+          fi
+          echo "Checking $(echo "${COMMITS}" | wc -l) commit(s)."
+          failed=0
+          for sha in ${COMMITS}; do
+            git log -1 --format=%B "${sha}" > commit-msg.txt
+            if ! python3 .github/hooks/check_dco_signoff.py commit-msg.txt >/dev/null; then
+              echo "FAIL: ${sha} $(git log -1 --format=%s "${sha}")"
+              failed=1
+            fi
+          done
+          rm -f commit-msg.txt
+          if [ "${failed}" -ne 0 ]; then
+            echo
+            echo "All commits must include a Signed-off-by line."
+            echo "Use:    git commit -s -m 'your message'"
+            echo "Amend:  git commit --amend -s --no-edit"
+            echo "Older:  git rebase --signoff ${BASE_SHA}"
+            exit 1
+          fi
+          echo "OK: all commits have DCO sign-off."
