@@ -1,0 +1,55 @@
+<svg viewBox="0 0 980 420" xmlns="http://www.w3.org/2000/svg" font-family="Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arr2" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+      <path d="M0,0 L10,4 L0,8 z" fill="#555"/>
+    </marker>
+  </defs>
+
+  <text x="490" y="30" text-anchor="middle" font-size="18" font-weight="bold" fill="#222">DINOv3 LoRA — Merge &amp; Export (zero deploy overhead)</text>
+
+  <!-- SSL checkpoint -->
+  <rect x="40" y="80" width="220" height="130" rx="10" fill="#e3f2fd" stroke="#1565c0" stroke-width="2"/>
+  <text x="150" y="106" text-anchor="middle" font-size="13" font-weight="bold" fill="#0d47a1">SSL checkpoint</text>
+  <text x="150" y="126" text-anchor="middle" font-size="11" fill="#333">teacher_*.pth / student_*.pth</text>
+  <rect x="58" y="138" width="184" height="26" rx="5" fill="#bbdefb" stroke="#1565c0"/>
+  <text x="150" y="156" text-anchor="middle" font-size="11" fill="#0d47a1">base keys (unchanged names)</text>
+  <rect x="58" y="170" width="184" height="26" rx="5" fill="#c8e6c9" stroke="#2e7d32"/>
+  <text x="150" y="188" text-anchor="middle" font-size="11" fill="#1b5e20">lora_A / lora_B keys</text>
+
+  <!-- Merge -->
+  <rect x="340" y="95" width="240" height="100" rx="10" fill="#fff3e0" stroke="#e65100" stroke-width="2"/>
+  <text x="460" y="122" text-anchor="middle" font-size="13" font-weight="bold" fill="#bf360c">merge_lora_state_dict()</text>
+  <text x="460" y="148" text-anchor="middle" font-size="12" fill="#333">W ← W + (α / r) · B @ A</text>
+  <text x="460" y="170" text-anchor="middle" font-size="11" fill="#666">drop lora_* keys · fp32 fold</text>
+
+  <!-- Merged -->
+  <rect x="660" y="95" width="200" height="100" rx="10" fill="#e8f5e9" stroke="#2e7d32" stroke-width="2"/>
+  <text x="760" y="125" text-anchor="middle" font-size="13" font-weight="bold" fill="#1b5e20">merged backbone</text>
+  <text x="760" y="147" text-anchor="middle" font-size="11" fill="#333">architecturally identical</text>
+  <text x="760" y="165" text-anchor="middle" font-size="11" fill="#333">to stock DINOv3</text>
+
+  <!-- Consumers -->
+  <rect x="400" y="280" width="240" height="90" rx="10" fill="#ede7f6" stroke="#5e35b1" stroke-width="2"/>
+  <text x="520" y="306" text-anchor="middle" font-size="13" font-weight="bold" fill="#4527a0">dinov3 convert</text>
+  <text x="520" y="326" text-anchor="middle" font-size="11" fill="#333">convert_ssl_to_timm (unchanged)</text>
+  <text x="520" y="344" text-anchor="middle" font-size="11" fill="#333">→ backbone_v2 / downstream tasks</text>
+  <text x="520" y="362" text-anchor="middle" font-size="10" fill="#666">validate vs fresh timm model ✓</text>
+
+  <rect x="700" y="280" width="240" height="90" rx="10" fill="#ede7f6" stroke="#5e35b1" stroke-width="2"/>
+  <text x="820" y="306" text-anchor="middle" font-size="13" font-weight="bold" fill="#4527a0">dinov3 export (ONNX)</text>
+  <text x="820" y="326" text-anchor="middle" font-size="11" fill="#333">module.merge() before trace</text>
+  <text x="820" y="344" text-anchor="middle" font-size="11" fill="#333">→ tao-deploy gen_trt_engine</text>
+  <text x="820" y="362" text-anchor="middle" font-size="10" fill="#666">stock DINOv3 graph, no LoRA ops</text>
+
+  <!-- Parity test note -->
+  <rect x="40" y="280" width="280" height="90" rx="10" fill="#fafafa" stroke="#999" stroke-dasharray="6,3"/>
+  <text x="180" y="308" text-anchor="middle" font-size="12" font-weight="bold" fill="#333">Correctness gate (unit test)</text>
+  <text x="180" y="330" text-anchor="middle" font-size="11" fill="#333">forward(merged) ≈ forward(base + LoRA)</text>
+  <text x="180" y="350" text-anchor="middle" font-size="11" fill="#666">fp32 tolerance ≤ 1e-5</text>
+
+  <!-- Arrows -->
+  <line x1="260" y1="145" x2="340" y2="145" stroke="#555" stroke-width="1.5" marker-end="url(#arr2)"/>
+  <line x1="580" y1="145" x2="660" y2="145" stroke="#555" stroke-width="1.5" marker-end="url(#arr2)"/>
+  <line x1="730" y1="195" x2="560" y2="280" stroke="#555" stroke-width="1.5" marker-end="url(#arr2)"/>
+  <line x1="790" y1="195" x2="820" y2="280" stroke="#555" stroke-width="1.5" marker-end="url(#arr2)"/>
+</svg>
