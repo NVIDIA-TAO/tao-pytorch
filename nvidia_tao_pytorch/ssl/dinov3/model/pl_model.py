@@ -32,7 +32,12 @@ from nvidia_tao_pytorch.ssl.nvdinov2.model.head import DinoHead
 from nvidia_tao_pytorch.ssl.nvdinov2.model.loss import DinoV2Loss
 from nvidia_tao_pytorch.ssl.nvdinov2.model.pl_model import DinoV2PlModel
 from nvidia_tao_pytorch.ssl.dinov3.model.vit import DinoV3VisionTransformer, SwiGLUFusedFull
-from nvidia_tao_pytorch.ssl.dinov3.model.loss import GramLoss
+from nvidia_tao_pytorch.ssl.dinov3.model.loss import GramLoss, ClsPreservationLoss
+from nvidia_tao_pytorch.ssl.dinov3.model.lora import (
+    inject_lora,
+    lora_parameter_report,
+    strip_lora_keys,
+)
 from nvidia_tao_pytorch.ssl.dinov3.utils.checkpoint_remap import (
     TAO_ONLY_KEYS,
     fuse_timm_swiglu_fc1,
@@ -91,15 +96,144 @@ class DinoV3PlModel(DinoV2PlModel):
                 centering_method=centering_method,
             )
 
-        # Gram anchoring (DINOv3). The frozen Gram teacher is constructed in _build_model
-        # when enabled; sync it from the (now teacher==student) weights here so it is
-        # consistent even when no pretrained checkpoint is supplied. When a pretrained
-        # checkpoint is loaded, restore_pretrained_weights re-syncs it from the loaded
-        # teacher (the intended provenance for continual pre-training).
+        # Gram anchoring (DINOv3). The frozen anchor teacher is constructed in _build_model
+        # when Gram anchoring or CLS preservation is enabled; sync it from the (now
+        # teacher==student) weights here so it is consistent even when no pretrained
+        # checkpoint is supplied. When a pretrained checkpoint is loaded,
+        # restore_pretrained_weights re-syncs it from the loaded teacher (the intended
+        # provenance for continual pre-training).
         if getattr(self, 'gram_teacher', None) is not None:
             self._sync_gram_teacher()
         # Tracks the last global step the Gram teacher was EMA-refreshed (Phase 1 high-res).
         self._gram_last_refresh_step = -1
+
+        # LoRA is injected later (train.py, after restore_pretrained_weights and before
+        # trainer.fit). The guardrails were already checked at the top of _build_model.
+        self._lora_injected = False
+
+    @property
+    def preservation_config(self):
+        """CLS-preservation sub-config, tolerating specs built before it existed.
+
+        Returns:
+            PreservationConfig | None: The block, or ``None`` if absent from the spec.
+        """
+        return getattr(self.model_config, "preservation", None)
+
+    def _preservation_enabled(self):
+        """Whether CLS-token preservation is switched on.
+
+        Returns:
+            bool: True when the ``preservation`` block exists and is enabled.
+        """
+        preservation = self.preservation_config
+        return bool(preservation is not None and preservation.enable)
+
+    def _validate_lora_config(self):
+        """Assert the LoRA guardrails from the design doc (v1 scope).
+
+        LoRA is incompatible with three things in v1:
+
+        * ``distill.enable`` -- distillation adds a third ``student_ema`` ViT and loads a
+          teacher from a non-distill checkpoint; the injection lifecycle is unverified there.
+        * ``gram.teacher_source='ema'`` -- refreshing the anchor from the drifting EMA teacher
+          defeats the point of preservation (and would re-anchor to LoRA-adapted weights).
+        * FSDP -- flat-param wrapping of mostly-frozen modules needs ``use_orig_params=True``;
+          deferred. LoRA's optimizer state is tiny, so DDP is sufficient for ViT-B/L.
+
+        Raises:
+            AssertionError: If ``lora.enable`` is combined with any of the above.
+        """
+        lora_cfg = getattr(self.model_config, "lora", None)
+        if lora_cfg is None or not lora_cfg.enable:
+            return
+
+        assert not self.model_config.distill.enable, (
+            "model.lora.enable is not supported together with model.distill.enable in v1. "
+            "Distillation builds an extra student_ema backbone whose LoRA injection lifecycle "
+            "is not covered; run LoRA continual pre-training without distillation."
+        )
+        assert self.model_config.gram.teacher_source != "ema", (
+            "model.lora.enable requires model.gram.teacher_source='pretrained'. An EMA-refreshed "
+            "anchor tracks the drifting teacher, which defeats preservation -- the frozen "
+            "pretrained weights are the only exogenous anchor in the system."
+        )
+
+        strategy = os.environ.get(
+            "DINOV3_STRATEGY", getattr(self.train_config, "distributed_strategy", "auto")
+        ).lower()
+        assert strategy != "fsdp", (
+            "model.lora.enable is not supported with train.distributed_strategy='fsdp' in v1 "
+            "(FSDP flat-param wrapping of mostly-frozen modules needs use_orig_params=True). "
+            "Use 'auto' or 'ddp' -- LoRA's optimizer state is tiny, so DDP fits comfortably."
+        )
+
+    def inject_lora_adapters(self):
+        """Inject LoRA into the student and EMA-teacher backbones. No-op unless enabled.
+
+        Called from the train script **after** ``restore_pretrained_weights`` (so the loader
+        sees stock keys) and **before** ``trainer.fit`` (so Lightning resume checkpoints and
+        any distributed wrapping see the final module tree).
+
+        Three invariants are established here:
+
+        * **EMA zip alignment** -- the student and teacher are injected with identical
+          arguments, so ``update_teacher``'s element-wise ``zip`` of ``parameters()`` stays
+          aligned (gate G1.3).
+        * **Teacher starts equal to the student** -- ``lora_A`` is randomly initialized, so the
+          two backbones would otherwise disagree at step 0 and the teacher's adapter would not
+          be an EMA of the student's. The student's backbone state is mirrored into the
+          teacher after injection to guarantee equality (gate G2.4).
+        * **Teacher stays frozen** -- newly created adapter parameters default to
+          ``requires_grad=True``; the teacher's are switched off again (it is EMA-updated,
+          never gradient-updated).
+
+        The frozen anchor (Gram) teacher deliberately receives no LoRA: it anchors to the
+        pretrained weights, which under LoRA are exactly the frozen base weights.
+
+        Returns:
+            dict | None: The trainable-parameter report, or ``None`` when LoRA is disabled.
+        """
+        lora_cfg = getattr(self.model_config, "lora", None)
+        if lora_cfg is None or not lora_cfg.enable:
+            return None
+        if self._lora_injected:
+            return None
+
+        self._validate_lora_config()
+
+        target_modules = list(lora_cfg.target_modules)
+        kwargs = dict(
+            rank=lora_cfg.rank,
+            alpha=lora_cfg.alpha,
+            dropout=lora_cfg.dropout,
+            target_modules=target_modules,
+            num_last_blocks=lora_cfg.num_last_blocks,
+            freeze_base=True,
+        )
+
+        injected = inject_lora(self.student.backbone, **kwargs)
+        inject_lora(self.teacher.backbone, **kwargs)
+
+        # Mirror the student's backbone (base + freshly initialized adapters) into the teacher
+        # so both start identical; otherwise the teacher's random lora_A would make its EMA
+        # trajectory meaningless.
+        self.teacher.backbone.load_state_dict(self.student.backbone.state_dict())
+
+        # The teacher is EMA-updated, never gradient-updated.
+        for param in self.teacher.parameters():
+            param.requires_grad = False
+
+        self._lora_injected = True
+
+        if get_global_rank() == 0:
+            logging.info(
+                f"LoRA injected into {len(injected)} modules per backbone "
+                f"(rank={lora_cfg.rank}, alpha={lora_cfg.alpha}, dropout={lora_cfg.dropout}, "
+                f"targets={target_modules}, "
+                f"num_last_blocks={lora_cfg.num_last_blocks or 'all'})."
+            )
+        return lora_parameter_report(self.student, name="student (LoRA)")
 
     def _resolve_arch(self, backbone_type):
         """Look up DINOv3 ViT hyper-parameters for a backbone type from the v3 param map.
@@ -180,6 +314,11 @@ class DinoV3PlModel(DinoV2PlModel):
         attributes are re-derived here from the v3 param map so they are self-consistent
         regardless of the (nvdinov2) param map the parent ``__init__`` read.
         """
+        # Validate the LoRA guardrails before anything is constructed, so an unsupported
+        # combination reports *its own* reason rather than tripping a downstream assert
+        # (e.g. distillation's missing-checkpoint check) first.
+        self._validate_lora_config()
+
         # Re-derive dims from the v3 (patch-16) param map.
         student_arch = self._resolve_arch(self.student_backbone_type)
         teacher_arch = self._resolve_arch(self.teacher_backbone_type)
@@ -225,24 +364,33 @@ class DinoV3PlModel(DinoV2PlModel):
                 f"student_type is {self.student_backbone_type}."
             )
 
-        # Gram anchoring: build a separate frozen Gram teacher (a copy of the teacher
-        # backbone) when enabled. It is intentionally NOT placed inside self.teacher /
-        # self.student (so the parent's FSDP wrapping and CustomModelCheckpoint, which act on
-        # those ModuleDicts, leave it alone) and never receives gradients or EMA updates.
-        # Its weights are (re)synced from the teacher by _sync_gram_teacher.
-        if self.model_config.gram.enable:
+        # Preservation: build a separate frozen *anchor* teacher (a copy of the teacher
+        # backbone) when Gram anchoring OR CLS preservation is enabled -- both terms read the
+        # same single anchor forward, so one module serves both. It is intentionally NOT
+        # placed inside self.teacher / self.student (so the parent's FSDP wrapping and
+        # CustomModelCheckpoint, which act on those ModuleDicts, leave it alone) and never
+        # receives gradients, EMA updates, or LoRA adapters. Its weights are (re)synced from
+        # the teacher by _sync_gram_teacher.
+        if self.model_config.gram.enable or self._preservation_enabled():
             self.gram_teacher = self._make_backbone(teacher_arch)
             for param in self.gram_teacher.parameters():
                 param.requires_grad = False
             self.gram_teacher.eval()
             self.gram_loss = GramLoss()
+            self.cls_preservation_loss = ClsPreservationLoss()
 
     def _sync_gram_teacher(self):
-        """Copy the current teacher backbone weights into the frozen Gram teacher.
+        """Copy the current teacher backbone weights into the frozen anchor teacher.
 
         Called once at construction (teacher == student) and again after a pretrained
-        checkpoint is loaded (``restore_pretrained_weights``), so the Gram teacher always
+        checkpoint is loaded (``restore_pretrained_weights``), so the anchor teacher always
         anchors to the same DINOv3 weights the run starts from.
+
+        Under LoRA the teacher backbone carries ``lora_A``/``lora_B`` keys that the anchor
+        teacher (deliberately un-injected) does not have. They are filtered out before the
+        load; because the LoRA design is key-preserving, what remains is exactly the anchor
+        teacher's key set, and those base tensors are the frozen pretrained originals. So
+        this stays a strict load and the anchor provably cannot drift (gate G1.6).
         """
         teacher_backbone = self.teacher.backbone
         if isinstance(teacher_backbone, FSDP):
@@ -258,6 +406,16 @@ class DinoV3PlModel(DinoV2PlModel):
                 state_dict = teacher_backbone.state_dict()
         else:
             state_dict = teacher_backbone.state_dict()
+
+        # Drop LoRA adapter keys (absent from the un-injected anchor teacher); the remaining
+        # base keys must cover it exactly.
+        state_dict = strip_lora_keys(state_dict)
+        anchor_keys = set(self.gram_teacher.state_dict())
+        missing = anchor_keys - set(state_dict)
+        assert not missing, (
+            f"Anchor (Gram) teacher sync is missing base keys after LoRA filtering: {sorted(missing)}"
+        )
+
         self.gram_teacher.load_state_dict(state_dict)
         for param in self.gram_teacher.parameters():
             param.requires_grad = False
@@ -545,25 +703,55 @@ class DinoV3PlModel(DinoV2PlModel):
         if getattr(self, 'gram_teacher', None) is not None:
             self._sync_gram_teacher()
 
-    def _extra_losses(self, **ctx):
-        """Inject the DINOv3 Gram-anchoring loss into the inherited student_forward.
+    def _log_loss(self, name, value):
+        """Log a scalar loss/diagnostic under the run's standard step-logging settings.
 
-        Returns an empty list (matching the DINOv2 base) unless Gram anchoring is enabled,
-        the frozen Gram teacher has been built, and the global step has reached
-        ``gram.start_step``. Otherwise it runs the frozen Gram teacher on the global crops and
-        returns ``[w_gram * GramLoss(student_patches, teacher_patches)]``.
+        Args:
+            name (str): Scalar name (e.g. ``losses/cls_mse``).
+            value (torch.Tensor): Scalar value.
+        """
+        self.log(
+            name,
+            value,
+            on_step=True,
+            on_epoch=False,
+            prog_bar=False,
+            logger=True,
+            batch_size=self.batch_size,
+        )
+
+    def _extra_losses(self, **ctx):
+        """Inject the DINOv3 preservation losses into the inherited student_forward.
+
+        Two terms, both measured against the **same single forward** of the frozen anchor
+        teacher (its output dict carries ``x_norm_clstoken`` alongside ``x_norm_patchtokens``,
+        so CLS preservation costs no extra teacher pass):
+
+        * **Gram anchoring** -- MSE between student and anchor patch-cosine Gram matrices,
+          preserving the dense/patch geometry. Gated on ``gram.enable`` and ``gram.start_step``.
+        * **CLS preservation** -- MSE + cosine distance between student and anchor CLS tokens,
+          preserving the global embedding geometry that k-NN/linear-probe/retrieval consume.
+          Gated on ``preservation.enable``.
+
+        Both are logged unconditionally when active (even at weight 0) so they double as drift
+        diagnostics. Returns an empty list -- matching the DINOv2 base, hence unchanged
+        numerics -- when neither term is active.
 
         Args:
             **ctx: Context forwarded from ``DinoV2PlModel.student_forward`` (global/local
                 crops, masks, and the student global/local backbone outputs).
 
         Returns:
-            list: ``[weighted_gram_loss]`` when active, else ``[]``.
+            list: Weighted extra loss tensors to add to the total, possibly empty.
         """
         gram_cfg = self.model_config.gram
-        if not gram_cfg.enable or getattr(self, 'gram_teacher', None) is None:
+        preservation_cfg = self.preservation_config
+
+        gram_active = gram_cfg.enable and self.global_step >= gram_cfg.start_step
+        preservation_active = self._preservation_enabled()
+        if not (gram_active or preservation_active):
             return []
-        if self.global_step < gram_cfg.start_step:
+        if getattr(self, 'gram_teacher', None) is None:
             return []
 
         student_backbone_global_output = ctx.get("student_backbone_global_output")
@@ -574,21 +762,19 @@ class DinoV3PlModel(DinoV2PlModel):
         # Phase 1: EMA-refresh the Gram teacher on cadence (no-op when teacher_source != 'ema').
         self._maybe_refresh_gram_teacher()
 
-        student_patch_tokens = student_backbone_global_output["x_norm_patchtokens"]
-
         # Student patch grid (global crops are square; derive from the input + patch size).
         ps = self.patch_size
         student_grid = (global_crops.shape[-2] // ps, global_crops.shape[-1] // ps)
 
-        # Frozen Gram teacher: optionally at a higher resolution (gram.teacher_scale), no grad.
+        # Frozen anchor teacher: optionally at a higher resolution (gram.teacher_scale), no grad.
         # Force eval so stochastic depth / dropout stay off even though the parent is in train mode.
         scale = getattr(gram_cfg, "teacher_scale", 1.0) or 1.0
         self.gram_teacher.eval()
-        # The frozen Gram teacher lives outside the FSDP-wrapped student/teacher ModuleDicts, so
+        # The frozen anchor teacher lives outside the FSDP-wrapped student/teacher ModuleDicts, so
         # FSDP never places it on the sharding device — co-locate it with the input here (no-op
         # once moved / on single-GPU, where the module already follows the LightningModule). It
-        # then runs under the ambient autocast just like the student/teacher backbones (GramLoss
-        # upcasts to fp32 internally for the Gram product).
+        # then runs under the ambient autocast just like the student/teacher backbones (the
+        # preservation losses upcast to fp32 internally).
         if next(self.gram_teacher.parameters()).device != global_crops.device:
             self.gram_teacher.to(global_crops.device)
         with torch.no_grad():
@@ -598,19 +784,36 @@ class DinoV3PlModel(DinoV2PlModel):
                 )
             else:
                 teacher_input = global_crops
-            teacher_patch_tokens = self.gram_teacher(teacher_input)["x_norm_patchtokens"]
+            anchor_output = self.gram_teacher(teacher_input)
+            teacher_patch_tokens = anchor_output["x_norm_patchtokens"]
             # Pool the (higher-res) teacher grid back to the student grid before the Gram loss.
             teacher_grid = (teacher_input.shape[-2] // ps, teacher_input.shape[-1] // ps)
             teacher_patch_tokens = self._pool_tokens(teacher_patch_tokens, teacher_grid, student_grid)
 
-        gram_loss = self.gram_loss(student_patch_tokens, teacher_patch_tokens)
-        self.log(
-            "losses/gram_loss",
-            gram_loss,
-            on_step=True,
-            on_epoch=False,
-            prog_bar=False,
-            logger=True,
-            batch_size=self.batch_size,
-        )
-        return [gram_cfg.w_gram * gram_loss]
+        losses = []
+
+        if gram_active:
+            gram_loss = self.gram_loss(
+                student_backbone_global_output["x_norm_patchtokens"], teacher_patch_tokens
+            )
+            self._log_loss("losses/gram_loss", gram_loss)
+            losses.append(gram_cfg.w_gram * gram_loss)
+
+        if preservation_active:
+            # The CLS token is unaffected by the patch-grid pooling above, so it is read
+            # straight off the same anchor forward.
+            cls_mse, cls_cosine = self.cls_preservation_loss(
+                student_backbone_global_output["x_norm_clstoken"],
+                anchor_output["x_norm_clstoken"],
+            )
+            self._log_loss("losses/cls_mse", cls_mse)
+            self._log_loss("losses/cls_cos", cls_cosine)
+            # Drift diagnostic (gate G4.5): 1 - cls_cos is the mean cosine to the anchor.
+            self._log_loss("diagnostics/cls_anchor_cosine", 1.0 - cls_cosine)
+
+            if preservation_cfg.cls_mse_weight:
+                losses.append(preservation_cfg.cls_mse_weight * cls_mse)
+            if preservation_cfg.cls_cosine_weight:
+                losses.append(preservation_cfg.cls_cosine_weight * cls_cosine)
+
+        return losses
