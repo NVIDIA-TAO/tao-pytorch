@@ -364,8 +364,8 @@ class RandomTranslationTransform(RandomTransformBase):
             ])
         self.counter = (self.counter + 1) % self.batch_size
 
-        # EVFM uses a local variable here which is a latent bug for
-        # batch_size > 1; using self.translation is the intended behavior.
+        # Keep the sampled translation on the transform instance so
+        # batch_size > 1 reuses the intended value.
         trans_vec = torch.from_numpy(self.translation)
 
         for item in items:

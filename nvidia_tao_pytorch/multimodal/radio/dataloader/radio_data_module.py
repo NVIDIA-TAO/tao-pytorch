@@ -63,6 +63,61 @@ class RadioDataModule(pl.LightningDataModule):
         self._val_eval_loader = None
         self._val_train_split_loader = None
 
+    def _partitioned_layout(self, teachers):
+        """Resolve this rank's partition, teacher views, and local batch."""
+        distill_cfg = getattr(self.experiment_config, "distill", None)
+        enabled = bool(
+            distill_cfg is not None and
+            getattr(distill_cfg, "partitioned_ranks", False)
+        )
+        if not enabled:
+            return self.img_size, self.batch_size, list(range(len(teachers)))
+
+        if not torch.distributed.is_initialized():
+            raise RuntimeError(
+                "partitioned_ranks requires torch.distributed to be initialized "
+                "before the training dataloader is built"
+            )
+        world = torch.distributed.get_world_size()
+        rank = torch.distributed.get_rank()
+        num_partitions = int(
+            getattr(distill_cfg, "num_rank_partitions", 4) or 4
+        )
+        if num_partitions < 2 or world < num_partitions or world % num_partitions != 0:
+            raise ValueError(
+                "partitioned_ranks requires world_size divisible by "
+                f"num_rank_partitions; got world={world}, "
+                f"partitions={num_partitions}"
+            )
+
+        ranks_per_partition = world // num_partitions
+        partition = min(rank // ranks_per_partition, num_partitions - 1)
+        active = [
+            idx for idx, teacher in enumerate(teachers)
+            if int(getattr(teacher, "rank_partition", -1)) == partition
+        ]
+        if not active:
+            raise ValueError(
+                f"No teacher is assigned to rank partition {partition}"
+            )
+
+        batch_sizes = {
+            int(getattr(teachers[idx], "local_batch_size", 0))
+            for idx in active
+        }
+        if len(batch_sizes) != 1 or next(iter(batch_sizes)) <= 0:
+            raise ValueError(
+                "Every teacher in a rank partition must specify the "
+                f"same positive local_batch_size; partition={partition}, "
+                f"values={sorted(batch_sizes)}"
+            )
+        local_batch_size = next(iter(batch_sizes))
+        student_sizes = [
+            int(getattr(teachers[idx], "student_resolution", 0) or self.img_size)
+            for idx in active
+        ]
+        return max(student_sizes), local_batch_size, active
+
     def _build_wds_pipeline(self):
         """Build the equivariant WebDataset pipeline from experiment config.
 
@@ -96,7 +151,15 @@ class RadioDataModule(pl.LightningDataModule):
             workers=self.num_workers,
         )
 
-        student_size = self.img_size
+        distill = getattr(self.experiment_config, "distill", None)
+        teachers = []
+        if distill is not None:
+            teachers = getattr(distill, "teacher", [])
+            if teachers and not hasattr(teachers, '__len__'):
+                teachers = [teachers]
+
+        student_size, train_batch_size, teacher_view_indices = \
+            self._partitioned_layout(teachers)
         student_patch_size = int(self.augmentation.get("patch_size", 16))
 
         input_sizes = [student_size]
@@ -105,16 +168,13 @@ class RadioDataModule(pl.LightningDataModule):
         stochastic_teachers = []
         per_teacher_stochastic = []
 
-        distill = getattr(self.experiment_config, "distill", None)
-        teachers = []
-        if distill is not None:
-            teachers = getattr(distill, "teacher", [])
-            if teachers and not hasattr(teachers, '__len__'):
-                teachers = [teachers]
-
-        for t in teachers:
+        for teacher_idx in teacher_view_indices:
+            t = teachers[teacher_idx]
             match_student = getattr(t, "match_student_resolution", True)
             teacher_input = getattr(t, "input_size", student_size)
+            mosaic_outer = int(getattr(t, "mosaic_outer_size", 0) or 0)
+            if mosaic_outer > 0:
+                teacher_input = mosaic_outer
             if match_student:
                 input_sizes.append(student_size)
             else:
@@ -151,7 +211,7 @@ class RadioDataModule(pl.LightningDataModule):
             ds_listing=ds_listing,
             input_sizes=input_sizes,
             patch_sizes=patch_sizes,
-            batch_size=self.batch_size,
+            batch_size=train_batch_size,
             is_train=True,
             epoch=0,
             seed=seed,
@@ -166,6 +226,7 @@ class RadioDataModule(pl.LightningDataModule):
             include_dataset_source=include_dataset_source,
             aug_config=self.augmentation,
             native_resolution_filter=native_resolution_filter,
+            teacher_view_indices=teacher_view_indices,
         )
 
         return loader, shared_epoch, loader_state
@@ -238,6 +299,17 @@ class RadioDataModule(pl.LightningDataModule):
             train_cfg = self.dataset_config["train_dataset"]
             tar_sources = train_cfg.get("tar_data_sources", [])
             has_tar = len(tar_sources) > 0
+            distill_cfg = getattr(self.experiment_config, "distill", None)
+            if (
+                distill_cfg is not None and
+                getattr(distill_cfg, "partitioned_ranks", False) and
+                not has_tar
+            ):
+                raise ValueError(
+                    "partitioned_ranks requires "
+                    "train_dataset.tar_data_sources so rank-local views, "
+                    "batches, and deterministic shard partitioning are preserved"
+                )
 
             if has_tar:
                 self._train_loader, self._shared_epoch, self._loader_state = \

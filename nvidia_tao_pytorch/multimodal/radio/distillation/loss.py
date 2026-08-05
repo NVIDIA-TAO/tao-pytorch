@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Distillation Loss module for knowledge distillation."""
@@ -22,6 +22,14 @@ from nvidia_tao_pytorch.multimodal.radio.dataloader.transforms.generate_homograp
 from nvidia_tao_pytorch.multimodal.radio.distillation.hadamard import get_hadamard_matrix
 from nvidia_tao_pytorch.multimodal.radio.dataloader.dataset import NOCLASS_IDX
 from nvidia_tao_pytorch.core.distributed.comm import get_global_rank, get_world_size
+
+
+def _masked_token_mean(values: torch.Tensor, mask: Optional[torch.Tensor]) -> torch.Tensor:
+    """Mean over token-wise values with an optional spatial/token mask."""
+    if mask is None:
+        return values.mean()
+    valid = mask.to(dtype=values.dtype)
+    return (values * valid).sum() / valid.sum().clamp_min(1)
 
 
 class Cross_Entropy(nn.Module):
@@ -51,12 +59,12 @@ class Cross_Entropy(nn.Module):
 
 
 def _mse_element_wise(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """Per-element squared error (EVFM-style reduction='none')."""
+    """Per-element squared error (native reduction='none')."""
     return (pred - target) ** 2
 
 
 def dampened_mse_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """Dampened MSE (EVFM-style): for |diff| < 1 use 0.5*diff^2, else 2*sqrt(|diff|+eps)-1.5.
+    """Dampened MSE (native): for |diff| < 1 use 0.5*diff^2, else 2*sqrt(|diff|+eps)-1.5.
 
     Reduces sensitivity to large residuals.
     """
@@ -65,6 +73,92 @@ def dampened_mse_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     dampened = 2 * torch.sqrt(abs_diff + 1e-8) - 1.5
     mse = 0.5 * (diff ** 2)
     return torch.where(abs_diff.detach() < 1, mse, dampened)
+
+
+def _fft_mse_loss(
+    student_spatial: torch.Tensor,
+    teacher_spatial: torch.Tensor,
+    grid_hw: Tuple[int, int],
+    reduction: str = "mean",
+) -> torch.Tensor:
+    """RADIO fft_mse spatial-frequency distillation loss for high-resolution spatial feature teachers.
+
+    Faithful port of RADIO.feature_distillation_loss.fft_mse_loss: 2D FFT
+    (norm='ortho') over the HxW grid, fftshift, complex magnitude-squared
+    difference, mean over channels, then mean over all (B, H, W) — i.e.
+    reduction='mean'. The gaussian ring weighting in RADIO is dead code
+    (gauss_weight=1, commented out) and is intentionally omitted. No spatial
+    mask or focal weighting is applied: RADIO applies neither to fft_mse, and
+    masking frequency bins by a spatial token validity mask is not meaningful
+    (the FFT mixes all spatial positions). This branch therefore deliberately
+    bypasses the eq_mask/focal reduction used by the other spatial losses.
+
+    Args:
+        student_spatial: NLC student features, shape (B, H*W, C).
+        teacher_spatial: NLC teacher features, shape (B, H*W, C).
+        grid_hw: (H, W) of the aligned spatial grid.
+
+    Returns:
+        Scalar loss tensor.
+    """
+    height, width = grid_hw
+    _, seq_len, _ = student_spatial.shape
+    if seq_len != height * width:
+        raise ValueError(f"fft_mse expects L == H*W, got L={seq_len}, H*W={height * width}")
+    # NLC -> BCHW in fp32 (matches the reference implementation's pred.float()/target.float()).
+    student_bchw = rearrange(student_spatial.float(), "b (h w) c -> b c h w", h=height, w=width)
+    teacher_bchw = rearrange(teacher_spatial.float(), "b (h w) c -> b c h w", h=height, w=width)
+    fft_s = torch.fft.fftshift(torch.fft.fft2(student_bchw, norm="ortho"), dim=(2, 3))
+    fft_t = torch.fft.fftshift(torch.fft.fft2(teacher_bchw, norm="ortho"), dim=(2, 3))
+    diff = fft_s - fft_t
+    # complex magnitude-squared MSE, mean over channel dim -> [B, H, W]
+    loss_map = (diff.real ** 2 + diff.imag ** 2).mean(dim=1)
+    if reduction == "none":
+        return loss_map
+    if reduction == "mean":
+        return loss_map.mean()
+    raise ValueError(f"Unsupported fft_mse reduction: {reduction!r}")
+
+
+def linear_cka(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    mask: Optional[torch.Tensor] = None,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """Compute linear CKA between two feature tensors.
+
+    The sample axis is formed by flattening all leading dimensions except the
+    feature dimension. For spatial RADIO features, this compares the geometry of
+    valid spatial tokens across the current local batch.
+    """
+    pred = pred.reshape(-1, pred.shape[-1])
+    target = target.reshape(-1, target.shape[-1])
+    if mask is not None:
+        valid = mask.reshape(-1).to(dtype=torch.bool, device=pred.device)
+        pred = pred[valid]
+        target = target[valid]
+
+    if pred.shape[0] < 2:
+        # Degenerate batch (fewer than 2 valid samples): CKA is undefined.
+        # Return a differentiable zero tied to `pred` so the autograd graph is
+        # preserved. Returning a detached constant here (e.g. new_zeros) makes
+        # the rank's loss lack a grad_fn, which crashes loss.backward() and
+        # desyncs DDP collectives across all ranks.
+        return pred.float().sum() * 0.0
+
+    pred = pred.float()
+    target = target.float()
+    pred = pred - pred.mean(dim=0, keepdim=True)
+    target = target - target.mean(dim=0, keepdim=True)
+
+    cross_cov = pred.T @ target
+    pred_cov = pred.T @ pred
+    target_cov = target.T @ target
+    hsic = cross_cov.square().sum()
+    pred_var = pred_cov.square().sum()
+    target_var = target_cov.square().sum()
+    return hsic / (pred_var.sqrt() * target_var.sqrt()).clamp_min(eps)
 
 
 def masked_sum(t: torch.Tensor, mask: torch.Tensor, **kwargs) -> torch.Tensor:
@@ -125,6 +219,7 @@ class LossFnStateBase(nn.Module):
         self.feature_dim = feature_dim
         self.ohem = ohem
         self.dist_group: dist.ProcessGroup = None
+        self.freeze_updates = False
 
         self.register_buffer('fwd_count', torch.tensor(0, dtype=torch.float64), persistent=True)
         self.register_buffer('num_samples', torch.tensor(0.0, dtype=torch.float64), persistent=True)
@@ -156,6 +251,9 @@ class LossFnStateBase(nn.Module):
         Returns:
             Updated expected mean tensor with shape [C].
         """
+        if self.freeze_updates:
+            return self.expected_mean
+
         self.fwd_count += 1
 
         sample_sum, num_samples = self.masked_sum(teacher_features, loss_mask, dim=(0, 2, 3), dtype=torch.float64)
@@ -273,6 +371,9 @@ class WhitenNormState(LossFnStateBase):
     @torch.autocast('cuda', enabled=False)
     def update(self, loss_fn_base, teacher_features: torch.Tensor, loss_mask: torch.Tensor):
         """Update running statistics and periodically refresh whitening projections."""
+        if self.freeze_updates:
+            return
+
         fwd_count = int(self.fwd_count.item())
 
         if fwd_count == 0 and self._load_from_cache(teacher_features):
@@ -311,8 +412,8 @@ class WhitenNormState(LossFnStateBase):
 
         safe_name = self.name.replace('(', '_').replace(')', '_').replace(' ', '_').replace(',', '-')
         fname = f'{safe_name}_res-{resolution}.pth'
-        cache_dir = os.path.join(torch.hub.get_dir(), 'evfm', 'fd_loss_states', 'whiten')
-        # cache_dir = os.path.join(torch.hub.get_dir(), 'evfm', 'fd_loss_states', 'whiten-4part')
+        cache_dir = os.path.join(torch.hub.get_dir(), 'RADIO', 'fd_loss_states', 'whiten')
+        # cache_dir = os.path.join(torch.hub.get_dir(), 'RADIO', 'fd_loss_states', 'whiten-4part')
         cache_path = os.path.join(cache_dir, fname)
         return cache_path
 
@@ -537,17 +638,49 @@ class PHIStandardization(WhitenNormState):
         if dist.is_initialized():
             dist.broadcast(H, src=0)
         self.register_buffer('rotation', H, persistent=True)
-        self.register_buffer('alpha', torch.tensor(0, dtype=torch.float32, device=H.device))
+        self.register_buffer('alpha', torch.tensor(1.0, dtype=torch.float32, device=H.device))
 
     def _update_projections(self, fwd_count: int):
         """Compute PHI whitening using mean eigenvalue scaling and optional rotation."""
         cov = self.covariance
+        cov = torch.nan_to_num((cov + cov.T) * 0.5, nan=0.0, posinf=0.0, neginf=0.0)
 
-        L, V = torch.linalg.eigh(cov)
+        eye = self.eye.to(device=cov.device, dtype=cov.dtype)
+        scale = torch.diagonal(cov).abs().mean().clamp_min(1.0)
+        last_error = None
+        # Solve the (feature_dim x feature_dim) eigenproblem on CPU. At high res the
+        # GPU is near-full, so a GPU eigh OOMs and trips the diagonal fallback below,
+        # which drops the decorrelating rotation V and silently degrades PHI (the
+        # low-variance channels stop being equalized -> features under-supervised
+        # while the loss keeps falling). The covariance is tiny (~feature_dim^2), so
+        # a CPU fp64 solve is negligible and can never OOM the GPU; only a genuine
+        # numerical failure now falls back to the diagonal scale.
+        cov_cpu = cov.detach().to(device="cpu", dtype=torch.float64)
+        eye_cpu = torch.eye(cov_cpu.shape[-1], dtype=torch.float64)
+        scale_cpu = float(scale)
+        for jitter in (0.0, 1e-8, 1e-6, 1e-4):
+            try:
+                L, V = torch.linalg.eigh(cov_cpu + jitter * scale_cpu * eye_cpu)
+                L = L.to(device=cov.device, dtype=cov.dtype)
+                V = V.to(device=cov.device, dtype=cov.dtype)
+                break
+            except RuntimeError as exc:
+                last_error = exc
+        else:
+            logging.warning(
+                "PHI eigensolve failed for %s at fwd_count=%s; using diagonal scale fallback. Error: %s",
+                self.name,
+                fwd_count,
+                last_error,
+            )
+            L = torch.diagonal(cov).clamp_min(0)
+            V = eye
+
         mask = L >= 0
         L = torch.where(mask, L, 0)
 
-        alpha = L.mean().rsqrt()
+        mean_eigenvalue = L.mean().clamp_min(1e-12)
+        alpha = mean_eigenvalue.rsqrt()
         inv_alpha = 1 / alpha
 
         self.alpha.copy_(alpha)
@@ -577,6 +710,110 @@ class PHIStandardization(WhitenNormState):
         """Add PHI-specific scalar components to the external state dictionary."""
         super().add_state_components(components)
         components['phi-s_alpha'] = self.alpha.item()
+
+
+class CovarianceWhitening(WhitenNormState):
+    """True covariance whitening for teacher spatial targets.
+
+    ``mode='zca'`` whitens and rotates back toward the original teacher basis.
+    ``mode='pca'`` whitens into the covariance eigenbasis. Both expose the same
+    ``expected_mean`` and ``whiten`` interface used by the distillation loss.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        feature_dim: int,
+        ohem: bool,
+        update_period: int = 100,
+        mode: str = "zca",
+        freeze_after_steps: int = 0,
+        shrinkage: float = 0.0,
+        eigen_floor: float = 1.0e-6,
+        max_gain: float = 0.0,
+    ):
+        super().__init__(name, feature_dim, ohem, update_period)
+        mode = (mode or "zca").lower()
+        if mode not in ("zca", "pca"):
+            raise ValueError(f"Unsupported whitening mode: {mode}. Must be 'zca' or 'pca'.")
+        self.mode = mode
+        self.freeze_after_steps = int(freeze_after_steps or 0)
+        self.shrinkage = float(shrinkage or 0.0)
+        self.eigen_floor = float(eigen_floor or 0.0)
+        self.max_gain = float(max_gain or 0.0)
+        self.register_buffer('last_mean_eigenvalue', torch.tensor(1.0, dtype=torch.float64), persistent=True)
+        self.register_buffer('last_max_gain', torch.tensor(1.0, dtype=torch.float64), persistent=True)
+
+    @property
+    def max_samples(self) -> int:
+        """Max whitening-update samples: the freeze-after-steps cap when set, else the base value."""
+        if self.freeze_after_steps > 0:
+            return self.freeze_after_steps
+        return super().max_samples
+
+    def _update_projections(self, fwd_count: int):
+        """Compute true PCA/ZCA whitening matrices from the running covariance."""
+        cov = self.covariance
+        cov = torch.nan_to_num((cov + cov.T) * 0.5, nan=0.0, posinf=0.0, neginf=0.0)
+        eye = self.eye.to(device=cov.device, dtype=cov.dtype)
+
+        diag_mean = torch.diagonal(cov).abs().mean().clamp_min(1e-12)
+        if self.shrinkage > 0:
+            cov = (1.0 - self.shrinkage) * cov + self.shrinkage * diag_mean * eye
+
+        last_error = None
+        for jitter in (0.0, 1e-8, 1e-6, 1e-4):
+            try:
+                L, V = torch.linalg.eigh(cov + jitter * diag_mean * eye)
+                break
+            except RuntimeError as exc:
+                last_error = exc
+        else:
+            logging.warning(
+                "Whitening eigensolve failed for %s at fwd_count=%s; using diagonal fallback. Error: %s",
+                self.name,
+                fwd_count,
+                last_error,
+            )
+            L = torch.diagonal(cov).clamp_min(0)
+            V = eye
+
+        L = torch.clamp(L, min=0)
+        mean_eigenvalue = L.mean().clamp_min(1e-12)
+        floor = (self.eigen_floor * mean_eigenvalue).clamp_min(1e-12)
+        L = L.clamp_min(floor)
+
+        gains = L.rsqrt()
+        if self.max_gain > 0:
+            gains = gains.clamp(max=self.max_gain)
+        inv_gains = gains.reciprocal()
+
+        gain_diag = torch.diag(gains)
+        inv_gain_diag = torch.diag(inv_gains)
+        if self.mode == "pca":
+            whiten = gain_diag @ V.T
+            inv_whiten = V @ inv_gain_diag
+        else:
+            whiten = V @ gain_diag @ V.T
+            inv_whiten = V @ inv_gain_diag @ V.T
+
+        self.whiten.copy_(whiten)
+        self.inv_whiten.copy_(inv_whiten)
+        self.last_mean_eigenvalue.copy_(mean_eigenvalue)
+        self.last_max_gain.copy_(gains.max())
+        return L, V, L > floor
+
+    def add_state_components(self, components):
+        """Add whitening scalar components to the external state dictionary."""
+        super().add_state_components(components)
+        components[f'{self.mode}_mean_eigenvalue'] = self.last_mean_eigenvalue.item()
+        components[f'{self.mode}_max_gain'] = self.last_max_gain.item()
+
+    def _broadcast(self, src_rank: int, group: dist.ProcessGroup = None):
+        """Broadcast whitening state, including persistent diagnostics."""
+        super()._broadcast(src_rank, group)
+        dist.broadcast(self.last_mean_eigenvalue, src_rank, group=group)
+        dist.broadcast(self.last_max_gain, src_rank, group=group)
 
 
 class ProjectionMLP(nn.Module):
@@ -692,6 +929,55 @@ class ProjectionMLP(nn.Module):
         return x
 
 
+class ResidualProjectionMLP(nn.Module):
+    """Constrained residual projector for student-to-teacher feature lifting.
+
+    The base path is a normalized linear projection. The residual path is
+    zero-initialized so the module starts as a pure linear lift, then learns
+    bounded nonlinear corrections during projection-head warmup.
+    """
+
+    def __init__(
+        self,
+        input_size: int,
+        hidden_size: int,
+        output_size: int,
+        num_inner: int = 1,
+        residual_scale: float = 0.25,
+        output_norm: bool = False,
+        device: torch.device = None,
+        **kwargs,
+    ) -> None:
+        super().__init__()
+        self.input_norm = nn.LayerNorm(input_size, device=device)
+        self.base = nn.Linear(input_size, output_size, device=device)
+        self.residual_in = nn.Linear(input_size, hidden_size, device=device)
+        self.blocks = nn.ModuleList([
+            nn.Sequential(
+                nn.LayerNorm(hidden_size, device=device),
+                nn.GELU(),
+                nn.Linear(hidden_size, hidden_size, device=device),
+            )
+            for _ in range(max(int(num_inner or 0), 0))
+        ])
+        self.residual_out = nn.Linear(hidden_size, output_size, device=device)
+        self.output_norm = nn.LayerNorm(output_size, device=device) if output_norm else nn.Identity()
+        self.residual_scale = float(residual_scale)
+
+        nn.init.zeros_(self.residual_out.weight)
+        nn.init.zeros_(self.residual_out.bias)
+
+    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
+        """Forward pass through a linear lift plus zero-init residual branch."""
+        x = self.input_norm(x)
+        base = self.base(x)
+        residual = self.residual_in(x)
+        for block in self.blocks:
+            residual = residual + block(residual)
+        residual = self.residual_out(F.gelu(residual))
+        return self.output_norm(base + self.residual_scale * residual)
+
+
 class AttnFDHead(nn.Module):
     """Attention-based feature-distillation head used by C-RADIO v4.
 
@@ -796,7 +1082,7 @@ class BalancedFeatureLoss:
 
 
 class SummaryCosineLoss(nn.Module):
-    """Cosine similarity loss for summary/embedding distillation (EVFM-style).
+    """Cosine similarity loss for summary/embedding distillation (native).
     loss = 1 - cos_sim(student, teacher), reduced over batch.
     """
 
@@ -816,7 +1102,7 @@ class SummaryCosineLoss(nn.Module):
 
 
 class SummaryAngleLoss(nn.Module):
-    """Angle loss for summary distillation (EVFM-style).
+    """Angle loss for summary distillation (native).
     loss = angle_sq / angle_variance, with running stats for teacher direction variance.
     """
 
@@ -827,18 +1113,22 @@ class SummaryAngleLoss(nn.Module):
         self.register_buffer('num_samples', torch.tensor(0, dtype=torch.float64))
         self.register_buffer('sum_direction', torch.zeros(feature_dim, dtype=torch.float64))
         self.register_buffer('sum_angle_variance', torch.tensor(0.0, dtype=torch.float64))
+        self.freeze_updates = False
+        # Reassigned to a per-resolution subgroup under distill.partitioned_ranks so this teacher's
+        # direction-variance collectives reduce only over the ranks that run it (else global -> hang).
+        self.dist_group = None
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """Compute the variance-normalized angular loss between ``pred`` and ``target``."""
         flat_pred = pred.flatten(1)
         flat_target = target.flatten(1)
         with torch.no_grad():
-            if self.num_samples < self.max_samples:
+            if not self.freeze_updates and self.num_samples < self.max_samples:
                 curr_num = torch.tensor(flat_target.shape[0], dtype=torch.float64, device=pred.device)
                 curr_dir_sum = flat_target.detach().sum(dim=0, dtype=torch.float64)
                 if dist.is_initialized():
-                    dist.all_reduce(curr_num, op=dist.ReduceOp.SUM)
-                    dist.all_reduce(curr_dir_sum, op=dist.ReduceOp.SUM)
+                    dist.all_reduce(curr_num, op=dist.ReduceOp.SUM, group=self.dist_group)
+                    dist.all_reduce(curr_dir_sum, op=dist.ReduceOp.SUM, group=self.dist_group)
                 self.num_samples.add_(curr_num)
                 self.sum_direction.add_(curr_dir_sum)
                 mean_direction = self.sum_direction / self.num_samples
@@ -850,7 +1140,7 @@ class SummaryAngleLoss(nn.Module):
                 target_angle_to_mean = torch.acos(target_cos_to_mean.clamp(-1 + 1e-6, 1 - 1e-6))
                 curr_angle_var = target_angle_to_mean.pow(2).sum(dtype=torch.float64)
                 if dist.is_initialized():
-                    dist.all_reduce(curr_angle_var, op=dist.ReduceOp.SUM)
+                    dist.all_reduce(curr_angle_var, op=dist.ReduceOp.SUM, group=self.dist_group)
                 self.sum_angle_variance.add_(curr_angle_var)
         angle_variance = (self.sum_angle_variance / self.num_samples).to(pred.dtype).clamp_min(1e-8)
         cos_theta = F.cosine_similarity(flat_pred, flat_target, dim=-1).clamp(-1 + 1e-6, 1 - 1e-6)
@@ -860,7 +1150,7 @@ class SummaryAngleLoss(nn.Module):
 
 
 class SummaryTangentSphereLoss(nn.Module):
-    """Tangent-space sphere loss for summary distillation (EVFM-style).
+    """Tangent-space sphere loss for summary distillation (native).
     Normalize to unit sphere, map to tangent space at running mean direction, then MSE.
     """
 
@@ -876,6 +1166,8 @@ class SummaryTangentSphereLoss(nn.Module):
         self.register_buffer('whiten', torch.eye(feature_dim, dtype=torch.float64))
         self.register_buffer('hadamard', get_hadamard_matrix(feature_dim).to(torch.float64), persistent=False)
         self._samples: List[torch.Tensor] = []
+        # Reassigned to a per-resolution subgroup under distill.partitioned_ranks (else global -> hang).
+        self.dist_group = None
 
     def _update_phis(self, target: torch.Tensor) -> None:
         if self.fwd_ct > 0:
@@ -885,7 +1177,7 @@ class SummaryTangentSphereLoss(nn.Module):
             batch_n = target_n.shape[0]
             if dist.is_initialized():
                 n_t = torch.tensor(batch_n, dtype=torch.float64, device=target.device)
-                dist.all_reduce(n_t, op=dist.ReduceOp.SUM)
+                dist.all_reduce(n_t, op=dist.ReduceOp.SUM, group=self.dist_group)
                 self.num_samples.add_(n_t)
             else:
                 self.num_samples.add_(float(batch_n))
@@ -899,7 +1191,7 @@ class SummaryTangentSphereLoss(nn.Module):
             n_global = self.num_samples.item()
             mean_dir = samples.sum(dim=0, keepdim=True)
             if dist.is_initialized():
-                dist.all_reduce(mean_dir, op=dist.ReduceOp.SUM)
+                dist.all_reduce(mean_dir, op=dist.ReduceOp.SUM, group=self.dist_group)
             mean_dir = mean_dir / self.num_samples.to(samples.device)
             mean_dir = F.normalize(mean_dir, dim=-1)
             self.pole.copy_(mean_dir)
@@ -910,13 +1202,13 @@ class SummaryTangentSphereLoss(nn.Module):
             log_map = (theta / sin_theta) * null_space
             log_map_mean = log_map.sum(dim=0, keepdim=True)
             if dist.is_initialized():
-                dist.all_reduce(log_map_mean, op=dist.ReduceOp.SUM)
+                dist.all_reduce(log_map_mean, op=dist.ReduceOp.SUM, group=self.dist_group)
             log_map_mean = log_map_mean / self.num_samples.to(samples.device)
             self.tan_mean.copy_(log_map_mean)
             centered = log_map - log_map_mean
             cov = centered.T @ centered
             if dist.is_initialized():
-                dist.all_reduce(cov, op=dist.ReduceOp.SUM)
+                dist.all_reduce(cov, op=dist.ReduceOp.SUM, group=self.dist_group)
             cov = cov / (n_global - 1) if n_global > 1 else torch.eye(
                 self.feature_dim, device=centered.device, dtype=torch.float64
             )
@@ -987,11 +1279,34 @@ class DistillationLoss(nn.Module):
         mlp_num_inner: int = 2,
         spatial_mlp_version: str = "v2",
         spatial_num_inner: Optional[int] = None,
+        summary_mlp_version: Optional[str] = None,
+        summary_num_inner: Optional[int] = None,
         summary_loss_weight: float = 1.0,
         fd_loss_weight: float = 1.0,
         summary_loss_type: str = "CE",
         spatial_loss_type: str = "mse",
+        spatial_focal_weight: float = 0.0,
+        spatial_focal_gamma: float = 1.0,
+        spatial_focal_max_weight: float = 4.0,
+        intermediate_loss_weight: float = 0.0,
+        intermediate_loss_weights: Optional[List[float]] = None,
+        intermediate_feature_dims: Optional[List[int]] = None,
+        intermediate_focal_weight: float = 0.0,
+        intermediate_mlp_version: str = "residual",
+        intermediate_num_inner: Optional[int] = None,
+        spatial_norm_type: str = "phi",
+        spatial_whiten_update_period: int = 100,
+        spatial_whiten_freeze_after_steps: int = 0,
+        spatial_whiten_shrinkage: float = 0.0,
+        spatial_whiten_eigen_floor: float = 1.0e-6,
+        spatial_whiten_max_gain: float = 0.0,
+        spatial_projector_residual_scale: float = 0.25,
+        spatial_projector_output_norm: bool = False,
         summary_token_idx: Optional[int] = None,
+        partitioned_ranks: bool = False,
+        mosaic_inner_size: int = 0,
+        mosaic_outer_size: int = 0,
+        mosaic_downsample: int = 0,
     ):
         """
         Initialize the DistillationLoss module.
@@ -1014,13 +1329,34 @@ class DistillationLoss(nn.Module):
             spatial_num_inner (Optional[int]): Number of inner layers for the
                 spatial projection head. Defaults to ``mlp_num_inner`` for
                 "v2" and 0 for "attn".
+            summary_mlp_version (Optional[str]): Projection head version for the
+                combo-mode summary projector (``projection_layer_summary``).
+                Defaults to ``spatial_mlp_version`` (partitioned training: the reference implementation's
+                ``self.summary_mlp_version = summary_mlp_version or mlp_version``,
+                teacher.py:118). Previously this was hardcoded to "v2"
+                (``ProjectionMLP``) regardless of ``spatial_mlp_version``.
+            summary_num_inner (Optional[int]): Number of inner layers for the
+                summary projection head. Defaults to ``mlp_num_inner`` for
+                "v2", 0 for "attn", 1 for "residual".
             summary_loss_weight (float): Weight for summary/CLS loss in combo mode. Default: 1.0
             fd_loss_weight (float): Weight for spatial/fd loss in combo mode. Default: 1.0
             summary_loss_type (str): Summary loss in combo mode. One of ["CE", "angle", "cosine", "tangent_sphere"].
-                Default: "CE" (soft cross-entropy with temperature). EVFM-style options: angle, cosine, tangent_sphere.
-            spatial_loss_type (str): Spatial (feature map) loss in combo/spatial mode. One of ["mse", "dampened_mse"].
-                EVFM-style: "mse" = per-element squared error; "dampened_mse" = dampened for large residuals.
+                Default: "CE" (soft cross-entropy with temperature). native options: angle, cosine, tangent_sphere.
+            spatial_loss_type (str): Spatial (feature map) loss in combo/spatial mode.
+                One of ["mse", "dampened_mse", "balanced", "cosine", "gram", "channel_kl"].
+                native: "mse" = per-element squared error; "dampened_mse" = dampened for large residuals.
                 Default: "mse".
+            spatial_focal_weight (float): Strength of optional teacher-saliency weighting for spatial loss.
+                0 disables focal weighting; values closer to 1 focus more on high-saliency teacher tokens.
+            spatial_focal_gamma (float): Exponent applied to normalized teacher token saliency.
+            spatial_focal_max_weight (float): Optional clamp for focal token weights before re-normalization.
+            intermediate_loss_weight (float): Global weight for optional intermediate student spatial maps.
+            intermediate_loss_weights (Optional[List[float]]): Per-intermediate relative weights.
+            intermediate_feature_dims (Optional[List[int]]): Channel dims for intermediate projectors.
+            intermediate_focal_weight (float): Focal weighting strength for intermediate spatial losses.
+            intermediate_mlp_version (str): Projection head type for intermediate spatial maps.
+            intermediate_num_inner (Optional[int]): Inner blocks for intermediate projection heads.
+            spatial_norm_type (str): Teacher spatial normalization. One of ["phi", "zca", "pca"].
             summary_token_idx (int): Optional RADIO summary-token slot for per-teacher summary distillation.
         """
         super().__init__()
@@ -1028,19 +1364,54 @@ class DistillationLoss(nn.Module):
         self.loss_type = loss_type.upper()
         self.summary_loss_type = (summary_loss_type or "CE").lower()
         self.spatial_loss_type = (spatial_loss_type or "mse").lower()
+        self.spatial_norm_type = (spatial_norm_type or "phi").lower()
+        self.spatial_focal_weight = float(spatial_focal_weight or 0.0)
+        self.spatial_focal_gamma = float(spatial_focal_gamma or 0.0)
+        self.spatial_focal_max_weight = float(spatial_focal_max_weight or 0.0)
+        self.intermediate_loss_weight = float(intermediate_loss_weight or 0.0)
+        self.intermediate_loss_weights = [float(w) for w in (intermediate_loss_weights or [])]
+        self.intermediate_feature_dims = [int(d) for d in (intermediate_feature_dims or [])]
+        self.intermediate_focal_weight = float(intermediate_focal_weight or 0.0)
+        self.intermediate_mlp_version = (intermediate_mlp_version or "residual").lower()
+        self.intermediate_num_inner = intermediate_num_inner
         self.summary_loss_weight = float(summary_loss_weight)
         self.fd_loss_weight = float(fd_loss_weight)
         self.summary_token_idx = summary_token_idx
+        self.partitioned_ranks = bool(partitioned_ranks)
+        self.mosaic_inner_size = int(mosaic_inner_size or 0)
+        self.mosaic_outer_size = int(mosaic_outer_size or 0)
+        self.mosaic_downsample = int(mosaic_downsample or 0)
+        if self.mosaic_inner_size > 0:
+            if self.mosaic_outer_size <= 0 or self.mosaic_downsample <= 0:
+                raise ValueError(
+                    "RADIO mosaic requires positive inner, outer, and downsample sizes"
+                )
+            if float(summary_loss_weight) != 0.0:
+                raise ValueError(
+                    "RADIO MosaicAdaptor repeats a canvas summary across tiles; "
+                    "mosaic teachers must set summary_loss_weight=0"
+                )
         self.student_model = student_model
         self.teacher_model = teacher_model
         self.num_classes = num_classes
         self.temperature = temperature
+        self.use_mlp = bool(use_mlp)
+        self.mlp_hidden_size = int(mlp_hidden_size)
+        self.mlp_num_inner = int(mlp_num_inner)
+        self.spatial_projector_residual_scale = float(spatial_projector_residual_scale)
+        self.spatial_projector_output_norm = bool(spatial_projector_output_norm)
+        self.alignment_metrics_enabled = os.environ.get("RADIO_ALIGNMENT_METRICS", "").lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        self.last_alignment_metrics = {}
 
         # Validate loss type
         valid_loss_types = ["CE", "KL", "L1", "L2", "FD", "CS", "BALANCED", "MSE"]
         if self.loss_type not in valid_loss_types:
             raise ValueError(f"Unsupported loss type: {loss_type}. Must be one of {valid_loss_types}")
-
         # Determine distillation mode
         if distillation_mode.lower() == "auto":
             # Auto-detect based on loss type
@@ -1056,6 +1427,12 @@ class DistillationLoss(nn.Module):
             if distillation_mode.lower() not in valid_modes:
                 raise ValueError(f"Invalid distillation_mode: {distillation_mode}. Must be one of {valid_modes} or 'auto'")
             self.distillation_mode = distillation_mode.lower()
+        if self.distillation_mode == "spatial" and self.spatial_loss_type == "mse":
+            spatial_loss_aliases = {
+                "BALANCED": "balanced",
+                "CS": "cosine",
+            }
+            self.spatial_loss_type = spatial_loss_aliases.get(self.loss_type, self.spatial_loss_type)
 
         # Validate configuration for feature distillation
         if self.loss_type in ["FD", "CS", "BALANCED", "MSE"] and self.distillation_mode == "logits":
@@ -1066,17 +1443,55 @@ class DistillationLoss(nn.Module):
 
         # Get model dimensions by checking available methods
         self.student_dim, self.teacher_dim = self._get_model_dimensions()
+        # Reassigned to a per-resolution subgroup under distill.partitioned_ranks so the spatial
+        # loss's cross-rank sqrt(count) reduction covers only the ranks running this teacher.
+        self.dist_group = None
         logging.info(f"student_dim: {self.student_dim}, teacher_dim: {self.teacher_dim}")
 
         # Create projection layer if dimensions differ and we're doing feature distillation
         self.projection_layer = None
         self.projection_layer_summary = None
+        self.intermediate_projection_layers = nn.ModuleList()
         spatial_mlp_version = (spatial_mlp_version or "v2").lower()
-        if spatial_mlp_version not in ("v2", "attn"):
-            raise ValueError(f"Unsupported spatial_mlp_version: {spatial_mlp_version}. Must be 'v2' or 'attn'.")
+        if spatial_mlp_version not in ("v2", "attn", "residual"):
+            raise ValueError(
+                f"Unsupported spatial_mlp_version: {spatial_mlp_version}. "
+                "Must be 'v2', 'attn', or 'residual'."
+            )
+        summary_mlp_version = (summary_mlp_version or spatial_mlp_version).lower()
+        if summary_mlp_version not in ("v2", "attn", "residual"):
+            raise ValueError(
+                f"Unsupported summary_mlp_version: {summary_mlp_version}. "
+                "Must be 'v2', 'attn', or 'residual'."
+            )
+        if self.intermediate_mlp_version not in ("v2", "attn", "residual"):
+            raise ValueError(
+                f"Unsupported intermediate_mlp_version: {self.intermediate_mlp_version}. "
+                "Must be 'v2', 'attn', or 'residual'."
+            )
         if spatial_num_inner is None:
-            spatial_num_inner = 0 if spatial_mlp_version == "attn" else mlp_num_inner
+            if spatial_mlp_version == "attn":
+                spatial_num_inner = 0
+            elif spatial_mlp_version == "residual":
+                spatial_num_inner = 1
+            else:
+                spatial_num_inner = mlp_num_inner
+        if summary_num_inner is None:
+            if summary_mlp_version == "attn":
+                summary_num_inner = 0
+            elif summary_mlp_version == "residual":
+                summary_num_inner = 1
+            else:
+                summary_num_inner = mlp_num_inner
         self.spatial_mlp_version = spatial_mlp_version
+        self.summary_mlp_version = summary_mlp_version
+        if self.intermediate_num_inner is None:
+            if self.intermediate_mlp_version == "attn":
+                self.intermediate_num_inner = 0
+            elif self.intermediate_mlp_version == "residual":
+                self.intermediate_num_inner = 1
+            else:
+                self.intermediate_num_inner = mlp_num_inner
         if self.student_dim != self.teacher_dim or isinstance(self.student_model, RADIO) or isinstance(self.teacher_model, RADIO):
             if use_mlp:
                 if spatial_mlp_version == "attn":
@@ -1084,34 +1499,81 @@ class DistillationLoss(nn.Module):
                         self.student_dim, mlp_hidden_size, self.teacher_dim,
                         num_inner=spatial_num_inner,
                     )
+                elif spatial_mlp_version == "residual":
+                    self.projection_layer = ResidualProjectionMLP(
+                        self.student_dim, mlp_hidden_size, self.teacher_dim,
+                        num_inner=spatial_num_inner,
+                        residual_scale=spatial_projector_residual_scale,
+                        output_norm=spatial_projector_output_norm,
+                    )
                 else:
                     self.projection_layer = ProjectionMLP(
                         self.student_dim, mlp_hidden_size, self.teacher_dim,
                         num_inner=spatial_num_inner,
                     )
                 if self.distillation_mode == "combo":
-                    if isinstance(self.student_model, RADIO):
-                        student_dim_summary = self._summary_feature_dim(self.student_model, self.student_dim)
+                    student_dim_summary = self._summary_feature_dim(self.student_model, self.student_dim)
+                    teacher_dim_summary = self._summary_feature_dim(self.teacher_model, self.teacher_dim)
+                    if summary_mlp_version == "attn":
+                        self.projection_layer_summary = AttnFDHead(
+                            student_dim_summary, mlp_hidden_size, teacher_dim_summary,
+                            num_inner=summary_num_inner,
+                        )
+                    elif summary_mlp_version == "residual":
+                        self.projection_layer_summary = ResidualProjectionMLP(
+                            student_dim_summary, mlp_hidden_size, teacher_dim_summary,
+                            num_inner=summary_num_inner,
+                            residual_scale=spatial_projector_residual_scale,
+                            output_norm=spatial_projector_output_norm,
+                        )
                     else:
-                        student_dim_summary = self.student_dim
-                    if isinstance(self.teacher_model, RADIO):
-                        teacher_dim_summary = self._summary_feature_dim(self.teacher_model, self.teacher_dim)
-                    else:
-                        teacher_dim_summary = self.teacher_dim
-                    self.projection_layer_summary = ProjectionMLP(student_dim_summary, mlp_hidden_size, teacher_dim_summary, num_inner=mlp_num_inner)
+                        self.projection_layer_summary = ProjectionMLP(
+                            student_dim_summary, mlp_hidden_size, teacher_dim_summary,
+                            num_inner=summary_num_inner,
+                        )
             else:
                 self.projection_layer = nn.Linear(self.student_dim, self.teacher_dim, bias=True)
                 if self.distillation_mode == "combo":
-                    if isinstance(self.student_model, RADIO):
-                        student_dim_summary = self._summary_feature_dim(self.student_model, self.student_dim)
-                    else:
-                        student_dim_summary = self.student_dim
-                    if isinstance(self.teacher_model, RADIO):
-                        teacher_dim_summary = self._summary_feature_dim(self.teacher_model, self.teacher_dim)
-                    else:
-                        teacher_dim_summary = self.teacher_dim
+                    student_dim_summary = self._summary_feature_dim(self.student_model, self.student_dim)
+                    teacher_dim_summary = self._summary_feature_dim(self.teacher_model, self.teacher_dim)
                     self.projection_layer_summary = nn.Linear(student_dim_summary, teacher_dim_summary, bias=True)
-        # always use linear even if dimensions are the same
+
+        if self.intermediate_loss_weight > 0.0:
+            if self.distillation_mode != "combo":
+                raise ValueError("intermediate_loss_weight is only supported for combo distillation mode.")
+            if not 0.0 <= self.intermediate_focal_weight <= 1.0:
+                raise ValueError(
+                    "intermediate_focal_weight must be in [0, 1], "
+                    f"got {self.intermediate_focal_weight}"
+                )
+            dims = self.intermediate_feature_dims or self._infer_student_intermediate_dims()
+            if not dims:
+                raise ValueError(
+                    "intermediate_loss_weight > 0 requires intermediate_feature_dims "
+                    "or a student model exposing inferable intermediate feature maps."
+                )
+            self.intermediate_feature_dims = [int(dim) for dim in dims]
+            if self.intermediate_loss_weights and len(self.intermediate_loss_weights) != len(self.intermediate_feature_dims):
+                raise ValueError(
+                    "intermediate_loss_weights must match intermediate_feature_dims length: "
+                    f"{len(self.intermediate_loss_weights)} vs {len(self.intermediate_feature_dims)}"
+                )
+            for input_dim in self.intermediate_feature_dims:
+                self.intermediate_projection_layers.append(
+                    self._build_spatial_projector(
+                        input_dim=input_dim,
+                        version=self.intermediate_mlp_version,
+                        num_inner=int(self.intermediate_num_inner or 0),
+                    )
+                )
+            logging.info(
+                "Using intermediate spatial supervision: weight=%s dims=%s weights=%s projector=%s focal=%s",
+                self.intermediate_loss_weight,
+                self.intermediate_feature_dims,
+                self.intermediate_loss_weights or "uniform",
+                self.intermediate_mlp_version,
+                self.intermediate_focal_weight,
+            )
         # Initialize loss functions
         self.criterions = {
             "L1": LPCriterion(p=1),
@@ -1131,21 +1593,51 @@ class DistillationLoss(nn.Module):
             self.teacher_norm = None
 
         if self.distillation_mode == "spatial" or self.distillation_mode == "combo":
-            self.phi_norm = PHIStandardization(
-                name='phi_norm',
-                feature_dim=self.teacher_dim,
-                ohem=False,
-                update_period=100,  # Update projections every 100 batches
-                rotate=True  # Use Hadamard rotation (default)
-            )
-            valid_spatial_losses = ("mse", "dampened_mse")
+            if self.spatial_norm_type == "phi":
+                self.phi_norm = PHIStandardization(
+                    name='phi_norm',
+                    feature_dim=self.teacher_dim,
+                    ohem=False,
+                    update_period=spatial_whiten_update_period,
+                    rotate=True
+                )
+            elif self.spatial_norm_type in ("zca", "pca"):
+                self.phi_norm = CovarianceWhitening(
+                    name=f'{self.spatial_norm_type}_whiten',
+                    feature_dim=self.teacher_dim,
+                    ohem=False,
+                    update_period=spatial_whiten_update_period,
+                    mode=self.spatial_norm_type,
+                    freeze_after_steps=spatial_whiten_freeze_after_steps,
+                    shrinkage=spatial_whiten_shrinkage,
+                    eigen_floor=spatial_whiten_eigen_floor,
+                    max_gain=spatial_whiten_max_gain,
+                )
+            else:
+                raise ValueError(
+                    "spatial_norm_type must be one of ('phi', 'zca', 'pca'), "
+                    f"got {self.spatial_norm_type!r}"
+                )
+            valid_spatial_losses = ("mse", "dampened_mse", "balanced", "cosine", "gram", "channel_kl", "fft_mse")
             if self.spatial_loss_type not in valid_spatial_losses:
                 raise ValueError(
                     f"spatial_loss_type must be one of {valid_spatial_losses}, got {self.spatial_loss_type!r}"
                 )
             logging.info(f"Using spatial_loss_type={self.spatial_loss_type} for feature map distillation")
+            if not 0.0 <= self.spatial_focal_weight <= 1.0:
+                raise ValueError(
+                    "spatial_focal_weight must be in [0, 1], "
+                    f"got {self.spatial_focal_weight}"
+                )
+            if self.spatial_focal_weight > 0.0:
+                logging.info(
+                    "Using teacher-saliency spatial focal weighting: weight=%s gamma=%s max_weight=%s",
+                    self.spatial_focal_weight,
+                    self.spatial_focal_gamma,
+                    self.spatial_focal_max_weight,
+                )
 
-        # Summary loss criterion for combo mode (EVFM-style: angle, cosine, tangent_sphere)
+        # Summary loss criterion for combo mode (native: angle, cosine, tangent_sphere)
         self.summary_criterion = None
         if self.distillation_mode == "combo":
             valid_summary_losses = ("ce", "angle", "cosine", "tangent_sphere")
@@ -1156,16 +1648,60 @@ class DistillationLoss(nn.Module):
             else:
                 logging.info(f"Using {self.summary_loss_type} loss for summary in combo mode")
             if self.summary_loss_type != "ce":
-                if isinstance(self.teacher_model, RADIO):
-                    teacher_dim_summary = self._summary_feature_dim(self.teacher_model, self.teacher_dim)
-                else:
-                    teacher_dim_summary = self.teacher_dim
+                teacher_dim_summary = self._summary_feature_dim(self.teacher_model, self.teacher_dim)
                 if self.summary_loss_type == "angle":
                     self.summary_criterion = SummaryAngleLoss(feature_dim=teacher_dim_summary)
                 elif self.summary_loss_type == "cosine":
                     self.summary_criterion = SummaryCosineLoss()
                 else:
                     self.summary_criterion = SummaryTangentSphereLoss(feature_dim=teacher_dim_summary)
+
+    def _build_spatial_projector(self, input_dim: int, version: str, num_inner: int) -> nn.Module:
+        """Build a student-to-teacher projector for a spatial token stream."""
+        if not self.use_mlp:
+            return nn.Linear(input_dim, self.teacher_dim, bias=True)
+        if version == "attn":
+            return AttnFDHead(
+                input_dim,
+                self.mlp_hidden_size,
+                self.teacher_dim,
+                num_inner=num_inner,
+            )
+        if version == "residual":
+            return ResidualProjectionMLP(
+                input_dim,
+                self.mlp_hidden_size,
+                self.teacher_dim,
+                num_inner=num_inner,
+                residual_scale=self.spatial_projector_residual_scale,
+                output_norm=self.spatial_projector_output_norm,
+            )
+        return ProjectionMLP(
+            input_dim,
+            self.mlp_hidden_size,
+            self.teacher_dim,
+            num_inner=num_inner,
+        )
+
+    def _infer_student_intermediate_dims(self) -> List[int]:
+        """Infer intermediate feature dims from the student model without a forward pass."""
+        raw_model = getattr(self.student_model, "_model", None)
+        if raw_model is None:
+            return []
+
+        dims = []
+        norm = getattr(raw_model, "norm", None)
+        if hasattr(norm, "num_features"):
+            dims.append(int(norm.num_features))
+        if getattr(raw_model, "output_stride3", False):
+            norm3 = getattr(raw_model, "bn_norm3", None)
+            if hasattr(norm3, "num_features"):
+                dims.append(int(norm3.num_features))
+        if getattr(raw_model, "output_stride2", False):
+            norm2 = getattr(raw_model, "bn_norm2", None)
+            if hasattr(norm2, "num_features"):
+                dims.append(int(norm2.num_features))
+        return dims
 
     def _summary_feature_dim(self, model: nn.Module, fallback_dim: int) -> int:
         """Return the summary dimension used by this loss for a model.
@@ -1178,6 +1714,10 @@ class DistillationLoss(nn.Module):
         Returns:
             int: Per-token summary feature dimension used by the loss.
         """
+        summary_features = getattr(model, "num_summary_features", None)
+        if summary_features is not None:
+            return int(summary_features)
+
         if not isinstance(model, RADIO):
             return fallback_dim
         summary_idxs = getattr(model, "summary_idxs", None)
@@ -1301,23 +1841,6 @@ class DistillationLoss(nn.Module):
             )
         return features
 
-    @torch.autocast('cuda', enabled=False)
-    def _apply_phi_s(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply ``phi_norm`` standardization to arbitrary feature tensors.
-
-        Args:
-            x (torch.Tensor): Student feature tensor whose last dimension
-                matches ``phi_norm`` statistics.
-
-        Returns:
-            torch.Tensor: Standardized features with the original dtype.
-        """
-        mean = self.phi_norm.expected_mean.to(torch.float32)
-        whiten = self.phi_norm.whiten.to(torch.float32)
-        out_dtype = x.dtype
-        x_fp32 = x.to(torch.float32)
-        return ((x_fp32 - mean) @ whiten.T).to(out_dtype)
-
     @staticmethod
     def _get_last_feature_map(features: Union[torch.Tensor, List[torch.Tensor], Dict[str, torch.Tensor]]):
         """Extract the last feature map from a list/tuple/dict or return the tensor itself."""
@@ -1326,6 +1849,16 @@ class DistillationLoss(nn.Module):
         elif isinstance(features, dict):
             return list(features.values())[-1]
         return features
+
+    @staticmethod
+    def _get_intermediate_feature_maps(features: Union[torch.Tensor, List[torch.Tensor], Dict[str, torch.Tensor]]):
+        """Return all feature maps before the final spatial map."""
+        if isinstance(features, (list, tuple)):
+            return list(features[:-1])
+        if isinstance(features, dict):
+            values = list(features.values())
+            return values[:-1]
+        return []
 
     @staticmethod
     def _build_mask(valid_mask, target_shape, device):
@@ -1338,27 +1871,36 @@ class DistillationLoss(nn.Module):
         else:
             mask = valid_mask.float()
         if mask.dtype != torch.bool:
-            mask = mask > 0.5
+            # Accept a pooled feature token only when every contributing input
+            # pixel is valid.
+            mask = mask == 1.0
         return mask.to(device)
 
-    @staticmethod
-    def _align_features(student_feat, teacher_feat,
+    def _align_features(self, student_feat, teacher_feat,
                         student_valid_mask, teacher_valid_mask,
                         spatial_transform):
-        """Align student/teacher feature maps using spatial_transform when available.
-
-        When *spatial_transform* is provided the student features are warped
-        into the teacher feature space (or vice-versa, whichever is smaller)
-        using ``generate_homography_grid`` + ``F.grid_sample``, matching the
-        EVFM ``feature_distillation_loss`` alignment logic.
-
-        Returns ``(student_feat, teacher_feat)`` in ``[B, H*W, C]`` layout.
-        """
+        """Align student and teacher feature maps."""
         if spatial_transform is not None:
             s_valid = student_valid_mask.float()
             t_valid = teacher_valid_mask.float()
 
-            if teacher_feat.shape[-1] <= student_feat.shape[-1]:
+            if (
+                self.partitioned_ranks and
+                teacher_feat.shape[-1] > student_feat.shape[-1]
+            ):
+                grid = generate_homography_grid(
+                    torch.linalg.inv(spatial_transform), student_feat.shape
+                )
+                teacher_feat = F.grid_sample(
+                    teacher_feat, grid, mode="bilinear", align_corners=True
+                )
+                t_valid = F.grid_sample(
+                    t_valid.unsqueeze(1), grid, mode="bilinear", align_corners=True
+                ).squeeze(1)
+                s_valid = F.adaptive_avg_pool2d(
+                    s_valid.unsqueeze(1), student_feat.shape[-2:]
+                ).squeeze(1)
+            else:
                 grid = generate_homography_grid(spatial_transform, teacher_feat.shape)
                 student_feat = F.grid_sample(
                     student_feat, grid, mode='bilinear', align_corners=True,
@@ -1366,64 +1908,508 @@ class DistillationLoss(nn.Module):
                 s_valid = F.grid_sample(
                     s_valid.unsqueeze(1), grid, mode='bilinear', align_corners=True,
                 ).squeeze(1)
-            else:
-                inv_transform = torch.linalg.inv(spatial_transform)
-                grid = generate_homography_grid(inv_transform, student_feat.shape)
-                teacher_feat = F.grid_sample(
-                    teacher_feat, grid, mode='bilinear', align_corners=True,
-                )
-                t_valid = F.grid_sample(
-                    t_valid.unsqueeze(1), grid, mode='bilinear', align_corners=True,
-                ).squeeze(1)
-                s_valid = F.adaptive_avg_pool2d(
-                    s_valid.unsqueeze(1), student_feat.shape[-2:]
-                ).squeeze(1)
 
             valid_mask = s_valid * t_valid
-            eps = 1e-8
-            weighted_valid = valid_mask * (1 - eps) + eps
-            eq_valid = torch.all(grid.abs() <= 1, dim=-1)
-            valid_mask = torch.where(eq_valid, weighted_valid, torch.zeros_like(weighted_valid))
+            eps = 1e-8 if self.partitioned_ranks else 1e-6
+            valid_mask = valid_mask * (1 - eps) + eps
+            if self.partitioned_ranks:
+                eq_valid = torch.all(grid.abs() <= 1, dim=-1)
+                valid_mask = torch.where(eq_valid, valid_mask, 0.0)
 
+            grid_h, grid_w = teacher_feat.shape[-2], teacher_feat.shape[-1]
             student_feat = rearrange(student_feat, 'b c h w -> b (h w) c')
             teacher_feat = rearrange(teacher_feat, 'b c h w -> b (h w) c')
             valid_mask = valid_mask.reshape(valid_mask.shape[0], -1)
-            return student_feat, teacher_feat, valid_mask
+            return student_feat, teacher_feat, valid_mask, (grid_h, grid_w)
         else:
             if student_feat.shape[2:] != teacher_feat.shape[2:]:
                 target = tuple(
-                    min(s, t)
+                    (max if self.partitioned_ranks else min)(s, t)
                     for s, t in zip(student_feat.shape[2:], teacher_feat.shape[2:])
                 )
-                student_feat = F.interpolate(student_feat, size=target, mode='bilinear', align_corners=False)
-                teacher_feat = F.interpolate(teacher_feat, size=target, mode='bilinear', align_corners=False)
+                align_corners = bool(self.partitioned_ranks)
+                student_feat = F.interpolate(
+                    student_feat, size=target, mode='bilinear', align_corners=align_corners
+                )
+                teacher_feat = F.interpolate(
+                    teacher_feat, size=target, mode='bilinear', align_corners=align_corners
+                )
+            grid_h, grid_w = teacher_feat.shape[-2], teacher_feat.shape[-1]
             student_feat = rearrange(student_feat, 'b c h w -> b (h w) c')
             teacher_feat = rearrange(teacher_feat, 'b c h w -> b (h w) c')
-            return student_feat, teacher_feat, None
+            return student_feat, teacher_feat, None, (grid_h, grid_w)
 
     def _spatial_feature_loss(
         self,
         student_spatial: torch.Tensor,
         teacher_spatial: torch.Tensor,
         eq_mask: Optional[torch.Tensor],
+        focal_weight: Optional[float] = None,
+        grid_hw: Optional[Tuple[int, int]] = None,
     ) -> torch.Tensor:
-        """EVFM-style spatial (feature map) loss: element-wise loss, mean over channels, then masked mean over positions.
+        """native spatial (feature map) loss: per-position loss, then masked mean.
 
-        Supports "mse" (per-element squared error) and "dampened_mse" (dampened for large residuals).
-        Same reduction as EVFM BasicLossFn with reduction='none' then mean(dim=1) then reduce_loss(mask).
+        Supports "mse" (per-element squared error), "dampened_mse" (dampened for
+        large residuals), "balanced" (cosine plus SmoothL1), and "fft_mse".
+        Partitioned training uses a masked teacher-group global-token denominator.
         """
-        if self.spatial_loss_type == "dampened_mse":
+        if self.spatial_loss_type == "cosine":
+            loss_per_pos = 1.0 - F.cosine_similarity(
+                student_spatial, teacher_spatial, dim=-1, eps=1e-8
+            )
+        elif self.spatial_loss_type == "gram":
+            return self._spatial_gram_loss(student_spatial, teacher_spatial, eq_mask)
+        elif self.spatial_loss_type == "channel_kl":
+            return self._spatial_channel_kl_loss(student_spatial, teacher_spatial, eq_mask)
+        elif self.spatial_loss_type == "fft_mse":
+            if grid_hw is None:
+                raise ValueError(
+                    "fft_mse spatial loss requires grid_hw=(H, W); thread it "
+                    "from _align_features into _spatial_feature_loss."
+                )
+            if self.partitioned_ranks:
+                loss_per_pos = _fft_mse_loss(
+                    student_spatial, teacher_spatial, grid_hw, reduction="none"
+                )
+            else:
+                return _fft_mse_loss(student_spatial, teacher_spatial, grid_hw)
+        elif self.spatial_loss_type == "balanced":
+            loss_cos = 1.0 - F.cosine_similarity(
+                student_spatial, teacher_spatial, dim=-1, eps=1e-8
+            )
+            loss_l1 = F.smooth_l1_loss(
+                student_spatial, teacher_spatial, beta=2.0, reduction="none"
+            ).mean(dim=-1)
+            loss_per_pos = 0.9 * loss_cos + 0.1 * loss_l1
+        elif self.spatial_loss_type == "dampened_mse":
             element_wise = dampened_mse_loss(student_spatial, teacher_spatial)
+            loss_per_pos = element_wise.mean(dim=-1)
         else:
             element_wise = _mse_element_wise(student_spatial, teacher_spatial)
-        # Per-position loss: mean over channels [B, N, C] -> [B, N] (EVFM: loss.mean(dim=1))
-        loss_per_pos = element_wise.mean(dim=-1)
+            loss_per_pos = element_wise.mean(dim=-1)
+        if self.partitioned_ranks:
+            lp = loss_per_pos.reshape(loss_per_pos.shape[0], -1).float()
+            if eq_mask is None:
+                mask = torch.ones_like(lp)
+            else:
+                mask = eq_mask.reshape(eq_mask.shape[0], -1).float()
+            local_num_valid = mask.sum(dim=1)
+            global_num_valid = local_num_valid.sum()
+            if dist.is_initialized():
+                dist.all_reduce(
+                    global_num_valid, op=dist.ReduceOp.SUM, group=self.dist_group
+                )
+            group_world = get_world_size(self.dist_group)
+            weight = (
+                group_world * local_num_valid.shape[0]
+            ) / global_num_valid.clamp_min(1.0)
+            return ((lp * mask).sum(dim=1) * weight).mean()
+
         if eq_mask is not None:
-            num_valid = eq_mask.sum().clamp(min=1)
-            loss_spatial = (loss_per_pos * eq_mask).sum() / num_valid
+            focal_weights = self._spatial_focal_weights(teacher_spatial, eq_mask, focal_weight=focal_weight)
+            if focal_weights is not None:
+                loss_per_pos = loss_per_pos * focal_weights
+            # RADIO per-example size weighting (per_ex_weight_alpha=0.5): take each
+            # example's masked-mean loss, weight it by sqrt(#valid tokens), then a
+            # weighted mean across the batch. This is between flat-per-image
+            # (count^0) and flat-per-token (count^1) reduction, matching
+            # feature_distillation_loss.py (per_ex_counts ** 0.5). The previous
+            # global masked mean (loss.sum()/mask.sum()) is the count^1 special case.
+            lp = loss_per_pos.reshape(loss_per_pos.shape[0], -1)
+            # Count/normalize in fp32 so the B=1 case is an *exact* no-op vs the
+            # old global masked mean and bf16 doesn't round token counts.
+            m = eq_mask.reshape(eq_mask.shape[0], -1).float()
+            lp = lp.float()
+            per_ex_valid = m.sum(dim=1)
+            per_ex_loss = (lp * m).sum(dim=1) / per_ex_valid.clamp(min=1.0)
+            per_ex_weight = per_ex_valid.clamp(min=0.0).sqrt()
+            # RADIO cross-rank normalization: sum the sqrt(count) weights over the ranks running THIS
+            # teacher (self.dist_group = its per-resolution subgroup under partitioning, else global)
+            # and scale by global_batch_size, so DDP gradient-averaging yields a single cross-rank
+            # sqrt(token-count)-weighted mean (the deployed high-token-count arm is not under-weighted).
+            total_weight = per_ex_weight.sum()
+            if dist.is_initialized():
+                dist.all_reduce(total_weight, op=dist.ReduceOp.SUM, group=self.dist_group)
+            global_batch_size = per_ex_loss.shape[0] * get_world_size(self.dist_group)
+            per_ex_weight = (global_batch_size * per_ex_weight) / total_weight.clamp(min=1.0)
+            loss_spatial = (per_ex_weight * per_ex_loss).mean()
         else:
+            focal_weights = self._spatial_focal_weights(teacher_spatial, None, focal_weight=focal_weight)
+            if focal_weights is not None:
+                loss_per_pos = loss_per_pos * focal_weights
             loss_spatial = loss_per_pos.mean()
         return loss_spatial
+
+    def _spatial_focal_weights(
+        self,
+        teacher_spatial: torch.Tensor,
+        eq_mask: Optional[torch.Tensor],
+        focal_weight: Optional[float] = None,
+        eps: float = 1e-6,
+    ) -> Optional[torch.Tensor]:
+        """Build mean-one token weights from teacher spatial saliency.
+
+        This is a label-free analogue of focal feature distillation: every valid
+        token still contributes, but tokens with larger teacher activation norm
+        get a larger share of the spatial feature loss. The final weights are
+        normalized to mean one over valid tokens, so enabling this does not
+        silently change the global spatial-loss scale.
+        """
+        weight = self.spatial_focal_weight if focal_weight is None else float(focal_weight)
+        if weight <= 0.0:
+            return None
+
+        saliency = teacher_spatial.detach().float().pow(2).mean(dim=-1).sqrt()
+        if eq_mask is None:
+            valid = torch.ones_like(saliency)
+        else:
+            valid = eq_mask.to(dtype=saliency.dtype, device=saliency.device)
+
+        count = valid.sum(dim=1, keepdim=True).clamp_min(1.0)
+        saliency = saliency * valid
+        saliency_mean = saliency.sum(dim=1, keepdim=True) / count
+        focus = (saliency / saliency_mean.clamp_min(eps)).clamp_min(eps)
+        if self.spatial_focal_gamma != 1.0:
+            focus = focus.pow(self.spatial_focal_gamma)
+        focus = focus * valid
+        focus_mean = focus.sum(dim=1, keepdim=True) / count
+        focus = focus / focus_mean.clamp_min(eps)
+
+        weights = (1.0 - weight) + weight * focus
+        weights = weights * valid
+
+        if self.spatial_focal_max_weight > 0.0:
+            weights = weights.clamp(max=self.spatial_focal_max_weight) * valid
+            weight_mean = weights.sum(dim=1, keepdim=True) / count
+            weights = weights / weight_mean.clamp_min(eps)
+            weights = weights * valid
+
+        if self.alignment_metrics_enabled:
+            with torch.no_grad():
+                valid_bool = valid > 0
+                if valid_bool.any():
+                    valid_weights = weights[valid_bool]
+                    self.last_alignment_metrics.update({
+                        "spatial_focal_weight_mean": valid_weights.mean().detach(),
+                        "spatial_focal_weight_max": valid_weights.max().detach(),
+                    })
+        return weights
+
+    def _normalized_intermediate_weights(self, count: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        """Return mean-scale-stable relative weights for intermediate losses."""
+        if self.intermediate_loss_weights:
+            weights = torch.tensor(self.intermediate_loss_weights, device=device, dtype=dtype)
+        else:
+            weights = torch.ones(count, device=device, dtype=dtype)
+        if weights.numel() != count:
+            raise ValueError(f"Expected {count} intermediate weights, got {weights.numel()}")
+        weight_sum = weights.sum().clamp_min(torch.finfo(dtype).eps)
+        return weights / weight_sum
+
+    def _intermediate_spatial_feature_loss(
+        self,
+        student_features: Union[torch.Tensor, List[torch.Tensor], Dict[str, torch.Tensor]],
+        teacher_spatial: torch.Tensor,
+        student_valid_mask: Optional[torch.Tensor],
+        teacher_valid_mask: Optional[torch.Tensor],
+        spatial_transform: Optional[torch.Tensor],
+    ) -> Optional[torch.Tensor]:
+        """Distill lower-resolution student maps against downsampled teacher features."""
+        if self.intermediate_loss_weight <= 0.0 or not self.intermediate_projection_layers:
+            return None
+
+        student_maps = self._get_intermediate_feature_maps(student_features)
+        num_levels = len(self.intermediate_projection_layers)
+        if len(student_maps) < num_levels:
+            raise RuntimeError(
+                f"Student returned {len(student_maps)} intermediate feature maps, "
+                f"but {num_levels} intermediate projection heads are configured."
+            )
+
+        student_maps = student_maps[:num_levels]
+        weights = self._normalized_intermediate_weights(
+            num_levels,
+            teacher_spatial.device,
+            torch.float32,
+        )
+        total = teacher_spatial.new_zeros((), dtype=torch.float32)
+        per_level_losses = []
+
+        B = teacher_spatial.shape[0]
+        if teacher_valid_mask is None:
+            teacher_valid_mask = torch.ones(
+                B,
+                teacher_spatial.shape[-2],
+                teacher_spatial.shape[-1],
+                dtype=torch.float32,
+                device=teacher_spatial.device,
+            )
+
+        for level_idx, (student_map, projector, level_weight) in enumerate(
+            zip(student_maps, self.intermediate_projection_layers, weights)
+        ):
+            if student_map.ndim != 4:
+                raise RuntimeError(
+                    f"Intermediate feature {level_idx} must be BCHW, got shape {list(student_map.shape)}"
+                )
+            if student_valid_mask is None:
+                level_student_mask = torch.ones(
+                    student_map.shape[0],
+                    student_map.shape[-2],
+                    student_map.shape[-1],
+                    dtype=torch.float32,
+                    device=student_map.device,
+                )
+            else:
+                level_student_mask = self._build_mask(
+                    student_valid_mask,
+                    student_map.shape[-2:],
+                    student_map.device,
+                ).float()
+
+            # RADIO order: project at the student map's native resolution, THEN warp
+            # (mirrors the main spatial path above; keeps the projected map's gradient
+            # constraining the full student rep rather than an already-warped copy).
+            _h, _w = student_map.shape[2], student_map.shape[3]
+            student_map = rearrange(student_map, 'b c h w -> b (h w) c')
+            student_map = projector(student_map)
+            student_map = rearrange(student_map, 'b (h w) c -> b c h w', h=_h, w=_w)
+
+            student_level, teacher_level, eq_mask, level_grid_hw = self._align_features(
+                student_map,
+                teacher_spatial,
+                level_student_mask,
+                teacher_valid_mask,
+                spatial_transform,
+            )
+            level_loss = self._spatial_feature_loss(
+                student_level,
+                teacher_level,
+                eq_mask,
+                focal_weight=self.intermediate_focal_weight,
+                grid_hw=level_grid_hw,
+            )
+            total = total + level_weight * level_loss.float()
+            per_level_losses.append(level_loss.detach())
+
+        if self.alignment_metrics_enabled:
+            with torch.no_grad():
+                self.last_alignment_metrics["intermediate_spatial_loss"] = total.detach()
+                for idx, level_loss in enumerate(per_level_losses):
+                    self.last_alignment_metrics[f"intermediate_spatial_loss_{idx}"] = level_loss
+        return total.to(dtype=teacher_spatial.dtype)
+
+    @torch.no_grad()
+    def compute_spatial_cka_stats(
+        self,
+        batch_input: torch.Tensor,
+        teacher_batch_input: Optional[torch.Tensor] = None,
+        student_valid_mask: Optional[torch.Tensor] = None,
+        teacher_valid_mask: Optional[torch.Tensor] = None,
+        spatial_transform: Optional[torch.Tensor] = None,
+        student_spatial: Optional[torch.Tensor] = None,
+    ) -> Optional[dict]:
+        """Compute sufficient statistics for linear CKA between *raw* student and
+        teacher spatial feature maps.
+
+        This is intended as a projector-independent validation proxy of backbone
+        quality: it operates on the raw backbone features (no projection layer,
+        no PHI/teacher normalization), so the resulting CKA is directly
+        comparable across runs regardless of which distillation loss they train
+        with. Student and teacher may have different feature widths; CKA handles
+        that natively.
+
+        Returns a dict of accumulators (cross/self covariance sums, per-feature
+        sums and a token count, all float64) that can be summed across batches
+        and ranks. The final CKA is computed from these by the caller. Returns
+        ``None`` when no valid tokens are present.
+        """
+        teacher_input = teacher_batch_input if teacher_batch_input is not None else batch_input
+        device = batch_input.device
+
+        if student_spatial is not None:
+            student_feat = self._get_last_feature_map(student_spatial)
+        else:
+            student_feat = self._get_last_feature_map(
+                self.student_model.forward_feature_pyramid(batch_input)
+            )
+        teacher_feat = self._get_last_feature_map(
+            self.teacher_model.forward_feature_pyramid(teacher_input)
+        )
+
+        B, _, H, W = teacher_feat.shape
+        if teacher_valid_mask is not None:
+            t_mask = self._build_mask(
+                teacher_valid_mask,
+                (H, W),
+                device,
+            ).float()
+        else:
+            t_mask = torch.ones(B, H, W, dtype=torch.float32, device=device)
+        if student_valid_mask is None:
+            s_mask = torch.ones(
+                B, student_feat.shape[2], student_feat.shape[3],
+                dtype=torch.float32, device=device,
+            )
+        else:
+            s_mask = student_valid_mask.float()
+
+        student_feat, teacher_feat, eq_mask, _ = self._align_features(
+            student_feat, teacher_feat, s_mask, t_mask, spatial_transform,
+        )
+
+        x = student_feat.reshape(-1, student_feat.shape[-1]).float()
+        y = teacher_feat.reshape(-1, teacher_feat.shape[-1]).float()
+        if eq_mask is not None:
+            valid = eq_mask.reshape(-1) > 0.5
+            x = x[valid]
+            y = y[valid]
+        if x.shape[0] == 0:
+            return None
+
+        x = x.double()
+        y = y.double()
+        return {
+            "sum_xy": x.T @ y,
+            "sum_xx": x.T @ x,
+            "sum_yy": y.T @ y,
+            "sum_x": x.sum(dim=0),
+            "sum_y": y.sum(dim=0),
+            "count": torch.tensor(float(x.shape[0]), dtype=torch.float64, device=device),
+        }
+
+    def _spatial_gram_loss(
+        self,
+        student_spatial: torch.Tensor,
+        teacher_spatial: torch.Tensor,
+        eq_mask: Optional[torch.Tensor],
+        max_tokens: int = 512,
+    ) -> torch.Tensor:
+        """Match token-token relations instead of exact per-channel values."""
+        num_tokens = student_spatial.shape[1]
+        if num_tokens > max_tokens:
+            idx = torch.linspace(
+                0,
+                num_tokens - 1,
+                steps=max_tokens,
+                device=student_spatial.device,
+            ).long()
+            student_spatial = student_spatial.index_select(1, idx)
+            teacher_spatial = teacher_spatial.index_select(1, idx)
+            if eq_mask is not None:
+                eq_mask = eq_mask.index_select(1, idx)
+
+        student_norm = F.normalize(student_spatial.float(), dim=-1, eps=1e-8)
+        teacher_norm = F.normalize(teacher_spatial.float(), dim=-1, eps=1e-8)
+        student_gram = torch.bmm(student_norm, student_norm.transpose(1, 2))
+        teacher_gram = torch.bmm(teacher_norm, teacher_norm.transpose(1, 2))
+        loss = (student_gram - teacher_gram).pow(2)
+
+        if eq_mask is None:
+            return loss.mean()
+
+        valid = eq_mask.float()
+        pair_valid = valid.unsqueeze(1) * valid.unsqueeze(2)
+        return (loss * pair_valid).sum() / pair_valid.sum().clamp(min=1.0)
+
+    def _spatial_channel_kl_loss(
+        self,
+        student_spatial: torch.Tensor,
+        teacher_spatial: torch.Tensor,
+        eq_mask: Optional[torch.Tensor],
+        temperature: float = 4.0,
+    ) -> torch.Tensor:
+        """Match each channel's distribution over spatial positions."""
+        student_logits = student_spatial.float().transpose(1, 2) / temperature
+        teacher_logits = teacher_spatial.float().transpose(1, 2) / temperature
+
+        if eq_mask is not None:
+            invalid = ~eq_mask.bool().unsqueeze(1)
+            student_logits = student_logits.masked_fill(invalid, -1e4)
+            teacher_logits = teacher_logits.masked_fill(invalid, -1e4)
+
+        teacher_prob = F.softmax(teacher_logits, dim=-1)
+        student_log_prob = F.log_softmax(student_logits, dim=-1)
+        loss = F.kl_div(student_log_prob, teacher_prob, reduction="none").sum(dim=-1)
+        return loss.mean() * (temperature ** 2)
+
+    def _pack_mosaic(self, images: torch.Tensor):
+        """Pack outer views into RADIO MosaicAdaptor's fixed inner canvas."""
+        if self.mosaic_inner_size <= 0:
+            return images, None
+
+        batch, channels, height, width = images.shape
+        if height != self.mosaic_outer_size or width != self.mosaic_outer_size:
+            raise ValueError(
+                "RADIO mosaic received the wrong outer view size: "
+                f"expected {self.mosaic_outer_size}, got {(height, width)}"
+            )
+        inner = self.mosaic_inner_size
+        stride = self.mosaic_downsample
+        outer_grid_h = height // stride
+        outer_grid_w = width // stride
+        num_per_col = (inner // stride) // outer_grid_h
+        num_per_row = (inner // stride) // outer_grid_w
+        if num_per_col <= 0 or num_per_row <= 0:
+            raise ValueError(
+                f"Mosaic canvas {inner} cannot contain outer view {(height, width)} "
+                f"at feature stride {stride}"
+            )
+        num_per_image = num_per_col * num_per_row
+        canvas_batch = int(math.ceil(batch / num_per_image))
+        tile_h = inner // num_per_col
+        tile_w = inner // num_per_row
+        canvas = images.new_zeros((canvas_batch, channels, inner, inner))
+        for idx in range(batch):
+            canvas_idx = idx // num_per_image
+            tile_idx = idx % num_per_image
+            row = tile_idx // num_per_row
+            col = tile_idx % num_per_row
+            y = row * tile_h
+            x = col * tile_w
+            canvas[canvas_idx, :, y:y + height, x:x + width] = images[idx]
+        state = {
+            "batch": batch,
+            "num_per_image": num_per_image,
+            "num_per_row": num_per_row,
+            "tile_grid_h": tile_h // stride,
+            "tile_grid_w": tile_w // stride,
+            "outer_grid_h": outer_grid_h,
+            "outer_grid_w": outer_grid_w,
+        }
+        return canvas, state
+
+    @staticmethod
+    def _unpack_mosaic_features(features: torch.Tensor, state):
+        """Slice one teacher feature window back out for every outer view."""
+        if state is None:
+            return features
+        windows = []
+        for idx in range(state["batch"]):
+            canvas_idx = idx // state["num_per_image"]
+            tile_idx = idx % state["num_per_image"]
+            row = tile_idx // state["num_per_row"]
+            col = tile_idx % state["num_per_row"]
+            y = row * state["tile_grid_h"]
+            x = col * state["tile_grid_w"]
+            windows.append(
+                features[
+                    canvas_idx,
+                    :,
+                    y:y + state["outer_grid_h"],
+                    x:x + state["outer_grid_w"],
+                ]
+            )
+        return torch.stack(windows, dim=0)
+
+    @staticmethod
+    def _unpack_mosaic_summary(summary: torch.Tensor, state):
+        """Repeat canvas summaries for their corresponding outer views."""
+        if state is None:
+            return summary
+        return torch.repeat_interleave(
+            summary, state["num_per_image"], dim=0
+        )[:state["batch"]]
 
     def forward(
         self,
@@ -1455,6 +2441,7 @@ class DistillationLoss(nn.Module):
             torch.Tensor: Computed distillation loss
         """
         teacher_input = teacher_batch_input if teacher_batch_input is not None else batch_input
+        teacher_input, mosaic_state = self._pack_mosaic(teacher_input)
         device = batch_input.device
 
         if self.distillation_mode == "logits":
@@ -1473,14 +2460,19 @@ class DistillationLoss(nn.Module):
             with torch.no_grad():
                 teacher_output = self.teacher_model.forward_feature_pyramid(teacher_input)
                 teacher_output = self._get_last_feature_map(teacher_output)
+                teacher_output = self._unpack_mosaic_features(
+                    teacher_output, mosaic_state
+                )
             # normalize the teacher feature maps
             B, _, H, W = teacher_output.shape
             if teacher_valid_mask is not None:
-                t_mask = self._build_mask(teacher_valid_mask, (H, W), device)
+                t_mask = self._build_mask(
+                    teacher_valid_mask,
+                    (H, W),
+                    device,
+                )
             else:
                 t_mask = torch.ones(B, H, W, dtype=torch.bool, device=device)
-            # Only accumulate normalization statistics during training so that
-            # validation / sanity-check batches do not pollute the running stats.
             if self.training:
                 self.phi_norm.update(None, teacher_output, t_mask)
             teacher_output = self.phi_norm.transform_targets(teacher_output)
@@ -1491,36 +2483,62 @@ class DistillationLoss(nn.Module):
                                                 dtype=torch.float32, device=device)
             teacher_valid_mask = t_mask.float()
 
-            student_output, teacher_output, eq_mask = self._align_features(
+            student_output, teacher_output, eq_mask, grid_hw = self._align_features(
                 student_output, teacher_output,
                 student_valid_mask, teacher_valid_mask,
                 spatial_transform,
             )
+            if self.projection_layer is not None:
+                student_output = self.projection_layer(student_output)
         elif self.distillation_mode == "combo":
+            self.last_alignment_metrics = {}
             teacher_sig = inspect.signature(self.teacher_model.forward)
             student_sig = inspect.signature(self.student_model.forward)
             assert 'return_features' in teacher_sig.parameters, "Teacher model must support return_features in `combo` mode"
             assert 'return_features' in student_sig.parameters, "Student model must support return_features in `combo` mode"
             if student_summary is not None and student_spatial is not None:
+                student_spatial_features = student_spatial
                 student_spatial = self._get_last_feature_map(student_spatial)
             else:
-                student_summary, student_spatial = self.student_model.forward(batch_input, return_features=True)
-                student_spatial = self._get_last_feature_map(student_spatial)
+                return_intermediates = self.intermediate_loss_weight > 0.0
+                if return_intermediates and "return_intermediate_features" not in student_sig.parameters:
+                    raise RuntimeError(
+                        "intermediate_loss_weight > 0 requires the student forward to accept "
+                        "return_intermediate_features."
+                    )
+                if return_intermediates:
+                    student_summary, student_spatial_features = self.student_model.forward(
+                        batch_input,
+                        return_features=True,
+                        return_intermediate_features=True,
+                    )
+                else:
+                    student_summary, student_spatial_features = self.student_model.forward(batch_input, return_features=True)
+                student_spatial = self._get_last_feature_map(student_spatial_features)
             with torch.no_grad():
                 teacher_summary, teacher_spatial = self.teacher_model.forward(teacher_input, return_features=True)
                 teacher_spatial = self._get_last_feature_map(teacher_spatial)
+                teacher_spatial = self._unpack_mosaic_features(
+                    teacher_spatial, mosaic_state
+                )
+                teacher_summary = self._unpack_mosaic_summary(
+                    teacher_summary, mosaic_state
+                )
 
             # normalize the teacher feature maps
             B, _, H, W = teacher_spatial.shape
             if teacher_valid_mask is not None:
-                t_mask = self._build_mask(teacher_valid_mask, (H, W), device)
+                t_mask = self._build_mask(
+                    teacher_valid_mask,
+                    (H, W),
+                    device,
+                )
             else:
                 t_mask = torch.ones(B, H, W, dtype=torch.bool, device=device)
-            # Only accumulate normalization statistics during training so that
-            # validation / sanity-check batches do not pollute the running stats.
             if self.training:
                 self.phi_norm.update(None, teacher_spatial, t_mask)
             teacher_spatial = self.phi_norm.transform_targets(teacher_spatial)
+            teacher_spatial_map = teacher_spatial
             # align the shape of student and teacher feature maps
 
             if student_valid_mask is None:
@@ -1528,18 +2546,64 @@ class DistillationLoss(nn.Module):
                                                 dtype=torch.float32, device=device)
             teacher_valid_mask = t_mask.float()
 
-            student_spatial, teacher_spatial, eq_mask = self._align_features(
+            # RADIO order: project the student at its NATIVE resolution, THEN warp/align.
+            # tao previously ran _align_features first -- warping the raw student down to
+            # the teacher grid -- and projected the already-downsampled student. On the
+            # deployed (1920/120x120) arm that under-supervised the full-resolution rep's
+            # high frequencies: with identical inputs the deployed-student gradient under
+            # the two orders diverges (cos 0.79) and tao's order carries less high-freq
+            # energy (0.615 vs RADIO 0.727) while the projected loss is ~unchanged (ratio
+            # 0.95). The deployed rep therefore drifts as training continues past unfreeze
+            # (peak-then-decline) even though the loss looks healthy. Projecting at native
+            # resolution first matches RADIO (feature_distillation_loss.py forward, which
+            # applies the student adaptor before resize_fn) and keeps the loss gradient
+            # constraining the full-resolution deployed backbone.
+            if self.projection_layer is not None:
+                _h, _w = student_spatial.shape[2], student_spatial.shape[3]
+                student_spatial = rearrange(student_spatial, 'b c h w -> b (h w) c')
+                student_spatial = self.projection_layer(student_spatial)
+                student_spatial = rearrange(
+                    student_spatial, 'b (h w) c -> b c h w', h=_h, w=_w
+                )
+
+            student_spatial, teacher_spatial, eq_mask, grid_hw = self._align_features(
                 student_spatial, teacher_spatial,
                 student_valid_mask, teacher_valid_mask,
                 spatial_transform,
             )
-
-            if self.projection_layer is not None:
-                student_spatial = self.projection_layer(student_spatial)
-                student_spatial = self._apply_phi_s(student_spatial)
-            # spatial (feature distillation) loss — EVFM-style: element-wise (mse or dampened_mse), mean over C, masked mean
-            loss_spatial = self._spatial_feature_loss(student_spatial, teacher_spatial, eq_mask)
+            if self.alignment_metrics_enabled:
+                with torch.no_grad():
+                    spatial_cos = F.cosine_similarity(
+                        student_spatial.float(), teacher_spatial.float(), dim=-1, eps=1e-8
+                    )
+                    spatial_mse = (student_spatial.float() - teacher_spatial.float()).pow(2).mean(dim=-1)
+                    spatial_cka = linear_cka(student_spatial, teacher_spatial, eq_mask)
+                    self.last_alignment_metrics.update({
+                        "spatial_cosine": _masked_token_mean(spatial_cos, eq_mask).detach(),
+                        "spatial_mse": _masked_token_mean(spatial_mse, eq_mask).detach(),
+                        "spatial_cka": spatial_cka.detach(),
+                        "spatial_student_norm": _masked_token_mean(
+                            student_spatial.float().norm(dim=-1), eq_mask
+                        ).detach(),
+                        "spatial_teacher_norm": _masked_token_mean(
+                            teacher_spatial.float().norm(dim=-1), eq_mask
+                        ).detach(),
+                    })
+            # spatial (feature distillation) loss — native: element-wise (mse or dampened_mse), mean over C, masked mean
+            loss_spatial = self._spatial_feature_loss(student_spatial, teacher_spatial, eq_mask, grid_hw=grid_hw)
             loss = self.fd_loss_weight * loss_spatial
+            if self.alignment_metrics_enabled:
+                with torch.no_grad():
+                    self.last_alignment_metrics["spatial_loss"] = loss_spatial.detach().float()
+            loss_intermediate = self._intermediate_spatial_feature_loss(
+                student_spatial_features,
+                teacher_spatial_map,
+                student_valid_mask,
+                teacher_valid_mask,
+                spatial_transform,
+            )
+            if loss_intermediate is not None:
+                loss = loss + self.intermediate_loss_weight * loss_intermediate
 
             if self.summary_loss_weight != 0.0:
                 student_summary = self._select_summary_token(student_summary, self.student_model)
@@ -1548,14 +2612,32 @@ class DistillationLoss(nn.Module):
                     student_summary = self.projection_layer_summary(student_summary)
                 if self.teacher_norm is not None:
                     teacher_summary = self.teacher_norm(teacher_summary)
+                if self.alignment_metrics_enabled:
+                    with torch.no_grad():
+                        self.last_alignment_metrics.update({
+                            "summary_cosine": F.cosine_similarity(
+                                student_summary.float(), teacher_summary.float(), dim=-1, eps=1e-8
+                            ).mean().detach(),
+                            "summary_mse": (
+                                student_summary.float() - teacher_summary.float()
+                            ).pow(2).mean().detach(),
+                            "summary_student_norm": student_summary.float().norm(dim=-1).mean().detach(),
+                            "summary_teacher_norm": teacher_summary.float().norm(dim=-1).mean().detach(),
+                        })
 
-                # summary loss (CE with temperature, or EVFM-style angle/cosine/tangent_sphere)
+                # summary loss (CE with temperature, or native angle/cosine/tangent_sphere)
                 if self.summary_criterion is not None:
                     loss_summary = self.summary_criterion(student_summary, teacher_summary)
                 else:
                     teacher_probs = F.softmax(teacher_summary / self.temperature, dim=-1)
                     loss_summary = self.criterions["CE"](student_summary / self.temperature, teacher_probs)
                 loss = loss + self.summary_loss_weight * loss_summary
+                if self.alignment_metrics_enabled:
+                    with torch.no_grad():
+                        self.last_alignment_metrics["summary_loss"] = loss_summary.detach().float()
+            if self.alignment_metrics_enabled:
+                with torch.no_grad():
+                    self.last_alignment_metrics["combo_loss"] = loss.detach().float()
             return loss
         else:
             if student_summary is not None:
@@ -1565,11 +2647,17 @@ class DistillationLoss(nn.Module):
             with torch.no_grad():
                 teacher_output = self.teacher_model.forward_pre_logits(teacher_input)
 
-        # Handle projection for feature distillation
-        if self.distillation_mode != "logits" and self.projection_layer is not None:
+        if (
+            self.distillation_mode != "logits" and
+            self.distillation_mode != "spatial" and
+            self.projection_layer is not None
+        ):
             student_output = self.projection_layer(student_output)
-            if self.distillation_mode == "spatial":
-                student_output = self._apply_phi_s(student_output)
+
+        if self.distillation_mode == "spatial" and (
+            self.spatial_loss_type != "mse" or self.loss_type == "MSE"
+        ):
+            return self._spatial_feature_loss(student_output, teacher_output, eq_mask, grid_hw=grid_hw)
 
         # Apply teacher normalization if specified
         if self.teacher_norm is not None and self.distillation_mode == "summary":

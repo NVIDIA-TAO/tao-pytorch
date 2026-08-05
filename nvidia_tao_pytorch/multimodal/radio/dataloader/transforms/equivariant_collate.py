@@ -12,8 +12,7 @@ collation function that:
 2. Generates ``valid_mask`` from ``Quad.bounds`` via ``cv2.fillPoly``
 3. Computes teacher-to-student homographies via ``cv2.getPerspectiveTransform``
 
-**Adaptation**: The output format is changed from EVFM's list-of-tuples to
-the dict format expected by TAO's ``MultiTeacherDistiller``::
+The output uses the dict format expected by ``MultiTeacherDistiller``::
 
     {
         "img":            (B, C, H, W),          # student images
@@ -58,6 +57,7 @@ def equivariant_collate(
     patch_sizes: List[int],
     extra_map: Dict[int, str] = None,
     label_key: str = "label",
+    teacher_view_indices: List[int] = None,
 ) -> Callable[..., Iterable]:
     """Factory returning a batch collation function.
 
@@ -172,6 +172,13 @@ def equivariant_collate(
                 for i in range(1, num_images)
             ],
         }
+        if teacher_view_indices is not None:
+            if len(teacher_view_indices) != num_images - 1:
+                raise ValueError(
+                    "teacher_view_indices must identify every teacher view: "
+                    f"got {len(teacher_view_indices)} ids for {num_images - 1} views"
+                )
+            result["teacher_view_indices"] = list(teacher_view_indices)
 
         # Attach remaining extras at top level
         for k, v in named_extras.items():

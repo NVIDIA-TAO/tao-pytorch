@@ -74,7 +74,7 @@ train:
 distill:
   loss_type: "balanced"
   # Optional: student_resolution (defaults to dataset.img_size). For multi-view use tar_data_sources.
-  # teacher: list of configs; each may set input_size and match_student_resolution (EVFM-style).
+  # teacher: list of configs; each may set input_size and match_student_resolution.
   teacher:
     backbone:
       type: resnet_34

@@ -44,7 +44,7 @@ class OptimConfig:
         value="adamw",
         default_value="adamw",
         description="Optimizer",
-        valid_options="adamw,adam,sgd"
+        valid_options="adamw,adam,sgd,lamb,fusedlamb"
     )
     lr: float = FLOAT_FIELD(
         value=0.00006,
@@ -96,6 +96,14 @@ class OptimConfig:
         valid_min=0,
         valid_max="inf",
         description="Warmup epochs."
+    )
+    sched_on_updates: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        description=(
+            "Step the LR schedule per optimizer update instead of per epoch. "
+            "This makes schedule granularity independent of the selected policy."
+        )
     )
 
 
@@ -236,6 +244,31 @@ class BackboneConfig:
         default_value=False,
         description="Flag to freeze norm",
         automl_enabled="TRUE"
+    )
+    input_dim: List[int] = LIST_FIELD(
+        arrList=[3, 224, 224],
+        default_value=[3, 224, 224],
+        description="Input C,H,W for RADIO student backbones."
+    )
+    output_dim: Optional[List[int]] = LIST_FIELD(
+        arrList=[],
+        default_value=[],
+        description="Optional output C,H,W for RADIO student backbones. Empty derives from the backbone stride/patch size."
+    )
+    feature_dim: int = INT_FIELD(
+        value=256,
+        default_value=256,
+        description="RADIO feature dimension for student backbones."
+    )
+    student_norm_mean: List[float] = LIST_FIELD(
+        arrList=[],
+        default_value=[],
+        description="Optional student input normalization mean for ViT RADIO student backbones. Empty uses the backbone default."
+    )
+    student_norm_std: List[float] = LIST_FIELD(
+        arrList=[],
+        default_value=[],
+        description="Optional student input normalization std for ViT RADIO student backbones. Empty uses the backbone default."
     )
 
 
@@ -564,7 +597,7 @@ class DatasetConfig:
     img_size: int = INT_FIELD(
         value=224,
         default_value=224,
-        description="The input image size"
+        description="The input image size (square crops)."
     )
     batch_size: int = INT_FIELD(
         value=8,
@@ -609,7 +642,7 @@ class DatasetConfig:
     val_img_size: Optional[int] = INT_FIELD(
         value=None,
         default_value=None,
-        description="Image size for validation. Defaults to img_size when not set.",
+        description="Image size for validation (square crops). Defaults to img_size when not set.",
         display_name="Validation Image Size"
     )
     val_batch_size: Optional[int] = INT_FIELD(
@@ -670,6 +703,15 @@ class TrainExpConfig(TrainConfig):
         description="Pretrained model path",
         display_name="pretrained model path"
     )
+    warmstart_training_checkpoint_path: Optional[str] = STR_FIELD(
+        value=None,
+        default_value="",
+        description=(
+            "Load student, projection-head, and distillation-statistics weights from a "
+            "training checkpoint without restoring optimizer, scheduler, epoch, or data state"
+        ),
+        display_name="weights-only training checkpoint"
+    )
     tensorboard: Optional[TensorBoardLogger] = DATACLASS_FIELD(TensorBoardLogger())
     enable_ema: bool = BOOL_FIELD(
         value=False,
@@ -693,6 +735,54 @@ class TrainExpConfig(TrainConfig):
         default_value="fp32",
         description="Precision",
         valid_options="fp16, bf16, fp32"
+    )
+    checkpoint_keep_last_n: int = INT_FIELD(
+        value=-1,
+        default_value=-1,
+        valid_min=-1,
+        valid_max="inf",
+        display_name="Rolling checkpoint count",
+        description=(
+            "Max number of checkpoints to keep on disk (maps to ModelCheckpoint.save_top_k). "
+            "-1 keeps every checkpoint (legacy behaviour); a positive N keeps only N. Which N "
+            "are kept depends on checkpoint_monitor. The _latest symlink is always maintained "
+            "for resume."
+        )
+    )
+    checkpoint_keep_milestone_every: int = INT_FIELD(
+        value=0,
+        default_value=0,
+        valid_min=0,
+        valid_max="inf",
+        display_name="Milestone checkpoint interval",
+        description=(
+            "Independently of checkpoint_keep_last_n's rolling window, also keep a permanent "
+            "checkpoint every N epochs (0 disables). These are saved under <results_dir>/milestones "
+            "with save_top_k=-1 so they are never pruned -- useful for probing/eval at fixed "
+            "epochs on a long run without racing the rolling-window deletion."
+        )
+    )
+    checkpoint_monitor: str = STR_FIELD(
+        value="",
+        default_value="",
+        display_name="Checkpoint selection metric",
+        description=(
+            "Metric used to rank checkpoints when checkpoint_keep_last_n > 0. Empty string keeps "
+            "the N most recent checkpoints (ranks by epoch). Set to a logged metric to keep the "
+            "best N instead, e.g. 'total_loss_epoch' / 'distillation_loss_epoch' (lowest training "
+            "loss), or a validation metric such as 'val_distillation_loss' or 'val_spatial_cka'. "
+            "When monitoring a validation metric, ensure validation runs at the checkpoint cadence."
+        )
+    )
+    checkpoint_monitor_mode: str = STR_FIELD(
+        value="min",
+        default_value="min",
+        display_name="Checkpoint selection mode",
+        valid_options="min, max",
+        description=(
+            "Whether lower ('min') or higher ('max') checkpoint_monitor values are better. "
+            "Use 'min' for losses and 'max' for metrics like val_spatial_cka."
+        )
     )
 
 
@@ -805,10 +895,10 @@ class TeacherConfig:
         default_value={},
         description="Per-sample stochastic resolutions for input resizing. Keys=resolutions, values=probabilities."
     )
-    input_size: Optional[int] = INT_FIELD(
+    input_size: Any = INT_FIELD(
         value=None,
         default_value=None,
-        description="Input size for the teacher model"
+        description="Input size for the teacher model. Use an int for square views or [height, width] for rectangular views."
     )
     patch_size: Optional[int] = INT_FIELD(
         value=None,
@@ -824,6 +914,16 @@ class TeacherConfig:
         value=True,
         default_value=True,
         description="Flag to match the student resolution"
+    )
+    student_resolution: Optional[int] = INT_FIELD(
+        value=None,
+        default_value=None,
+        description=(
+            "Square student resolution at which THIS teacher supervises the student "
+            "and routes this teacher's loss to it. In partitioned training, each rank "
+            "runs only its partition's resolution. If unset, the teacher uses "
+            "dataset.img_size."
+        )
     )
     norm_mean: Optional[List[float]] = LIST_FIELD(
         [],
@@ -859,6 +959,147 @@ class TeacherConfig:
         display_name="Summary (CLS) loss type for combo mode",
         valid_options="CE, angle, cosine, tangent_sphere"
     )
+    spatial_loss_type: Optional[str] = STR_FIELD(
+        value="mse",
+        default_value="mse",
+        display_name="Spatial feature loss type for combo/spatial mode",
+        valid_options="mse, dampened_mse, balanced, cosine, gram, channel_kl",
+        description=(
+            "Spatial feature loss for feature-map distillation. "
+            "balanced uses mostly cosine alignment with a small SmoothL1 term."
+        )
+    )
+    spatial_focal_weight: float = FLOAT_FIELD(
+        value=0.0,
+        default_value=0.0,
+        valid_min=0.0,
+        valid_max=1.0,
+        display_name="Spatial focal weighting strength",
+        description=(
+            "Optional teacher-saliency weighting for spatial feature loss. "
+            "0 disables focal weighting; 1 uses only normalized teacher-saliency weights."
+        )
+    )
+    spatial_focal_gamma: float = FLOAT_FIELD(
+        value=1.0,
+        default_value=1.0,
+        valid_min=0.0,
+        valid_max="inf",
+        display_name="Spatial focal gamma",
+        description="Exponent applied to normalized teacher spatial saliency before loss weighting."
+    )
+    spatial_focal_max_weight: float = FLOAT_FIELD(
+        value=4.0,
+        default_value=4.0,
+        valid_min=0.0,
+        valid_max="inf",
+        display_name="Spatial focal max weight",
+        description=(
+            "Optional clamp for per-token spatial focal weights before re-normalization. "
+            "Set 0 to disable clamping."
+        )
+    )
+    intermediate_loss_weight: float = FLOAT_FIELD(
+        value=0.0,
+        default_value=0.0,
+        valid_min=0.0,
+        valid_max="inf",
+        display_name="Intermediate spatial loss weight",
+        description=(
+            "Global weight for optional lower-resolution student feature-map supervision "
+            "in combo distillation mode."
+        )
+    )
+    intermediate_loss_weights: List[float] = LIST_FIELD(
+        [],
+        default_value=[],
+        description=(
+            "Relative per-level weights for intermediate spatial losses. "
+            "If empty, levels are weighted uniformly and normalized to sum to 1."
+        )
+    )
+    intermediate_feature_dims: List[int] = LIST_FIELD(
+        [],
+        default_value=[],
+        description=(
+            "Student channel dimensions for intermediate spatial projection heads, "
+            "one per intermediate feature map (highest-resolution first)."
+        )
+    )
+    intermediate_focal_weight: float = FLOAT_FIELD(
+        value=0.0,
+        default_value=0.0,
+        valid_min=0.0,
+        valid_max=1.0,
+        display_name="Intermediate spatial focal weighting strength",
+        description="Teacher-saliency focal weighting strength for intermediate spatial losses."
+    )
+    intermediate_mlp_version: str = STR_FIELD(
+        value="residual",
+        default_value="residual",
+        display_name="Intermediate spatial projection head type",
+        valid_options="v2, attn, residual",
+        description="Projection head type for lower-resolution intermediate spatial maps."
+    )
+    intermediate_num_inner: Optional[int] = INT_FIELD(
+        value=None,
+        default_value=None,
+        display_name="Intermediate projection inner blocks",
+        description="Optional override for the number of inner blocks in intermediate projectors."
+    )
+    spatial_norm_type: str = STR_FIELD(
+        value="phi",
+        default_value="phi",
+        display_name="Spatial target normalization",
+        valid_options="phi, zca, pca",
+        description=(
+            "Teacher feature normalization for spatial distillation. 'phi' preserves "
+            "legacy PHI standardization; 'zca'/'pca' use true covariance whitening."
+        )
+    )
+    spatial_whiten_update_period: int = INT_FIELD(
+        value=100,
+        default_value=100,
+        valid_min=1,
+        valid_max="inf",
+        display_name="Spatial whitening update period",
+        description="Number of forward passes between whitening projection updates."
+    )
+    spatial_whiten_freeze_after_steps: int = INT_FIELD(
+        value=3000,
+        default_value=3000,
+        valid_min=0,
+        valid_max="inf",
+        display_name="Spatial whitening freeze step",
+        description=(
+            "Stop updating whitening statistics after this many teacher forwards. "
+            "Set 0 to use the legacy update horizon."
+        )
+    )
+    spatial_whiten_shrinkage: float = FLOAT_FIELD(
+        value=0.0,
+        default_value=0.0,
+        valid_min=0.0,
+        valid_max=1.0,
+        display_name="Spatial whitening shrinkage",
+        description="Shrink covariance toward isotropic covariance before whitening."
+    )
+    spatial_whiten_eigen_floor: float = FLOAT_FIELD(
+        value=1.0e-6,
+        default_value=1.0e-6,
+        valid_min=0.0,
+        valid_max="inf",
+        display_name="Spatial whitening eigen floor",
+        description="Relative eigenvalue floor used to limit whitening amplification."
+    )
+    spatial_whiten_max_gain: float = FLOAT_FIELD(
+        value=0.0,
+        default_value=0.0,
+        valid_min=0.0,
+        valid_max="inf",
+        display_name="Spatial whitening max gain",
+        description="Maximum whitening gain. Set 0 to disable explicit gain clipping."
+    )
     summary_token_idx: Optional[int] = INT_FIELD(
         value=None,
         default_value=None,
@@ -882,11 +1123,26 @@ class TeacherConfig:
         value="v2",
         default_value="v2",
         display_name="Spatial projection head type",
-        valid_options="v2, attn",
+        valid_options="v2, attn, residual",
         description=(
             "Projection head for spatial distillation. 'attn' matches the "
-            "attention-based C-RADIO v4 feature-projection heads."
+            "attention-based C-RADIO v4 feature-projection heads; 'residual' "
+            "uses a constrained residual MLP on top of a linear lift."
         )
+    )
+    spatial_projector_residual_scale: float = FLOAT_FIELD(
+        value=0.25,
+        default_value=0.25,
+        valid_min=0.0,
+        valid_max="inf",
+        display_name="Residual projector scale",
+        description="Scale applied to the nonlinear residual branch of the residual spatial projector."
+    )
+    spatial_projector_output_norm: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        display_name="Residual projector output norm",
+        description="Apply LayerNorm to residual projector output before spatial normalization."
     )
     spatial_num_inner: Optional[int] = INT_FIELD(
         value=None,
@@ -894,6 +1150,25 @@ class TeacherConfig:
         display_name="Spatial projection inner blocks",
         description=(
             "Optional override for the number of inner MLP blocks in the spatial "
+            "projection head. If unset, the distiller chooses a version-specific default."
+        )
+    )
+    summary_mlp_version: Optional[str] = STR_FIELD(
+        value=None,
+        default_value=None,
+        display_name="Summary projection head type",
+        valid_options="v2, attn, residual",
+        description=(
+            "Projection head for the combo-mode summary projector. Defaults to "
+            "spatial_mlp_version when unset."
+        )
+    )
+    summary_num_inner: Optional[int] = INT_FIELD(
+        value=None,
+        default_value=None,
+        display_name="Summary projection inner blocks",
+        description=(
+            "Optional override for the number of inner MLP blocks in the summary "
             "projection head. If unset, the distiller chooses a version-specific default."
         )
     )
@@ -924,7 +1199,42 @@ class TeacherConfig:
         default_value=None,
         display_name="FeatSharp library path",
         description="Path to the directory containing the 'featsharp' package "
-        "(e.g. '.../evfm/libs/FeatUp'). Only needed if featsharp is not installed as a package."
+        "(for example, a local FeatUp checkout). Only needed if featsharp is not installed."
+    )
+    shared_teacher_key: str = STR_FIELD(
+        value="",
+        default_value="",
+        description=(
+            "Stable teacher identity. Teacher arms with the same key share "
+            "projection heads and normalization state."
+        )
+    )
+    rank_partition: int = INT_FIELD(
+        value=-1,
+        default_value=-1,
+        description="Contiguous rank-partition index assigned to this teacher arm."
+    )
+    local_batch_size: int = INT_FIELD(
+        value=0,
+        default_value=0,
+        description="Per-rank batch size for this teacher arm's rank partition."
+    )
+    mosaic_inner_size: int = INT_FIELD(
+        value=0,
+        default_value=0,
+        description=(
+            "Inner teacher canvas size for mosaic batching. Zero disables mosaic batching."
+        )
+    )
+    mosaic_outer_size: int = INT_FIELD(
+        value=0,
+        default_value=0,
+        description="Outer per-example view size packed into the teacher mosaic."
+    )
+    mosaic_downsample: int = INT_FIELD(
+        value=0,
+        default_value=0,
+        description="Teacher feature stride used to unpack mosaic targets."
     )
 
 
@@ -932,6 +1242,12 @@ class TeacherConfig:
 class ClassDistillationConfig(DistillationConfig):
     """Distillation config for classifier."""
 
+    results_dir: Optional[str] = STR_FIELD(
+        value=None,
+        default_value=None,
+        display_name="Distillation results directory",
+        description="Directory where distillation outputs are written."
+    )
     teacher: List[TeacherConfig] = DATACLASS_FIELD(
         MISSING,
         description=(
@@ -979,6 +1295,65 @@ class ClassDistillationConfig(DistillationConfig):
         description="Distillation mode",
         valid_options="logits, summary, spatial, auto, combo"
     )
+    partitioned_ranks: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        description=(
+            "Enable native partitioned distillation. Each contiguous rank partition "
+            "uses its configured local batch, student resolution, and teacher views; "
+            "teacher arms may share projection and normalization state."
+        )
+    )
+    num_rank_partitions: int = INT_FIELD(
+        value=4,
+        default_value=4,
+        math_cond=">= 2",
+        description="Number of contiguous rank partitions."
+    )
+    rebalance_teacher_loss: bool = BOOL_FIELD(
+        value=True,
+        default_value=True,
+        description=(
+            "Rebalance each teacher loss by world_size / teacher_world_size so "
+            "DDP averaging preserves each teacher's objective under partitioning."
+        )
+    )
+    sync_bn_mode: str = STR_FIELD(
+        value="global",
+        default_value="global",
+        valid_options="off, global",
+        description=(
+            "BatchNorm synchronization for non-partitioned training. Partitioned "
+            "training always keeps running statistics rank-local until epoch reduction."
+        )
+    )
+    broadcast_buffers: bool = BOOL_FIELD(
+        value=True,
+        default_value=True,
+        description=(
+            "DDP buffer broadcast for non-partitioned training. Partitioned training "
+            "always disables rank-0 buffer broadcast."
+        )
+    )
+    dist_bn_mode: str = STR_FIELD(
+        value="off",
+        default_value="off",
+        valid_options="off, broadcast, reduce",
+        description=(
+            "Distribute student BatchNorm running_mean/running_var at each train epoch end. "
+            "Partitioned training always uses reduction."
+        )
+    )
+    teacher_bf16: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        description=(
+            "Cast frozen teachers to bfloat16 to halve resident weight memory. Needed to fit heavy "
+            "high-res teacher sets (e.g. DINOv3-7B ~28GB fp32 -> ~14GB bf16) in 80GB under "
+            "partitioned_ranks. Teachers are inference-only distillation targets, so bf16 is "
+            "numerically safe (training precision is bf16 regardless)."
+        )
+    )
     use_mlp: bool = BOOL_FIELD(
         value=True,
         default_value=True,
@@ -997,6 +1372,175 @@ class ClassDistillationConfig(DistillationConfig):
         valid_min=0,
         valid_max=10,
         description="MLP number of inner layers"
+    )
+    train_projection_heads: bool = BOOL_FIELD(
+        value=True,
+        default_value=True,
+        description=(
+            "Include the trainable distillation projection heads in the optimizer. "
+            "Default true preserves the established TAO behavior where the projection "
+            "heads (which map student features into each teacher's space) are optimized "
+            "alongside the student. Set false to optimize only the student parameters."
+        )
+    )
+    projector_lr: Optional[float] = FLOAT_FIELD(
+        value=None,
+        default_value=None,
+        valid_min=0.0,
+        valid_max="inf",
+        description=(
+            "Optional learning rate for distillation projection heads. If unset, "
+            "projection heads use the main optimizer learning rate."
+        )
+    )
+    spectral_projection_heads: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        description=(
+            "Apply spectral normalization to Linear layers inside distillation "
+            "projection heads. This bounds projector gain while leaving the "
+            "student backbone unchanged."
+        )
+    )
+    spectral_reparam_backbone: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        description=(
+            "Apply learnable-scale spectral reparametrization to every "
+            "eligible Linear in the STUDENT BACKBONE (stage-4 attention qkv/proj + "
+            "MLP Linears). Uses the same power_iterations/eps/alpha as the "
+            "projection-head spectral settings. "
+            "Distinct from spectral_projection_heads, which only touches the heads."
+        )
+    )
+    spectral_projection_heads_power_iterations: int = INT_FIELD(
+        value=1,
+        default_value=1,
+        valid_min=1,
+        valid_max="inf",
+        description="Number of power iterations for spectral-normalized projection-head Linear layers."
+    )
+    spectral_projection_heads_eps: float = FLOAT_FIELD(
+        value=1.0e-12,
+        default_value=1.0e-12,
+        valid_min=0.0,
+        valid_max="inf",
+        description="Numerical epsilon for spectral-normalized projection-head Linear layers."
+    )
+    spectral_projection_heads_learnable_scale: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        description=(
+            "Use learnable-scale spectral reparametrization "
+            "(weight * (softplus(scale) + alpha) / sigma, distillation/spectral_reparam.py) "
+            "instead of stock torch.nn.utils.parametrizations.spectral_norm for "
+            "projection-head Linear layers. Only takes effect when "
+            "spectral_projection_heads is True."
+        )
+    )
+    spectral_projection_heads_alpha: float = FLOAT_FIELD(
+        value=0.05,
+        default_value=0.05,
+        valid_min=0.0,
+        valid_max="inf",
+        description=(
+            "Softplus offset 'alpha' for the learnable-scale spectral reparam "
+            "used when spectral_projection_heads_learnable_scale is True."
+        )
+    )
+    freeze_projection_heads_after_warmup: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        description=(
+            "After head_warmup_epochs, freeze distillation projection heads and "
+            "train only the student backbone."
+        )
+    )
+    warmstart_projection_heads: bool = BOOL_FIELD(
+        value=True,
+        default_value=True,
+        description=(
+            "Warm-start distillation projection heads from compatible upstream "
+            "checkpoint heads when available."
+        )
+    )
+    head_warmup_epochs: int = INT_FIELD(
+        value=0,
+        default_value=0,
+        valid_min=0,
+        valid_max="inf",
+        description=(
+            "Number of initial epochs to freeze the student backbone while "
+            "training only the distillation projection heads."
+        )
+    )
+    freeze_student_norms: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        description=(
+            "Freeze student normalization layers during distillation. This keeps "
+            "BatchNorm/SyncBatchNorm/InstanceNorm modules in eval mode and freezes "
+            "normalization affine parameters, including LayerNorm and GroupNorm."
+        )
+    )
+    freeze_distillation_statistics: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        description=(
+            "Freeze PHI/whitening and summary-loss running statistics after checkpoint "
+            "initialization. Use this for continuation runs with calibrated statistics."
+        )
+    )
+    baseline_anchor_model_path: Optional[str] = STR_FIELD(
+        value="",
+        default_value="",
+        description=(
+            "Optional checkpoint path for the frozen student baseline anchor. If "
+            "empty and any baseline anchor weight is nonzero, the checkpoint-loaded "
+            "student at initialization is deep-copied and used as the anchor."
+        )
+    )
+    baseline_anchor_loss_type: str = STR_FIELD(
+        value="normalized_mse",
+        default_value="normalized_mse",
+        valid_options="normalized_mse, mse, cosine",
+        description=(
+            "Loss used for baseline anchor preservation. normalized_mse compares "
+            "L2-normalized features and is scale-tolerant; mse compares raw values; "
+            "cosine uses 1 - cosine similarity."
+        )
+    )
+    baseline_anchor_spatial_loss_weight: float = FLOAT_FIELD(
+        value=0.0,
+        default_value=0.0,
+        valid_min=0.0,
+        valid_max="inf",
+        description="Weight for preserving the frozen baseline student's final spatial feature map."
+    )
+    baseline_anchor_summary_loss_weight: float = FLOAT_FIELD(
+        value=0.0,
+        default_value=0.0,
+        valid_min=0.0,
+        valid_max="inf",
+        description="Weight for preserving the frozen baseline student's summary feature."
+    )
+    baseline_anchor_intermediate_loss_weight: float = FLOAT_FIELD(
+        value=0.0,
+        default_value=0.0,
+        valid_min=0.0,
+        valid_max="inf",
+        description=(
+            "Total weight for preserving selected intermediate student features. "
+            "The configured layer losses are averaged before this weight is applied."
+        )
+    )
+    baseline_anchor_intermediate_layers: List[str] = LIST_FIELD(
+        [],
+        default_value=[],
+        description=(
+            "Student module names to anchor with forward hooks, e.g. "
+            "['_model.levels.1', '_model.levels.2']."
+        )
     )
 
 
