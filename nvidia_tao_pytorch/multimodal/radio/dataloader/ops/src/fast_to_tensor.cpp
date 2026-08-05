@@ -4,7 +4,6 @@
  *
  * Fused HWC uint8 -> CHW float32 conversion with 1/255 normalization.
  * Uses SSE4/AVX2 SIMD intrinsics on x86_64 for ~4x throughput over scalar.
- * Ported from EVFM (data/misc/fast_to_tensor.cpp).
  */
 
 #include <torch/extension.h>

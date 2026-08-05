@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Hadamard matrix module for distillation"""
@@ -31,11 +31,24 @@ def get_hadamard_matrix(feature_dim: int, allow_approx: bool = True):
         ValueError: If feature_dim is invalid and allow_approx is False.
         AssertionError: If the constructed matrix fails orthogonality checks.
     """
-    cache_dir = os.path.join(torch.hub.get_dir(), 'evfm', 'hadamard')
+    cache_dir = os.path.join(torch.hub.get_dir(), 'radio', 'hadamard')
     cache_path = os.path.join(cache_dir, f'{feature_dim}.pth')
 
     if os.path.exists(cache_path):
-        H = torch.load(cache_path, weights_only=True, map_location='cuda')
+        # Load onto THIS rank's own GPU, not a bare 'cuda' (== cuda:0). With
+        # torchrun/DDP every rank runs this; map_location='cuda' makes all of
+        # them create a full CUDA context (~1 GiB overhead) on cuda:0 just to
+        # hold a tiny (feature_dim x feature_dim) matrix -> 7 sibling contexts
+        # pile ~7 GiB onto GPU 0 and OOM the memory-heavy 1920 single-forward.
+        # The matrix is broadcast over NCCL (needs CUDA) and moved to the
+        # feature device at use, so per-local-rank placement is both correct
+        # and frees GPU 0.
+        if torch.cuda.is_available():
+            _local_rank = int(os.environ.get('LOCAL_RANK', os.environ.get('SLURM_LOCALID', 0)))
+            _map_location = f'cuda:{_local_rank}'
+        else:
+            _map_location = 'cpu'
+        H = torch.load(cache_path, weights_only=True, map_location=_map_location)
     else:
         H = _get_hadamard_matrix(feature_dim, allow_approx)
 

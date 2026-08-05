@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Spatial (geometric) transforms ported from EVFM.
+Spatial transforms for multi-view distillation.
 
 Includes patch-aligned cropping for Vision Transformers and
 other geometric augmentations. Compatible with TAO's PIL-based pipeline.
@@ -104,7 +104,7 @@ def random_perspective_transform(img, distortion_scale=0.1, probability=0.5):
 
     Args:
         img: PIL.Image input.
-        distortion_scale: Distortion amount (0-1). EVFM uses ~0.01-0.05.
+        distortion_scale: Distortion amount (0-1).
         probability: Probability of applying transform.
 
     Returns:

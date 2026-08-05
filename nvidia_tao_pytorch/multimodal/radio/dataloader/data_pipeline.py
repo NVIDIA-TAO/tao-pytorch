@@ -350,21 +350,21 @@ def _prepare_image(num_replicas: int):
 
 
 def _sample_identity_dump(batch_size: int):
-    """Dump ``__key__`` and ``__url__`` of raw samples for parity testing.
+    """Dump ``__key__`` and ``__url__`` for data-pipeline diagnostics.
 
-    Activated by env var ``PARITY_DUMP_DIR``.  Captures the first
-    ``PARITY_DUMP_BATCHES * batch_size`` sample identities to a JSON
-    file, proving both pipelines read the same samples in the same order.
+    Activated by env var ``RADIO_DUMP_DIR``.  Captures the first
+    ``RADIO_DUMP_BATCHES * batch_size`` sample identities to a JSON
+    file for inspecting sample order.
     Inserted at the very start of decode stages (samples are still dicts).
     """
-    dump_dir = os.environ.get("PARITY_DUMP_DIR")
+    dump_dir = os.environ.get("RADIO_DUMP_DIR")
     if not dump_dir:
         return identity
 
-    max_samples = int(os.environ.get("PARITY_DUMP_BATCHES", "5")) * batch_size
+    max_samples = int(os.environ.get("RADIO_DUMP_BATCHES", "5")) * batch_size
     id_dir = os.path.join(dump_dir, "identity")
     os.makedirs(id_dir, exist_ok=True)
-    logger = getLogger("parity_identity_dump")
+    logger = getLogger("sample_identity_dump")
 
     collected = []
 
@@ -378,31 +378,31 @@ def _sample_identity_dump(batch_size: int):
                 })
                 if len(collected) == 1:
                     logger.info(
-                        "Parity identity dump: capturing %d sample keys to %s",
+                        "Identity dump: capturing %d sample keys to %s",
                         max_samples, id_dir,
                     )
                 if len(collected) == max_samples:
                     with open(os.path.join(id_dir, "sample_keys.json"), "w") as f:
                         json.dump(collected, f, indent=2)
-                    logger.info("Parity identity dump: wrote %d keys", max_samples)
+                    logger.info("Identity dump: wrote %d keys", max_samples)
             yield sample
     return _stage
 
 
 def _raw_sample_dump(batch_size: int):
-    """Dump raw image tensors before augmentation for parity testing.
+    """Dump raw image tensors before augmentation for diagnostics.
 
-    Activated by env var ``PARITY_DUMP_DIR``.  Saves the first
-    ``PARITY_DUMP_BATCHES * batch_size`` raw samples.
+    Activated by env var ``RADIO_DUMP_DIR``.  Saves the first
+    ``RADIO_DUMP_BATCHES * batch_size`` raw samples.
     """
-    dump_dir = os.environ.get("PARITY_DUMP_DIR")
+    dump_dir = os.environ.get("RADIO_DUMP_DIR")
     if not dump_dir:
         return identity
 
-    max_samples = int(os.environ.get("PARITY_DUMP_BATCHES", "5")) * batch_size
+    max_samples = int(os.environ.get("RADIO_DUMP_BATCHES", "5")) * batch_size
     raw_dir = os.path.join(dump_dir, "raw")
     os.makedirs(raw_dir, exist_ok=True)
-    logger = getLogger("parity_raw_dump")
+    logger = getLogger("raw_sample_dump")
 
     def _stage(data):
         sample_idx = 0
@@ -633,6 +633,7 @@ def get_data_pipeline(
     include_dataset_source: bool = False,
     aug_config: Optional[Dict[str, Any]] = None,
     native_resolution_filter: Optional[Dict[str, Any]] = None,
+    teacher_view_indices: Optional[List[int]] = None,
 ):
     """Build the complete data pipeline (I/O → decode → augment).
 
@@ -716,7 +717,7 @@ def get_data_pipeline(
         _prepare_image(num_replicas=len(input_sizes)),
     ])
 
-    # -- Raw sample dump (parity testing, before augmentation) --
+    # Raw sample diagnostics before augmentation.
     decode_stages.append(_raw_sample_dump(batch_size))
 
     # -- Augmentation stages --
@@ -749,6 +750,7 @@ def get_data_pipeline(
         len(input_sizes),
         patch_sizes=patch_sizes,
         extra_map=addl_map,
+        teacher_view_indices=teacher_view_indices,
     )
 
     aug_stages: list = [

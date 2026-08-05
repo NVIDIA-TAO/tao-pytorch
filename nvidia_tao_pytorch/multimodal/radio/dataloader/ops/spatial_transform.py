@@ -3,7 +3,7 @@
 
 """Perspective warp using 3x3 homography matrices.
 
-Uses a C++ CPU/CUDA kernel (ported from EVFM) when available; falls back
+Uses a C++ CPU/CUDA kernel when available; falls back
 to a pure-PyTorch path using F.grid_sample otherwise.
 
 The C++ kernel dispatches internally:

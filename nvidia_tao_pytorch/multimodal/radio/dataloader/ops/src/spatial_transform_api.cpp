@@ -4,7 +4,6 @@
  *
  * Perspective warp using 3x3 homography matrices.
  * Dispatches to CPU (OpenMP) or CUDA based on input tensor device.
- * Ported from EVFM (libs/pytorch_image_ops/spatial_transform/).
  */
 
 #include "spatial_transform.h"

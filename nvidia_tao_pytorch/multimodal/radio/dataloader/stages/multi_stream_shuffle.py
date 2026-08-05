@@ -83,7 +83,7 @@ class MultiStreamShuffle(IterableDataset):
         if self.deterministic:
             increment = seed_from_tuple(self.seed, epoch, 877)
             seed = pytorch_worker_seed(increment)
-            logging.getLogger("parity_debug").info(
+            logging.getLogger("shuffle_debug").info(
                 "MultiStreamShuffle seed debug: self.seed=%s epoch=%s "
                 "increment=%s worker_seed=%s num_urls=%d",
                 self.seed, epoch, increment, seed, len(self.urls),
