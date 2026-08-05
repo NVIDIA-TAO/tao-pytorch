@@ -487,8 +487,6 @@ class StyleganPlModel(TAOLightningModule):
         # Log to status.json
         self.status_logging_dict = {}
         self.status_logging_dict["fid50k_full"] = float(fid_score)
-        self.status_logging_dict["seen_images"] = int(self.cur_nimg)
-        self.status_logging_dict["epoch"] = int(self.trainer.current_epoch)
         status_logging.get_status_logger().kpi = self.status_logging_dict
         status_logging.get_status_logger().write(
             message="Validation metrics generated.",

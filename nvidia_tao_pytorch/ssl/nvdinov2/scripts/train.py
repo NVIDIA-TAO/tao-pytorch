@@ -18,6 +18,13 @@ from nvidia_tao_pytorch.ssl.nvdinov2.model.pl_model import DinoV2PlModel
 
 def run_experiment(experiment_config, key):
     """Start the training."""
+    if (
+        experiment_config.get("train", {}).get("resume_training_checkpoint_path")
+        == ""
+    ):
+        experiment_config.train.resume_training_checkpoint_path = None
+    if experiment_config.get("train", {}).get("pretrained_model_path") == "":
+        experiment_config.train.pretrained_model_path = None
     resume_ckpt, trainer_kwargs = initialize_train_experiment(experiment_config, key)
 
     num_nodes = experiment_config.train.num_nodes
