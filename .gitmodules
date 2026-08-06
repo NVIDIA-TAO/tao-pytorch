@@ -1,0 +1,4 @@
+[submodule "tao-core"]
+	path = tao-core
+	url = https://github.com/NVIDIA-TAO/tao-core.git
+	branch = main
