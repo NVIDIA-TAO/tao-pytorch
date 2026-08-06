@@ -9,9 +9,11 @@ from datetime import timedelta
 # This first import binds rank 0 and relaunched child ranks before any
 # CUDA-aware dependencies can create a context. Keep it ahead of those imports.
 # isort: off
+# pylint: disable=unused-import
 from nvidia_tao_pytorch.core.utils import (  # noqa: F401
     cuda_device as _cuda_device,
 )
+# pylint: enable=unused-import
 # isort: on
 
 from lightning_fabric.utilities.distributed import _init_dist_connection
@@ -28,6 +30,9 @@ from nvidia_tao_pytorch.config.clip.default_config import (
 )
 from nvidia_tao_pytorch.multimodal.clip.model.pl_clip_model import (
     CLIPPlModel,
+)
+from nvidia_tao_pytorch.multimodal.clip.model.logit_calibration import (
+    preserve_logit_scale_ceiling_,
 )
 from nvidia_tao_pytorch.multimodal.clip.dataloader.pl_clip_data_module import (
     CLIPDataModule,
@@ -60,6 +65,13 @@ class _RankLocalDDPStrategy(DDPStrategy):
         )
 
 
+def _load_pretrained_model_state(model, pretrained_path):
+    """Strictly load canonical model state and trust its restored ceiling."""
+    state_dict = load_pretrained_weights(pretrained_path)
+    model.load_state_dict(state_dict, strict=True)
+    preserve_logit_scale_ceiling_(model)
+
+
 def run_experiment(experiment_config, key):
     """Start the training."""
     register_checkpoint_safe_globals()
@@ -76,8 +88,7 @@ def run_experiment(experiment_config, key):
     if pretrained_path:
         # experiment_config.model.pretrained_backbone_path = None
         pt_model = CLIPPlModel(experiment_config)
-        state_dict = load_pretrained_weights(pretrained_path)
-        pt_model.model.load_state_dict(state_dict, strict=True)
+        _load_pretrained_model_state(pt_model.model, pretrained_path)
         logging.info(f"Model loaded from {pretrained_path}")
     else:
         pt_model = CLIPPlModel(experiment_config)

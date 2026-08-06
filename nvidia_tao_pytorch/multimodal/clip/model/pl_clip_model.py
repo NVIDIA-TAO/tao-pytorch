@@ -3,15 +3,11 @@
 
 """CLIP Model PyTorch Lightning Module."""
 
-import math
 from pathlib import Path
 
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
-
-_MAX_LOGIT_SCALE = math.log(100)
-
 from open_clip.loss import ClipLoss, SigLipLoss  # noqa: E402
 
 from nvidia_tao_pytorch.core.tlt_logging import logging  # noqa: E402
@@ -22,6 +18,10 @@ from nvidia_tao_pytorch.core.loggers import (  # noqa: E402
     api_logging as status_logging,
 )
 from nvidia_tao_pytorch.multimodal.clip.model.clip import build_model  # noqa: E402
+from nvidia_tao_pytorch.multimodal.clip.model.logit_calibration import (  # noqa: E402
+    clamp_logit_scale_,
+    preserve_logit_scale_ceiling_,
+)
 from nvidia_tao_pytorch.multimodal.clip.loss.masked_siglip_loss import (  # noqa: E402
     MetadataMaskedSigLipLoss,
 )
@@ -338,8 +338,8 @@ class CLIPPlModel(TAOLightningModule):
                     world_size=siglip_loss_world_size,
                     rank=siglip_loss_rank,
                     accessory_aware=(
-                        siglip_mask_mode
-                        == "attribute_plus_accessory_match_ignore"
+                        siglip_mask_mode ==
+                        "attribute_plus_accessory_match_ignore"
                     ),
                 )
                 self.criterion = self.loss
@@ -415,8 +415,16 @@ class CLIPPlModel(TAOLightningModule):
         }
 
     def on_train_start(self):
-        """Training epoch start."""
+        """Restore the resume step and preserve the restored scale ceiling."""
+        if getattr(self, '_logit_scale_restored', False):
+            preserve_logit_scale_ceiling_(self.model)
+            self._logit_scale_restored = False
         self.trainer.datamodule.resume_step = self.trainer.global_step
+
+    def on_load_checkpoint(self, checkpoint):
+        """Mark canonical calibration loaded by Lightning as trusted state."""
+        del checkpoint
+        self._logit_scale_restored = True
 
     def _forward_pass(self, batch):
         """Run forward pass."""
@@ -451,7 +459,14 @@ class CLIPPlModel(TAOLightningModule):
                 text_accessory_ids=metadata.get("text_accessory_ids"),
             )
         elif len(outputs) == 3:
-            clip_loss = self.loss(image_features, text_features, logit_scale)
+            if isinstance(self.loss, SigLipLoss):
+                clip_loss = self.loss(
+                    image_features, text_features, logit_scale, None
+                )
+            else:
+                clip_loss = self.loss(
+                    image_features, text_features, logit_scale
+                )
         else:
             clip_loss = self.loss(
                 image_features, text_features, logit_scale, logit_bias
@@ -544,10 +559,12 @@ class CLIPPlModel(TAOLightningModule):
             "train/logit_scale", logit_scale.item(),
             on_step=True, on_epoch=False, prog_bar=False
         )
-
-        with torch.no_grad():
-            self.model.logit_scale.clamp_(0, _MAX_LOGIT_SCALE)
         return loss_value
+
+    def optimizer_step(self, *args, **kwargs):
+        """Run the optimizer, then enforce canonical calibration bounds."""
+        super().optimizer_step(*args, **kwargs)
+        clamp_logit_scale_(self.model)
 
     def on_train_epoch_end(self):
         """Log training metrics to status.json."""

@@ -164,9 +164,10 @@ def build_radio_model(
     freeze_vision_encoder=False,
     freeze_text_encoder=False,
     image_size=224,
-    logit_scale_init=2.6592,
-    logit_bias_init=-10.0,
+    logit_scale_init=None,
+    logit_bias_init=None,
     canonicalize_text=False,
+    loss_type='siglip',
 ):
     """Build C-RADIO model with preprocessing transforms and tokenizer.
 
@@ -182,8 +183,11 @@ def build_radio_model(
         freeze_vision_encoder: Freeze vision encoder parameters
         freeze_text_encoder: Freeze text encoder parameters
         image_size: Input image resolution
-        logit_scale_init: Initial logit scale (log-space)
-        logit_bias_init: Initial logit bias
+        logit_scale_init: Optional raw scale override; None preserves native
+            calibration or uses the selected loss-family fallback.
+        logit_bias_init: Optional bias override; None preserves native
+            absence or uses the loss-family fallback for local ownership.
+        loss_type: Contrastive loss family for fallback initialization
         canonicalize_text: Apply text canonicalization before tokenization
 
     Returns:
@@ -203,6 +207,7 @@ def build_radio_model(
         adaptor_name=adaptor_name,
         logit_scale_init=logit_scale_init,
         logit_bias_init=logit_bias_init,
+        loss_type=loss_type,
         freeze_vision_encoder=freeze_vision_encoder,
         freeze_text_encoder=freeze_text_encoder,
         canonicalize_text=canonicalize_text,
@@ -227,9 +232,10 @@ def build_siglip2_model(
     freeze_vision_encoder=False,
     freeze_text_encoder=False,
     image_size=384,
-    logit_scale_init=2.6592,
-    logit_bias_init=-10.0,
+    logit_scale_init=None,
+    logit_bias_init=None,
     canonicalize_text=False,
+    loss_type='siglip',
 ):
     """Build SigLIP2 model with preprocessing transforms and tokenizer.
 
@@ -243,8 +249,11 @@ def build_siglip2_model(
         freeze_vision_encoder: Freeze vision encoder parameters
         freeze_text_encoder: Freeze text encoder parameters
         image_size: Input image resolution (not used with HF processor)
-        logit_scale_init: Initial logit scale (log-space)
-        logit_bias_init: Initial logit bias
+        logit_scale_init: Optional raw logit-scale override. None preserves
+            source calibration.
+        logit_bias_init: Optional logit-bias override. None preserves source
+            calibration.
+        loss_type: Contrastive loss family for missing source parameters
         canonicalize_text: Apply text canonicalization before tokenization
 
     Returns:
@@ -295,6 +304,7 @@ def build_siglip2_model(
         processor,
         logit_scale_init=logit_scale_init,
         logit_bias_init=logit_bias_init,
+        loss_type=loss_type,
         freeze_vision_encoder=freeze_vision_encoder,
         freeze_text_encoder=freeze_text_encoder,
         canonicalize_text=canonicalize_text,
@@ -323,9 +333,10 @@ def build_openclip_model(
     freeze_vision_encoder=False,
     freeze_text_encoder=False,
     image_size=224,
-    logit_scale_init=2.6592,
-    logit_bias_init=-10.0,
+    logit_scale_init=None,
+    logit_bias_init=None,
     canonicalize_text=False,
+    loss_type='siglip',
 ):
     """Build OpenCLIP model with preprocessing transforms and tokenizer.
 
@@ -338,8 +349,11 @@ def build_openclip_model(
         freeze_vision_encoder: Freeze vision encoder parameters
         freeze_text_encoder: Freeze text encoder parameters
         image_size: Input image resolution
-        logit_scale_init: Initial logit scale (log-space)
-        logit_bias_init: Initial logit bias
+        logit_scale_init: Optional raw logit-scale override. None preserves
+            native calibration.
+        logit_bias_init: Optional logit-bias override. None preserves native
+            calibration.
+        loss_type: Contrastive loss family for missing source parameters
         canonicalize_text: Apply text canonicalization before tokenization
 
     Returns:
@@ -365,6 +379,7 @@ def build_openclip_model(
         backbone_model,
         logit_scale_init=logit_scale_init,
         logit_bias_init=logit_bias_init,
+        loss_type=loss_type,
         freeze_vision_encoder=freeze_vision_encoder,
         freeze_text_encoder=freeze_text_encoder,
         canonicalize_text=canonicalize_text,

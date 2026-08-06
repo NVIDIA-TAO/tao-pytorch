@@ -8,6 +8,9 @@ import torch
 import torch.nn as nn
 
 from nvidia_tao_pytorch.multimodal.clip.model.adapters import BaseCLIPAdapter
+from nvidia_tao_pytorch.multimodal.clip.model.logit_calibration import (
+    DEFAULT_MAX_LOGIT_SCALE,
+)
 
 
 class ConcreteAdapter(BaseCLIPAdapter):
@@ -68,6 +71,18 @@ class TestBaseCLIPAdapterInit:
         """Test custom logit scale initialization."""
         adapter = ConcreteAdapter(logit_scale_init=1.0)
         assert pytest.approx(adapter.logit_scale.item(), rel=1e-3) == 1.0
+
+    def test_custom_scale_does_not_raise_local_ceiling(self):
+        """An explicit local override remains subject to the default cap."""
+        adapter = ConcreteAdapter(logit_scale_init=8.0)
+
+        assert adapter.logit_scale_max == pytest.approx(
+            DEFAULT_MAX_LOGIT_SCALE
+        )
+        adapter.clamp_logit_scale_()
+        assert adapter.logit_scale.item() == pytest.approx(
+            DEFAULT_MAX_LOGIT_SCALE
+        )
 
     def test_custom_logit_bias(self):
         """Test custom logit bias initialization."""
