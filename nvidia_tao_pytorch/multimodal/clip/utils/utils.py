@@ -260,7 +260,7 @@ def compute_lr(step, base_lr, warmup_steps, max_steps, scheduler='cosine'):
         return base_lr * max(1.0 - progress / total, 0.0)
 
     # cosine (default)
-    return 0.5 * (1 + np.cos(np.pi * progress / total)) * base_lr
+    return float(0.5 * (1 + np.cos(np.pi * progress / total)) * base_lr)
 
 
 def load_model_from_checkpoint(model_path, experiment_config, model_class):

@@ -219,6 +219,36 @@ class TestComputeLR:
         lr = compute_lr(999, base_lr, warmup_steps, max_steps, scheduler='cosine')
         assert lr < base_lr * 0.01
 
+    def test_cosine_scheduler_checkpoint_is_weights_only_safe(self, tmp_path):
+        """Test cosine LR optimizer state uses checkpoint-safe primitives."""
+        lr = compute_lr(500, 1e-4, 100, 1000, scheduler='cosine')
+
+        assert type(lr) is float
+
+        parameter = nn.Parameter(torch.tensor(1.0))
+        optimizer = torch.optim.AdamW([parameter], lr=1e-4)
+        optimizer.param_groups[0]['lr'] = lr
+        checkpoint_path = tmp_path / 'cosine_lr.ckpt'
+        torch.save(
+            {'optimizer_states': [optimizer.state_dict()]},
+            checkpoint_path,
+        )
+
+        original_safe_globals = torch.serialization.get_safe_globals()
+        try:
+            torch.serialization.clear_safe_globals()
+            checkpoint = torch.load(
+                checkpoint_path,
+                map_location='cpu',
+                weights_only=True,
+            )
+        finally:
+            torch.serialization.clear_safe_globals()
+            torch.serialization.add_safe_globals(original_safe_globals)
+
+        restored_lr = checkpoint['optimizer_states'][0]['param_groups'][0]['lr']
+        assert type(restored_lr) is float
+
     def test_zero_warmup(self):
         """Test behavior with zero warmup steps."""
         base_lr = 1e-4
