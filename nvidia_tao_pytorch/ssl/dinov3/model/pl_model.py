@@ -43,7 +43,9 @@ from nvidia_tao_pytorch.ssl.dinov3.model.lora import (
 )
 from nvidia_tao_pytorch.ssl.dinov3.utils.checkpoint_remap import (
     TAO_ONLY_KEYS,
+    convert_hf_to_tao,
     fuse_timm_swiglu_fc1,
+    is_hf_dinov3_state_dict,
     merge_lora_state_dict,
     timm_to_tao,
 )
@@ -652,23 +654,35 @@ class DinoV3PlModel(DinoV2PlModel):
 
     @staticmethod
     def _remap_dinov3_state_dict(timm_state_dict, reference_state_dict):
-        """Translate timm DINOv3 ViT keys to ``DinoV3VisionTransformer`` keys.
+        """Translate a public DINOv3 checkpoint's keys to ``DinoV3VisionTransformer`` keys.
 
-        Renames the LayerScale gammas (``blocks.N.gamma_1/2`` -> ``blocks.N.ls1/ls2.gamma``)
-        and the register parameter (``reg_token`` -> ``register_tokens``); all other keys
-        (``cls_token``, ``patch_embed.proj.*``, ``blocks.N.{norm1,norm2,attn.qkv,attn.proj,
-        mlp.fc1,mlp.fc2}.*``, ``norm.*``) map by identity. timm carries no ``pos_embed`` (RoPE
-        replaces it) and no QKV bias. Only keys present in the reference state dict with a
-        matching shape are kept.
+        Accepts either public serialization of the same weights:
+
+        * **timm** (default): renames the LayerScale gammas (``blocks.N.gamma_1/2`` ->
+          ``blocks.N.ls1/ls2.gamma``) and the register parameter (``reg_token`` ->
+          ``register_tokens``); all other keys map by identity.
+        * **HuggingFace** ``DINOv3ViTModel``: detected by its ``embeddings.*`` / ``layer.N.*``
+          keys and converted up front, which also fuses the separate q/k/v projections into the
+          ``attn.qkv`` this ViT expects. Without that pass an HF file matches only ``norm.weight``
+          and ``norm.bias`` -- 2 of 211 tensors -- and training would start from an almost
+          entirely random backbone while still logging a successful load.
+
+        timm carries no ``pos_embed`` (RoPE replaces it) and no QKV bias. Only keys present in
+        the reference state dict with a matching shape are kept.
 
         Args:
-            timm_state_dict (dict): Source timm/Meta DINOv3 state dict.
+            timm_state_dict (dict): Source timm/Meta/HF DINOv3 state dict.
             reference_state_dict (dict): ``self.student.backbone.state_dict()`` (target keys).
 
         Returns:
             Tuple[dict, list]: ``(remapped, unmapped)`` where ``remapped`` is loadable into
             the backbone and ``unmapped`` lists source keys that had no shape-matching target.
         """
+        # HuggingFace layout: rename + fuse q/k/v before anything else, so the rest of this
+        # function sees ordinary timm-style keys.
+        if is_hf_dinov3_state_dict(timm_state_dict):
+            timm_state_dict = convert_hf_to_tao(timm_state_dict)
+
         # Source carries adapters but the destination backbone cannot hold them (inference,
         # export, or the start of a fresh run before injection): fold them into the base so the
         # weights loaded are the *adapted* model. Without this the adapter keys are simply
