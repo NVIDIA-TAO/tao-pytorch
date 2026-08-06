@@ -18,11 +18,13 @@ import os
 
 import torch
 import torch.nn as nn
+import torch.distributed as dist
 from torch.distributed.fsdp import (
     FullyShardedDataParallel as FSDP,
     FullStateDictConfig,
     StateDictType,
 )
+from pytorch_lightning.strategies.single_device import SingleDeviceStrategy
 from timm.layers import Mlp
 
 import nvidia_tao_pytorch.config.dinov3.default_config as v3_params
@@ -167,6 +169,56 @@ class DinoV3PlModel(DinoV2PlModel):
             "(FSDP flat-param wrapping of mostly-frozen modules needs use_orig_params=True). "
             "Use 'auto' or 'ddp' -- LoRA's optimizer state is tiny, so DDP fits comfortably."
         )
+
+    @torch.no_grad()
+    def update_teacher(self, momentum: float):
+        """EMA-update the teacher, skipping frozen base weights when LoRA is active.
+
+        The inherited implementation zips *all* student and teacher parameters. Under LoRA the
+        base weights are frozen and identical in both, so ``m*W + (1-m)*W`` is a no-op --
+        in exact arithmetic. In floating point it is not: the round-trip through
+        ``_foreach_mul_`` / ``_foreach_add_`` leaves a small residual every step, which
+        accumulates. Measured on the Stage-2 smoke, the teacher's base weights had drifted by
+        5.67e-05 (relative, worst tensor) after only 500 steps while the student's stayed
+        bit-exact -- so the "frozen" anchor was quietly moving, and an exported teacher backbone
+        would not have been exactly ``frozen base + merged delta``.
+
+        Restricting the EMA to parameters that are trainable in the student (the LoRA adapters,
+        the DINO/iBOT heads and ``mask_token``) makes the no-op exact, and is cheaper.
+
+        Falls back to the inherited behaviour whenever LoRA is not injected, so full-fine-tune
+        runs are numerically unchanged.
+
+        Args:
+            momentum (float): EMA momentum for the teacher update.
+        """
+        lora_cfg = getattr(self.model_config, "lora", None)
+        if not (lora_cfg is not None and lora_cfg.enable and self._lora_injected):
+            super().update_teacher(momentum)
+            return
+
+        # FSDP is asserted against in LoRA mode (_validate_lora_config), so the flat-param
+        # path the parent handles cannot arise here.
+        if not isinstance(self.trainer.strategy, SingleDeviceStrategy):
+            torch.cuda.synchronize()
+            dist.barrier()
+
+        teacher_params = []
+        student_params = []
+        for (name, student_param), (teacher_name, teacher_param) in zip(
+            self.student.named_parameters(), self.teacher.named_parameters()
+        ):
+            assert name == teacher_name, (
+                f"student/teacher parameter order diverged ({name} vs {teacher_name}); "
+                "LoRA must be injected into both backbones identically."
+            )
+            if not student_param.requires_grad:
+                continue  # frozen base weight: already identical in both, leave it untouched
+            teacher_params.append(teacher_param.data)
+            student_params.append(student_param.data)
+
+        torch._foreach_mul_(teacher_params, momentum)
+        torch._foreach_add_(teacher_params, student_params, alpha=1.0 - momentum)
 
     def inject_lora_adapters(self):
         """Inject LoRA into the student and EMA-teacher backbones. No-op unless enabled.
