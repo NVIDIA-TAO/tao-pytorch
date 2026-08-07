@@ -29,6 +29,7 @@ import logging
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
+from PIL import ImageFile
 import torch
 from torch.utils.data import DataLoader, DistributedSampler, Subset
 import torchvision.transforms as T
@@ -37,6 +38,11 @@ from nvidia_tao_pytorch.core.distributed.comm import get_global_rank, get_world_
 from nvidia_tao_pytorch.cv.ml_recog.dataloader.datasets.image_datasets import (
     MetricLearnImageFolder,
 )
+
+# Tolerate truncated JPEGs (ImageNet train has a few) instead of crashing a
+# multi-hour extraction — same policy as c-radiov4 eval_cls.py and the mae /
+# classification_pyt / radio dataloaders.
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 logger = logging.getLogger(__name__)
 

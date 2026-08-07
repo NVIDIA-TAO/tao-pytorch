@@ -377,7 +377,7 @@ class KNNEvaluator(Evaluator):
         def _extract(loader_info, split, suffix=""):
             path = None
             if ctx.cache_dir:
-                tag = getattr(cfg, "cache_tag", ctx.network)
+                tag = getattr(cfg, "cache_tag", None) or ctx.network
                 res = getattr(cfg, "crop", 224)
                 path = embedding_cache_path(ctx.cache_dir, tag, res, split, suffix)
             return cached_embeddings(

@@ -43,7 +43,9 @@ from nvidia_tao_pytorch.config.nvdinov2.default_config import (
 from nvidia_tao_pytorch.config.common.common_config import (
     CommonExperimentConfig,
     CuDNNConfig,
+    EvaluateConfig,
 )
+from nvidia_tao_pytorch.config.ssl_evaluation.default_config import EvalSuiteConfig
 
 # DINOv3 patch-16 ViT architectures supported by the backbone config.
 SUPPORTED_BACKBONES = [
@@ -541,6 +543,16 @@ class DINOv3ConvertConfig:
 
 
 @dataclass
+class DINOv3EvaluateExpConfig(EvaluateConfig, EvalSuiteConfig):
+    """Evaluate experiment config — embedding-quality suite (KNN; seg/retrieval to come).
+
+    Mirrors ``NVDINOv2EvaluateExpConfig``: inherits the common GPU/checkpoint/results
+    fields from ``EvaluateConfig`` and the shared per-metric blocks (``knn``,
+    ``cache_dir``) from ``EvalSuiteConfig``.
+    """
+
+
+@dataclass
 class ExperimentConfig(CommonExperimentConfig):
     """DINOv3 experiment config."""
 
@@ -559,6 +571,10 @@ class ExperimentConfig(CommonExperimentConfig):
     inference: NVDINOv2InferenceExpConfig = DATACLASS_FIELD(
         NVDINOv2InferenceExpConfig(),
         description="Configurable parameters to construct the inference trainer for a DINOv3 experiment.",
+    )
+    evaluate: DINOv3EvaluateExpConfig = DATACLASS_FIELD(
+        DINOv3EvaluateExpConfig(),
+        description="Configurable parameters for the DINOv3 evaluate (embedding-quality) action.",
     )
     export: DINOv3ExportExpConfig = DATACLASS_FIELD(
         DINOv3ExportExpConfig(),
