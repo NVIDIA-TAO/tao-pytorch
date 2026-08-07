@@ -37,12 +37,14 @@ from nvidia_tao_pytorch.ssl.dinov3.model.vit import DinoV3VisionTransformer, Swi
 from nvidia_tao_pytorch.ssl.dinov3.model.loss import GramLoss, ClsPreservationLoss
 from nvidia_tao_pytorch.ssl.dinov3.model.lora import (
     inject_lora,
+    is_lora_key,
     lora_parameter_report,
     strip_lora_keys,
 )
 from nvidia_tao_pytorch.ssl.dinov3.utils.checkpoint_remap import (
     TAO_ONLY_KEYS,
     fuse_timm_swiglu_fc1,
+    merge_lora_state_dict,
     timm_to_tao,
 )
 
@@ -265,7 +267,22 @@ class DinoV3PlModel(DinoV2PlModel):
         )
 
         injected = inject_lora(self.student.backbone, **kwargs)
-        inject_lora(self.teacher.backbone, **kwargs)
+        teacher_injected = inject_lora(self.teacher.backbone, **kwargs)
+
+        # An empty target set would otherwise freeze the whole backbone, mark LoRA as injected,
+        # and quietly train only the heads and mask_token -- a run that looks like LoRA and is
+        # not. Comparing the two lists also catches any future student/teacher topology
+        # divergence at injection time rather than as a silently misaligned EMA (gate G1.3).
+        assert injected, (
+            f"LoRA injected no modules (target_modules={target_modules}, "
+            f"num_last_blocks={lora_cfg.num_last_blocks}). model.lora.enable is set, so this "
+            "would train only the heads and mask_token while reporting a LoRA run."
+        )
+        assert injected == teacher_injected, (
+            "student and teacher received different LoRA injections "
+            f"(student={injected}, teacher={teacher_injected}); the EMA zip requires identical "
+            "parameter structure in both backbones."
+        )
 
         # Mirror the student's backbone (base + freshly initialized adapters) into the teacher
         # so both start identical; otherwise the teacher's random lora_A would make its EMA
@@ -652,6 +669,15 @@ class DinoV3PlModel(DinoV2PlModel):
             Tuple[dict, list]: ``(remapped, unmapped)`` where ``remapped`` is loadable into
             the backbone and ``unmapped`` lists source keys that had no shape-matching target.
         """
+        # Source carries adapters but the destination backbone cannot hold them (inference,
+        # export, or the start of a fresh run before injection): fold them into the base so the
+        # weights loaded are the *adapted* model. Without this the adapter keys are simply
+        # unmapped and the frozen base is silently used instead. When the destination is
+        # already LoRA-injected the adapters load normally and this does nothing.
+        if any(is_lora_key(k) for k in timm_state_dict) and \
+                not any(is_lora_key(k) for k in reference_state_dict):
+            timm_state_dict = merge_lora_state_dict(timm_state_dict)
+
         # Fuse split SwiGLU projections (fc1_g/fc1_x) into the fused fc1 for ViT-H+/7B before
         # the per-key shape match; plain-MLP (ViT-B/L) checkpoints are unaffected.
         timm_state_dict = fuse_timm_swiglu_fc1(timm_state_dict)
@@ -785,9 +811,31 @@ class DinoV3PlModel(DinoV2PlModel):
           preserving the global embedding geometry that k-NN/linear-probe/retrieval consume.
           Gated on ``preservation.enable``.
 
-        Both are logged unconditionally when active (even at weight 0) so they double as drift
-        diagnostics. Returns an empty list -- matching the DINOv2 base, hence unchanged
-        numerics -- when neither term is active.
+        **Input contract (important when reading these values).** The student tensors come from
+        the *masked* global crops the SSL step already computed, while the anchor runs on the
+        *unmasked* crops -- matching how DINOv3 applies Gram anchoring, and avoiding a second
+        student forward. Both terms are therefore a sum of two things: preservation of the
+        pretrained geometry (the intent) **and** sensitivity to iBOT masking. They are
+        consequently **not zero at step 0** even when the weights are identical, and they must
+        not be read as pure drift metrics.
+
+        Measured on ViT-B at init, where student and anchor weights are identical by
+        construction (LoRA is an identity at ``lora_B = 0``):
+
+        =====================  =========  =========  =========
+        condition              gram       cls_mse    cls_cos
+        =====================  =========  =========  =========
+        unmasked, eval          3.7e-09    4.3e-08    1.2e-07
+        30% masked, train       2.4e-02    5.8e-01    9.3e-01
+        =====================  =========  =========  =========
+
+        So the identity property is exact, but only observable with masking and stochastic
+        depth disabled -- which is how a sync/remap regression should be checked. During
+        training the value is dominated by masking and drop_path noise. For a true drift
+        measurement, run the anchor comparison periodically in eval mode on unmasked crops.
+
+        Both terms are logged unconditionally when active (even at weight 0). Returns an empty
+        list -- matching the DINOv2 base, hence unchanged numerics -- when neither is active.
 
         Args:
             **ctx: Context forwarded from ``DinoV2PlModel.student_forward`` (global/local
@@ -860,8 +908,11 @@ class DinoV3PlModel(DinoV2PlModel):
             )
             self._log_loss("losses/cls_mse", cls_mse)
             self._log_loss("losses/cls_cos", cls_cosine)
-            # Drift diagnostic (gate G4.5): 1 - cls_cos is the mean cosine to the anchor.
-            self._log_loss("diagnostics/cls_anchor_cosine", 1.0 - cls_cosine)
+            # Mean cosine between the (masked) student CLS and the (unmasked) anchor CLS.
+            # Deliberately *not* named as a drift metric: per the contract above it also
+            # carries the masking and drop_path response, so it is a trend/stability signal
+            # rather than a measure of how far the weights have moved.
+            self._log_loss("diagnostics/cls_anchor_cosine_masked", 1.0 - cls_cosine)
 
             if preservation_cfg.cls_mse_weight:
                 losses.append(preservation_cfg.cls_mse_weight * cls_mse)
