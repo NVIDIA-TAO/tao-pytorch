@@ -161,6 +161,61 @@ def split_fused_swiglu_fc1(timm_state_dict, reference):
     return out
 
 
+def merge_lora_state_dict(state_dict):
+    """Fold any LoRA adapters in a backbone state dict into their base weights.
+
+    Turns ``{W, lora_A, lora_B, lora_scaling}`` into ``{W + scaling * (B @ A)}`` and drops the
+    adapter keys, so the result is a stock DINOv3 state dict that a plain ViT (or timm) loads
+    strictly. Without this step ``convert`` either fails validation on the unexpected ``lora_*``
+    keys or -- with ``validate=False`` -- writes them straight through, and ``export`` builds a
+    plain backbone that ignores them: in both cases the artifact is the *frozen base* model, not
+    the adapted one, with nothing in the output to say so.
+
+    The scale is read from the ``lora_scaling`` buffer stored alongside each adapter, so a
+    checkpoint carries everything needed to merge it and cannot be folded with the wrong alpha.
+
+    A state dict without adapters passes through untouched, so this is safe to call
+    unconditionally.
+
+    Args:
+        state_dict (Mapping): Backbone-level state dict in TAO naming, with or without adapters.
+
+    Returns:
+        dict: State dict with adapters folded in and all ``lora_*`` keys removed.
+
+    Raises:
+        ValueError: If an adapter is incomplete, or carries no scale to merge with.
+    """
+    merged = dict(state_dict)
+    prefixes = sorted({k[: -len("lora_A")] for k in state_dict if k.endswith("lora_A")})
+
+    for prefix in prefixes:
+        a_key, b_key = f"{prefix}lora_A", f"{prefix}lora_B"
+        scale_key, weight_key = f"{prefix}lora_scaling", f"{prefix}weight"
+        if b_key not in merged:
+            raise ValueError(f"{a_key} has no matching {b_key}; refusing to merge a partial adapter.")
+        if weight_key not in merged:
+            raise ValueError(f"{a_key} has no base weight at {weight_key}.")
+        if scale_key not in merged:
+            raise ValueError(
+                f"{a_key} has no {scale_key}; the alpha/rank scale is unknown, and guessing it "
+                "would silently produce a wrongly-scaled backbone."
+            )
+
+        lora_a = merged.pop(a_key)
+        lora_b = merged.pop(b_key)
+        scaling = merged.pop(scale_key).to(torch.float32).item()
+        base = merged[weight_key]
+        delta = (lora_b.to(torch.float32) @ lora_a.to(torch.float32)) * scaling
+        merged[weight_key] = (base.to(torch.float32) + delta).to(base.dtype).contiguous()
+
+    # Defensive: nothing lora-shaped may survive into a "stock" state dict.
+    leftover = [k for k in merged if ".lora_" in k or k.endswith(("lora_A", "lora_B"))]
+    if leftover:
+        raise ValueError(f"LoRA keys survived the merge: {sorted(leftover)}")
+    return merged
+
+
 def load_checkpoint_file(path):
     """Load a ``.safetensors`` / ``.pth`` / ``.ckpt`` checkpoint into a dict.
 
@@ -304,6 +359,9 @@ def convert_ssl_to_timm(src_path, dst_path, source="teacher", validate=True,
     """
     raw = load_checkpoint_file(src_path)
     backbone_state_dict = extract_backbone_state_dict(raw, source=source)
+    # Fold LoRA adapters into the base weights before translation, so the exported backbone is
+    # the *adapted* model in stock DINOv3 topology. No-op for full-fine-tune checkpoints.
+    backbone_state_dict = merge_lora_state_dict(backbone_state_dict)
     timm_state_dict = remap_tao_backbone_to_timm(backbone_state_dict)
     reference = timm.create_model(timm_model_name, pretrained=False).state_dict()
     timm_state_dict = split_fused_swiglu_fc1(timm_state_dict, reference)
