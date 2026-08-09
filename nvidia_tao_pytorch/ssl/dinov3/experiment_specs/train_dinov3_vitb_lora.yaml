@@ -1,0 +1,145 @@
+defaults:
+  - train_dinov3_vitb
+  - _self_
+
+# DINOv3 ViT-B LoRA + preservation continual pre-training on the Foxconn AOI pool.
+#
+# This spec carries **arm-D** defaults (LoRA + Gram anchoring + CLS preservation), the
+# recommended configuration from docs/plans/dinov3_lora_design.md. The other Stage-4 arms are
+# reached from here purely through TRAIN_OVERRIDES in scripts/slurm/dinov3_lora_vitb.sbatch --
+# nothing but weights change between arms, so the ablation is clean:
+#
+#   B  model.gram.enable=false model.gram.w_gram=0.0 model.preservation.enable=false
+#   C  model.gram.enable=true  model.gram.w_gram=1.0 model.preservation.enable=false
+#   D  (these defaults)
+#   E  model.gram.w_gram=2.0 model.preservation.cls_mse_weight=0.10
+#      model.preservation.cls_cosine_weight=0.10
+#
+# Derived from train_dinov3_vitb_foxconn.yaml (nnagrajrao's proven 10-node full-SSL recipe,
+# which is our arm-A reference). Everything that affects comparability with that run --
+# crop geometry, img_size 512, num_prototypes, precision -- is held identical on purpose.
+# What changes is documented inline below.
+
+results_dir: /tmp/dinov3_vitb_lora
+
+model:
+  centering_method: sinkhorn
+  backbone:
+    teacher_type: vit_b
+    student_type: vit_b
+    img_size: 512
+    # Lowered 0.4 -> 0.1. Two reasons, both from the devbox Stage-2 findings (STATUS finding 2):
+    #  1. Stochastic depth is a regularizer sized for full fine-tuning of 86M parameters. Under
+    #     LoRA only ~0.44M adapter parameters (plus heads and mask_token) are trainable and the
+    #     base is frozen, so the drift subspace is already rank-bounded -- 0.4 drop-path is
+    #     redundant capacity control that mostly just adds gradient noise.
+    #  2. It destroys the preservation signal. Measured at init, where LoRA is provably an
+    #     identity (B=0): with drop_path 0.0 in eval mode the student matches the anchor to
+    #     1.2e-07 cls_cos, but with drop_path 0.4 in train mode cls_cos reads 9.3e-01 -- i.e.
+    #     the in-training preservation scalars are dominated by stochastic-depth noise rather
+    #     than by real representational drift. Lowering it does not by itself make the
+    #     in-training scalars a drift metric (that is why the post-train eval-mode unmasked
+    #     probe exists), but it stops them being pure noise.
+    drop_path_rate: 0.1
+
+  # --- arm-D: LoRA on ---------------------------------------------------------------------
+  lora:
+    enable: true
+    rank: 8
+    alpha: 16.0            # scale = alpha/rank = 2.0
+    dropout: 0.05
+    target_modules: [qkv, proj]
+    num_last_blocks: 0     # 0 = all 12 blocks; ~0.44M trainable adapter params for ViT-B
+
+  # --- arm-D: patch-geometry anchor -------------------------------------------------------
+  gram:
+    enable: true
+    w_gram: 1.0
+    start_step: 0          # anchor from step 0: in continual pre-training there is no "early
+                           # training" phase to protect, and LoRA is an identity at init anyway
+    teacher_source: pretrained   # 'ema' is a full-FT concept and is guardrail-rejected with LoRA
+
+  # --- arm-D: global-geometry anchor ------------------------------------------------------
+  preservation:
+    enable: true
+    cls_mse_weight: 0.05
+    cls_cosine_weight: 0.05
+
+dataset:
+  train_dataset:
+    # Flat directory of 597,617 AOI images. The '_wds' suffix is historical -- it is NOT
+    # webdataset shards; DinoV2Dataset rglobs image files and rejects archives.
+    images_dir: /lustre/fsw/portfolios/edgeai/users/nnagrajrao/datasets/Foxconn_wds
+  batch_size: 16
+  workers: 8
+  transform:
+    n_global_crops: 2
+    global_crops_scale: [0.32, 1.0]
+    global_crops_size: 512
+    n_local_crops: 4
+    local_crops_scale: [0.05, 0.32]
+    local_crops_size: 112
+
+train:
+  pretrained_model_path: /lustre/fsw/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/hf_cache/hub/models--timm--vit_base_patch16_dinov3.lvd1689m/snapshots/c6a5fb7d12bbd3cf3b0079253141c3332aaed7da
+
+  # 1 node, not 10. LoRA arms are ~10-20k steps rather than 12 epochs, and the plan mandates
+  # sequential single-node submission for fairshare etiquette and clean attribution.
+  num_nodes: 1
+  num_gpus: 8
+
+  # Step budget. Global batch = num_nodes * num_gpus * batch_size = 1 * 8 * 16 = 128 images.
+  # Foxconn pool = 597,617 images -> 597617/128 ~= 4,669 optimizer steps per epoch.
+  # 3 epochs ~= 14,000 steps, which sits mid-range in the plan's 10-20k per-arm window.
+  # (2 epochs ~= 9.3k would undershoot it; 4 ~= 18.7k is the upper end if an arm needs longer.)
+  num_epochs: 3
+
+  # Step-unit checkpointing, NOT epoch-unit. An epoch here is ~4,669 steps and the cluster caps
+  # GPU jobs at 4h, so epoch-unit checkpointing risks a requeue landing mid-epoch and throwing
+  # away everything since the last epoch boundary. At 1,000 steps we lose at most ~1k steps to a
+  # requeue, and TAO_SSL_CHECKPOINT_KEEP_LAST_N=3 (exported by the launcher) bounds the disk.
+  checkpoint_interval: 1000
+  checkpoint_interval_unit: step
+
+  layerwise_decay: 1.0
+  clip_grad_norm: 3.0
+  precision: 16-mixed
+  num_prototypes: 4096     # matches the arm-A foxconn run; the 131072 base default is sized
+                           # for LVD-scale pre-training, not a 597k domain pool
+
+  schedulers:
+    learning_rate:
+      # LR 3.2e-4 -> 3.2e-5. Linear rescaling of the proven 10-node foxconn recipe to 1 node,
+      # as mandated by the slurm plan:
+      #
+      #   foxconn : 10 nodes x 8 GPUs x 16 = 1280 global batch  @ 3.2e-4
+      #   here    :  1 node  x 8 GPUs x 16 =  128 global batch  @ 3.2e-4 * (128/1280) = 3.2e-5
+      #
+      # Stated explicitly because the choice is not neutral: the base spec
+      # (train_dinov3_vitb.yaml) uses sqrt scaling, which would instead give
+      # 3.2e-4 * sqrt(128/1280) = 1.01e-4. Linear is the conservative option and is what the
+      # plan specifies, so it is what all four arms use -- the arms are compared against each
+      # other, so a shared LR is what matters for the ablation. Worth revisiting if arm B shows
+      # no in-domain gain at 14k steps: LoRA commonly wants a *higher* LR than full FT because
+      # only the adapters move, so an undershoot would surface as the plan's kill criterion
+      # ("arm D shows no in-domain gain") for a reason that is optimization, not preservation.
+      val_base: 3.2e-5
+      val_final: 1e-6
+      # ~7% of the 14k-step budget, matching the foxconn warm-up fraction (400/5601).
+      warm_up_steps: 1000
+    last_layer_learning_rate:
+      val_base: 3.2e-5
+      val_final: 1e-6
+      warm_up_steps: 1000
+      # The DINO head is randomly initialized (Meta ships inference backbones only), and under
+      # LoRA it is one of the few fully-trainable modules -- so it can race ahead of a frozen,
+      # rank-bounded backbone (design-doc risk R5). Keep the foxconn value of 0: the recipe ran
+      # without a prototype freeze and this spec should not silently diverge from arm A. If the
+      # smoke run shows the DINO loss destabilizing early, this is the first knob to turn.
+      freeze_steps: 0
+    momentum:
+      val_base: 0.999      # foxconn value, kept for arm-A comparability
+    teacher_temperature:
+      # foxconn used 100 warm-up steps over a ~5.6k-step run (1.8%); same fraction of our
+      # 14k-step budget is ~250.
+      warm_up_steps: 250
