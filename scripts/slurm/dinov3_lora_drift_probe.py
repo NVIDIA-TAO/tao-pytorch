@@ -213,9 +213,13 @@ def main():
             if args.fp32:
                 batch = batch.float()
 
-            # masks=None: student and anchor see identical pixels. Under eval() there is no
-            # stochastic depth either, so at identity these outputs must agree to ~1e-07.
-            trained_out = backbone([batch], masks=None)[0]
+            # Single-tensor path for BOTH, so the trained backbone and the anchor go through
+            # exactly the same code -- any asymmetry here would show up as fake "drift".
+            # The list path zips crops with masks and would need masks=[None]; the single-tensor
+            # path is the unmasked one by construction, which is what this probe wants.
+            # Under eval() there is no stochastic depth either, so at identity these outputs
+            # must agree to ~1e-07.
+            trained_out = backbone(batch)
             anchor_out = anchor(batch)
 
             trained_cls = trained_out["x_norm_clstoken"].float()
