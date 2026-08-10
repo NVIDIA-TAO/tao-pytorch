@@ -21,7 +21,6 @@ CONTAINER = {
         "7.1.0-rc-245-multiarch"
     ),
     "sha256": "e36640f9ae7a03bc80828cf7de93bd6bdbbb0fecf509a71a243be0ab5b497fc2",
-    "size_bytes": 28860358656,
 }
 PAYLOAD_PATHS = (
     "nvidia_tao_pytorch/config/oneformer/evaluate.py",

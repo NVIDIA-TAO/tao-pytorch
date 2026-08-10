@@ -5,12 +5,10 @@ This overlay is for the pinned image:
 ```text
 nvcr.io/nvstaging/tao/tao-toolkit-pyt:7.1.0-rc-245-multiarch
 sha256 e36640f9ae7a03bc80828cf7de93bd6bdbbb0fecf509a71a243be0ab5b497fc2
-size   28860358656
 ```
 
 The SQSH location, overlay output, and result directories are deployment
-inputs; only the image digest and size above are part of the reproducibility
-contract.
+inputs; only the image digest above is part of the reproducibility contract.
 
 The installer validates every base-file hash directly against the immutable
 package root in the pinned container, then writes patched files into a separate
