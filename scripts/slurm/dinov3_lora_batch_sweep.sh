@@ -35,6 +35,12 @@ CONTAINER="${CONTAINER:-/lustre/fsw/portfolios/edgeai/users/yuw/docker/tao_evfm_
 TMP_ROOT="$LUSTRE_USER/tmp"
 GPUS="${GPUS:-8}"
 BATCHES="${BATCHES:-16 32 48 64}"
+# One extra point at the arms' batch with LoRA OFF, so the LoRA-vs-full-FT cost comparison is
+# measured rather than reasoned about. Theory says it should be close: LoRA saves optimizer
+# state and gradient buffers (~1 GB of ~20 GB) but not activation memory, because gradients
+# still flow through the frozen layers to reach adapters in early blocks. This checks that.
+FULLFT_BATCH="${FULLFT_BATCH:-16}"
+RUN_FULLFT="${RUN_FULLFT:-1}"
 TARGET_STEPS="${TARGET_STEPS:-40}"
 POOL=1000                       # images in the smoke subset
 HOST_HOME="${HOME}"
@@ -112,6 +118,57 @@ for BS in $BATCHES; do
     echo "exit=${RC}" > "$RD/result.txt"
 done
 
+# --- full-FT reference point -------------------------------------------------------------
+if [ "$RUN_FULLFT" = "1" ]; then
+    BS="$FULLFT_BATCH"
+    RD="$SWEEP_ROOT/fullft_bs_${BS}"
+    mkdir -p "$RD"
+    GLOBAL=$(( BS * GPUS ))
+    STEPS_PER_EPOCH=$(( POOL / GLOBAL )); [ "$STEPS_PER_EPOCH" -lt 1 ] && STEPS_PER_EPOCH=1
+    EPOCHS=$(( (TARGET_STEPS + STEPS_PER_EPOCH - 1) / STEPS_PER_EPOCH ))
+
+    echo
+    echo "########## FULL-FT reference: batch ${BS}/GPU, LoRA disabled ##########"
+    export TAO_VISIBLE_DEVICES
+    TAO_VISIBLE_DEVICES="$(seq -s, 0 "$((GPUS - 1))")"
+
+    srun --partition=interactive --account=edgeai_tao-ptm_image-foundation-model-clip \
+        --job-name=dinov3_fullft_sweep_TAO-2492 \
+        --nodes=1 --ntasks="$GPUS" --ntasks-per-node="$GPUS" --gpus-per-node="$GPUS" \
+        --cpus-per-task=8 --time=00:40:00 \
+        --container-image="$CONTAINER" \
+        --container-mounts="$TMP_ROOT:/root,/lustre:/lustre,$HOST_HOME:$HOST_HOME" \
+        --no-container-entrypoint --container-remap-root --container-writable \
+        bash -lc "
+            set -uo pipefail
+            export PYTHONUNBUFFERED=1
+            export HOME='$HOST_HOME'
+            export TAO_VISIBLE_DEVICES='$TAO_VISIBLE_DEVICES'
+            export PYTHONPATH='$REPO_DIR:$TAO_CORE_DIR:'\"\${PYTHONPATH:-}\"
+            cd '$REPO_DIR'
+            if [ \"\${SLURM_PROCID:-0}\" = \"0\" ]; then
+                nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits \\
+                    --loop-ms=2000 > '$RD/mem.csv' 2>/dev/null &
+                SMI_PID=\$!
+            fi
+            /usr/bin/python nvidia_tao_pytorch/ssl/dinov3/scripts/train.py \\
+                --config-path '$SPEC_DIR' --config-name '$SPEC_NAME' \\
+                results_dir='$RD' \\
+                dataset.train_dataset.images_dir='$DATA_DIR' \\
+                dataset.batch_size=$BS \\
+                train.num_nodes=1 train.num_gpus=$GPUS \\
+                train.num_epochs=$EPOCHS \\
+                train.checkpoint_interval=100000 train.checkpoint_interval_unit=step \\
+                train.pretrained_model_path='$PRETRAINED' \\
+                model.lora.enable=false model.gram.enable=false model.preservation.enable=false
+            rc=\$?
+            if [ -n \"\${SMI_PID:-}\" ]; then kill \$SMI_PID 2>/dev/null; fi
+            exit \$rc
+        " 2>&1 | tee "$RD/train.log"
+    echo "full-FT: exit ${PIPESTATUS[0]}"
+    echo "exit=${PIPESTATUS[0]}" > "$RD/result.txt"
+fi
+
 echo
 echo "=============================================="
 echo "SWEEP SUMMARY"
@@ -134,7 +191,20 @@ for BS in $BATCHES; do
     printf '%-8s %-9s %-10s %-12s %-12s %s\n' \
         "$BS" "$GLOBAL" "${ITS:-—}" "${IMGS:-—}" "${PEAK:-—}" "$NOTE"
 done
+RD="$SWEEP_ROOT/fullft_bs_${FULLFT_BATCH}"
+if [ -d "$RD" ]; then
+    GLOBAL=$(( FULLFT_BATCH * GPUS ))
+    ITS="$(tr '\r' '\n' < "$RD/train.log" 2>/dev/null | grep -oE '[0-9.]+it/s' | tail -10 \
+        | tr -d 'its/' | sort -n | awk '{a[NR]=$1} END{if(NR)print a[int((NR+1)/2)]}')"
+    IMGS=""; [ -n "${ITS:-}" ] && IMGS="$(awk -v i="$ITS" -v g="$GLOBAL" 'BEGIN{printf "%.1f", i*g}')"
+    PEAK="$(awk -F', *' 'NF>=2 && $2+0>m {m=$2+0} END{if(m)printf "%.1f", m/1024}' "$RD/mem.csv" 2>/dev/null)"
+    printf '%-8s %-9s %-10s %-12s %-12s %s\n' \
+        "${FULLFT_BATCH}*" "$GLOBAL" "${ITS:-—}" "${IMGS:-—}" "${PEAK:-—}" "FULL-FT (LoRA off)"
+fi
 echo
+echo "* full-FT reference at the arms' batch. LoRA should be close on both time and memory:"
+echo "  it saves optimizer state and gradient buffers (~1 GB of ~20 GB), not activation"
+echo "  memory, since gradients still flow through the frozen layers to reach the adapters."
 echo "Reference: the Stage-4 arms ran at batch 16/GPU (global 128), ~0.13 it/s, ~19.5-20.6 GB."
 echo "finished $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "=============================================="
