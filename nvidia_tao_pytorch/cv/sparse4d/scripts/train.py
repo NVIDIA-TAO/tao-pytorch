@@ -80,6 +80,8 @@ def run_experiment(experiment_config, key):
     max_steps = num_iters_per_epoch * num_epochs
     if max_steps <= 0:
         raise ValueError("Sparse4D training requires a positive optimizer-step budget")
+    # Keep epochs unbounded only because max_steps is always set below; the
+    # optimizer-step budget is the single stop condition for every run.
     trainer_kwargs["max_epochs"] = -1
 
     trainer = Trainer(
