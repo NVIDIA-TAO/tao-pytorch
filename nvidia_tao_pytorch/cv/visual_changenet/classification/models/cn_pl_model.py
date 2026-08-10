@@ -232,9 +232,38 @@ class ChangeNetPlModel(TAOLightningModule):
         _ = self._forward_pass(batch)
         loss, siam_score = self._backward_G()
         self.val_metrics.update(siam_score, label)
+        # Accumulate raw scores/labels for the epoch-level FAR@100%recall metric.
+        if not hasattr(self, "_val_far_scores"):
+            self._val_far_scores, self._val_far_labels = [], []
+        self._val_far_scores.append(siam_score.detach().reshape(-1).float().cpu())
+        self._val_far_labels.append(label.detach().reshape(-1).cpu())
         self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True, batch_size=batch_size)
 
         return loss
+
+    def _compute_val_far(self):
+        """FAR at 100% recall over the accumulated validation scores.
+
+        Convention (matches AOIMetrics): score > threshold => predicted FAIL;
+        label 1 = FAIL (defect), 0 = PASS. With the strict `>` rule, the
+        lowest FAR achieving recall==1.0 is obtained at the largest candidate
+        threshold below min(defect scores):
+            val_far = #(pass_scores >= min(defect_scores)) / n_pass
+        Returns FAR percentage in [0, 100], or None if the accumulated batch
+        contains no defect or no pass samples (e.g. sanity check).
+        """
+        import torch as _torch
+        if not getattr(self, "_val_far_scores", None):
+            return None
+        scores = _torch.cat(self._val_far_scores)
+        labels = _torch.cat(self._val_far_labels)
+        defect = scores[labels == 1]
+        passed = scores[labels == 0]
+        if defect.numel() == 0 or passed.numel() == 0:
+            return None
+        min_defect = defect.min()
+        far = (passed >= min_defect).float().mean().item() * 100.0
+        return far
 
     def on_validation_epoch_end(self):
         """Validation epoch end.
@@ -244,11 +273,19 @@ class ChangeNetPlModel(TAOLightningModule):
 
         val_accuracy = self.val_metrics.compute()['total_accuracy'].item()
         val_fpr = self.val_metrics.compute()['false_alarm'].item()
+        val_far = self._compute_val_far()
+        self._val_far_scores, self._val_far_labels = [], []
+        if val_far is not None:
+            # Logged so ModelCheckpoint can monitor `val_far` (mode=min).
+            self.log("val_far", val_far, on_step=False, on_epoch=True,
+                     prog_bar=True, sync_dist=True)
         if not self.trainer.sanity_checking:
             self.status_logging_dict = {}
             self.status_logging_dict["val_loss"] = average_val_loss
             self.status_logging_dict["val_acc"] = val_accuracy
             self.status_logging_dict["val_fpr"] = val_fpr
+            if val_far is not None:
+                self.status_logging_dict["val_far"] = val_far
             status_logging.get_status_logger().kpi = self.status_logging_dict
             status_logging.get_status_logger().write(
                 message="Eval metrics generated.",
@@ -258,6 +295,8 @@ class ChangeNetPlModel(TAOLightningModule):
             "val_acc": val_accuracy,
             "val_fpr": val_fpr
         }
+        if val_far is not None:
+            validation_logging_dict["val_far"] = val_far
         self.visualize_metrics(validation_logging_dict)
         self.val_metrics.reset()
         pl.utilities.memory.garbage_collection_cuda()
