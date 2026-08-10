@@ -16,12 +16,14 @@ from nvidia_tao_pytorch.ssl.nvdinov2.dataloader.pl_dinov2_data_module import Din
 from nvidia_tao_pytorch.ssl.nvdinov2.model.pl_model import DinoV2PlModel
 
 
-def run_experiment(experiment_config, key):
+def run_experiment(experiment_config, encryption_key):
     """Start the training."""
     for key in ("resume_training_checkpoint_path", "pretrained_model_path"):
         if not experiment_config.get("train", {}).get(key):
             experiment_config.train[key] = None
-    resume_ckpt, trainer_kwargs = initialize_train_experiment(experiment_config, key)
+    resume_ckpt, trainer_kwargs = initialize_train_experiment(
+        experiment_config, encryption_key
+    )
 
     num_nodes = experiment_config.train.num_nodes
 
@@ -63,7 +65,7 @@ def main(cfg: ExperimentConfig) -> None:
     # Obfuscate logs.
     obfuscate_logs(cfg)
     run_experiment(experiment_config=cfg,
-                   key=cfg.encryption_key)
+                   encryption_key=cfg.encryption_key)
 
 
 if __name__ == "__main__":
