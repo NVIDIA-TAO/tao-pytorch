@@ -1,0 +1,62 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: PR Title
+
+on:
+  pull_request:
+    types:
+    - opened
+    - edited
+    - reopened
+    - synchronize
+
+jobs:
+  pr-title:
+    name: PR Title
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate the title format
+        env:
+          AUTHORIZED_USERS: ${{ vars.AUTHORIZED_USERS }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import sys
+
+          REGEX = (r"^\[(JIRA|TLT|TAO|TAOVN)-[0-9]+\]"
+                   r"\[(CI|CD|Bugfix|Hotfix|CV|LLM|Feature|Model-Cards|Docs|Chore)\] .+$")
+          ERROR_MSG = ("Expected format: [JIRA-ID]"
+                       "[CI/CD/Bugfix/Hotfix/CV/LLM/Feature/Model-Cards/Docs/Chore] MR Title")
+
+          author = os.environ["PR_AUTHOR"]
+          title = os.environ["PR_TITLE"]
+          raw = os.environ.get("AUTHORIZED_USERS", "").strip()
+
+          if not raw:
+              print("AUTHORIZED_USERS is not set; the title format is not enforced.")
+              sys.exit(0)
+
+          try:
+              users = json.loads(raw)
+          except ValueError as err:
+              print(f"AUTHORIZED_USERS is not valid JSON ({err}); "
+                    "the title format is not enforced.")
+              sys.exit(0)
+
+          if author.lower() not in {str(user).lower() for user in users}:
+              print(f"{author} is not a TAO developer; the title format is not enforced.")
+              sys.exit(0)
+
+          if re.match(REGEX, title):
+              print(f"MR title is valid: {title}")
+              sys.exit(0)
+
+          print(f"Invalid MR title format: {title}")
+          print(ERROR_MSG)
+          sys.exit(1)
+          PY
