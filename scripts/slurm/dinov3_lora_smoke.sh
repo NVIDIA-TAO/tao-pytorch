@@ -33,6 +33,13 @@ HOST_HOME="${HOME}"
 
 mkdir -p "$RESULT_DIR" "$TMP_ROOT" "$REPO_DIR/logs/slurm"
 
+# Self-logging. The cluster login shell is csh, and tmux hands its command string to that
+# shell -- so `tmux new -d -s smoke "bash script.sh 2>&1 | tee log"` dies instantly on
+# "Ambiguous output redirect". Keeping the redirect inside the script means the tmux command
+# stays a simple `bash <script>`, which csh parses fine.
+COMBINED_LOG="${COMBINED_LOG:-$RESULT_DIR/smoke_combined.log}"
+exec > >(tee -a "$COMBINED_LOG") 2>&1
+
 echo "=============================================="
 echo "DINOv3 LoRA smoke  (TAO-2492)"
 echo "host      : $(hostname)"
