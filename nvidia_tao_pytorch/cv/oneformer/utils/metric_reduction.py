@@ -26,8 +26,8 @@ def summarize_semantic_iou(area_intersect, area_union, area_label):
     area_union = np.asarray(area_union, dtype=np.float64)
     area_label = np.asarray(area_label, dtype=np.float64)
     if not (
-        area_intersect.shape == area_union.shape == area_label.shape
-        and area_intersect.ndim == 1
+        area_intersect.shape == area_union.shape == area_label.shape and
+        area_intersect.ndim == 1
     ):
         raise ValueError("Semantic metric statistics must be same-length 1-D arrays.")
     for name, value in (

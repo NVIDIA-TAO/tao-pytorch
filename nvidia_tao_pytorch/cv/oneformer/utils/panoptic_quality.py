@@ -115,8 +115,8 @@ def panoptic_quality_stats(
 
     pair_offset = int(prediction.max(initial=0)) + 1
     combined = (
-        ground_truth.astype(np.uint64, copy=False) * np.uint64(pair_offset)
-        + prediction.astype(np.uint64, copy=False)
+        ground_truth.astype(np.uint64, copy=False) * np.uint64(pair_offset) +
+        prediction.astype(np.uint64, copy=False)
     )
     pair_ids, pair_counts = np.unique(combined, return_counts=True)
     intersections = {
@@ -144,10 +144,10 @@ def panoptic_quality_stats(
             continue
 
         union = (
-            gt_areas[gt_id]
-            + pred_areas[pred_id]
-            - intersection
-            - void_overlap[pred_id]
+            gt_areas[gt_id] +
+            pred_areas[pred_id] -
+            intersection -
+            void_overlap[pred_id]
         )
         if union <= 0:
             continue
@@ -182,9 +182,9 @@ def panoptic_quality_stats(
 def _mean_quality(stats, category_mask):
     """Reduce per-class sufficient statistics over a category subset."""
     denominator = (
-        stats[:, TRUE_POSITIVE]
-        + 0.5 * stats[:, FALSE_POSITIVE]
-        + 0.5 * stats[:, FALSE_NEGATIVE]
+        stats[:, TRUE_POSITIVE] +
+        0.5 * stats[:, FALSE_POSITIVE] +
+        0.5 * stats[:, FALSE_NEGATIVE]
     )
     valid = category_mask & (denominator > 0)
     category_count = int(valid.sum())
@@ -257,9 +257,9 @@ def summarize_panoptic_quality(stats, is_thing, class_names=None):
 
     if class_names is not None:
         denominator = (
-            stats[:, TRUE_POSITIVE]
-            + 0.5 * stats[:, FALSE_POSITIVE]
-            + 0.5 * stats[:, FALSE_NEGATIVE]
+            stats[:, TRUE_POSITIVE] +
+            0.5 * stats[:, FALSE_POSITIVE] +
+            0.5 * stats[:, FALSE_NEGATIVE]
         )
         per_class = {}
         for index, name in enumerate(class_names):
