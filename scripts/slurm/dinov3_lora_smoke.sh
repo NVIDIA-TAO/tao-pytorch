@@ -27,6 +27,7 @@ CONTAINER="${CONTAINER:-/lustre/fsw/portfolios/edgeai/users/yuw/docker/tao_evfm_
 TMP_ROOT="${TMP_ROOT:-$LUSTRE_USER/tmp}"
 GPUS="${GPUS:-8}"
 EPOCHS="${EPOCHS:-64}"
+CKPT_INTERVAL="${CKPT_INTERVAL:-100}"
 PARTITION="${PARTITION:-interactive}"
 TIME_LIMIT="${TIME_LIMIT:-02:00:00}"
 HOST_HOME="${HOME}"
@@ -87,7 +88,7 @@ srun --partition="$PARTITION" --account=edgeai_tao-ptm_image-foundation-model-cl
             dataset.train_dataset.images_dir='$DATA_DIR' \\
             train.num_nodes=1 train.num_gpus=$GPUS \\
             train.num_epochs=$EPOCHS \\
-            train.checkpoint_interval=250 train.checkpoint_interval_unit=step \\
+            train.checkpoint_interval=$CKPT_INTERVAL train.checkpoint_interval_unit=step \\
             train.pretrained_model_path='$PRETRAINED'
     " 2>&1 | tee "$RESULT_DIR/smoke_train.log"
 TRAIN_RC=${PIPESTATUS[0]}
