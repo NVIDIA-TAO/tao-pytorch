@@ -116,6 +116,29 @@ def load_probe_images(images_dir, num_images, image_size):
     return (batch - mean) / std, [str(p.relative_to(root)) for p in paths]
 
 
+def load_spec(spec_path):
+    """Compose a training spec the way Hydra would, without running Hydra.
+
+    The spec's ``defaults:`` list is a Hydra *directive*, not config data, so merging the YAML
+    straight onto the structured schema raises ``ConfigKeyError: Key 'defaults' not in
+    'ExperimentConfig'``. Strip it and merge the parents it names in order, so the probe sees
+    exactly the config the training run used (crop size, LoRA rank, gram/preservation flags).
+
+    Args:
+        spec_path (str): Path to the arm's spec YAML.
+
+    Returns:
+        DictConfig: the composed configuration.
+    """
+    spec = OmegaConf.load(spec_path)
+    parents = [d for d in spec.pop("defaults", []) if isinstance(d, str) and d != "_self_"]
+    merged = OmegaConf.structured(ExperimentConfig())
+    spec_dir = Path(spec_path).parent
+    for parent in parents:
+        merged = OmegaConf.merge(merged, load_spec(spec_dir / f"{parent}.yaml"))
+    return OmegaConf.merge(merged, spec)
+
+
 def gram_matrix(patch_tokens):
     """Cosine-similarity Gram matrix of patch tokens, per image.
 
@@ -133,7 +156,7 @@ def main():
     """Measure eval-mode unmasked drift against the frozen pretrained anchor."""
     args = parse_args()
 
-    config = OmegaConf.merge(OmegaConf.structured(ExperimentConfig()), OmegaConf.load(args.spec))
+    config = load_spec(args.spec)
 
     # fp32: the identity case sits at ~1e-07 and fp16 has ~1e-03 resolution there, so a
     # fp16 probe cannot tell "no drift" from "some drift". The xformers custom-attention path
