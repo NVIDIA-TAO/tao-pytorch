@@ -314,7 +314,6 @@ class AutoMLBrainHarness:
         self.brain.save_state()
 
     def is_complete(self):
-        self.controller.history = self.history
         brain_done = getattr(self.brain, "done", None)
         if callable(brain_done):
             return brain_done()
