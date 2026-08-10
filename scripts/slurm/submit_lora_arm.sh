@@ -56,16 +56,20 @@ echo "=== fairshare (edgeai) ==="
 sshare -al 2>/dev/null | grep -E 'Account|edgeai_tao-ptm.*vpraveen' || echo "(sshare returned nothing)"
 echo
 
-# One training job queued or running at a time (plan rule). Counted before we add another.
+# Concurrency guard. The plan's default is one training job at a time for fairshare
+# etiquette; MAX_JOBS raises that when the arms are being run concurrently (they are
+# independent experiments, so they parallelise across arms rather than within one).
+# Each arm is 1 node, so MAX_JOBS is also the node count we are holding.
+MAX_JOBS="${MAX_JOBS:-1}"
 echo "=== our current queue ==="
 squeue -u "${USER}" -o '%.10i %.24j %.9T %.10M %.6D %R' || true
 running="$(squeue -u "${USER}" -h -o '%i' 2>/dev/null | wc -l)"
-echo "jobs in queue: ${running}"
+echo "jobs in queue: ${running} (max ${MAX_JOBS})"
 echo
 
-if [[ "${DRY_RUN}" != "1" && "${running}" -gt 0 ]]; then
-    echo "Refusing to submit: ${running} job(s) already queued/running." >&2
-    echo "The plan allows one training job at a time. Cancel or wait, then retry." >&2
+if [[ "${DRY_RUN}" != "1" && "${running}" -ge "${MAX_JOBS}" ]]; then
+    echo "Refusing to submit: ${running} job(s) already queued/running, limit ${MAX_JOBS}." >&2
+    echo "Raise MAX_JOBS to run more arms concurrently, or wait." >&2
     exit 3
 fi
 
