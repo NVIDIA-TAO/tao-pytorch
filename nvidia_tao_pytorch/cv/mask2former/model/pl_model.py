@@ -608,25 +608,22 @@ class Mask2formerPlModule(TAOLightningModule):
 
     def _finalize_semantic_metrics(self, split):
         """Globally aggregate semantic metrics and apply task-correct names."""
-        if not self.validation_outputs:
-            raise RuntimeError(
-                f"Mask2Former {split} evaluation produced no semantic batches."
+        # UnrepeatedDistributedSampler can leave an individual rank without
+        # batches.  That rank must still enter the collective below with zero
+        # sufficient statistics; raising here would strand the other ranks in
+        # all_reduce during distributed validation/test.
+        aggregated = np.zeros((4, self.num_classes), dtype=np.float64)
+        for index, key in enumerate(
+            (
+                "area_intersect",
+                "area_union",
+                "area_pred_label",
+                "area_label",
             )
-        aggregated = np.stack(
-            [
-                np.sum(
-                    [np.asarray(item[key]) for item in self.validation_outputs],
-                    axis=0,
-                )
-                for key in (
-                    "area_intersect",
-                    "area_union",
-                    "area_pred_label",
-                    "area_label",
-                )
-            ],
-            axis=0,
-        )
+        ):
+            values = [np.asarray(item[key]) for item in self.validation_outputs]
+            if values:
+                aggregated[index] = np.sum(values, axis=0)
         aggregate_tensor = torch.as_tensor(
             aggregated,
             dtype=torch.float64,
@@ -657,9 +654,9 @@ class Mask2formerPlModule(TAOLightningModule):
 
         miou_name, accuracy_name = semantic_metric_names(self.mode, split)
         self.log(miou_name, miou, on_step=False, on_epoch=True,
-                 prog_bar=True, sync_dist=True)
+                 prog_bar=True, sync_dist=False)
         self.log(accuracy_name, all_acc, on_step=False, on_epoch=True,
-                 prog_bar=True, sync_dist=True)
+                 prog_bar=True, sync_dist=False)
         self.validation_outputs.clear()
         status_accuracy_name = (
             "ACC_all" if self.mode == "semantic" else accuracy_name
