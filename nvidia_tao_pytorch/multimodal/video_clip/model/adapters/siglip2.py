@@ -1,5 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """SigLIP2 model adapter for CLIP-compatible training.
 
@@ -13,11 +26,10 @@ import math
 import torch
 import torch.nn.functional as F
 
-from nvidia_tao_pytorch.core.tlt_logging import logging
-from nvidia_tao_pytorch.multimodal.clip.model.adapters.base import (
+from nvidia_tao_pytorch.multimodal.video_clip.model.adapters.base import (
     BaseCLIPAdapter,
 )
-from nvidia_tao_pytorch.multimodal.clip.model.tokenizers import (
+from nvidia_tao_pytorch.multimodal.video_clip.model.tokenizers import (
     SigLIP2WrappedTokenizer,
     CLIPCompatibleTokenizer,
 )
@@ -74,12 +86,9 @@ class SigLIP2(BaseCLIPAdapter):
 
     def _configure_trainable_params(self):
         """Configure trainable params based on freeze settings."""
-        # Warning if both encoders are frozen
-        if self.freeze_vision_encoder and self.freeze_text_encoder:
-            logging.warning(
-                "Both vision and text encoders are frozen. "
-                "Only logit_scale and logit_bias will be trained."
-            )
+        self._warn_if_fully_frozen(
+            self.freeze_vision_encoder, self.freeze_text_encoder
+        )
 
         # Freeze vision encoder if requested
         if self.freeze_vision_encoder:
@@ -95,19 +104,11 @@ class SigLIP2(BaseCLIPAdapter):
 
     def _log_parameters(self):
         """Log parameter configuration summary."""
-        vision_total = sum(
-            p.numel() for p in self.backbone.inner.vision_model.parameters()
+        vision_trainable, vision_total = self._count_params(
+            self.backbone.inner.vision_model.parameters()
         )
-        vision_trainable = sum(
-            p.numel() for p in self.backbone.inner.vision_model.parameters()
-            if p.requires_grad
-        )
-        text_total = sum(
-            p.numel() for p in self.backbone.inner.text_model.parameters()
-        )
-        text_trainable = sum(
-            p.numel() for p in self.backbone.inner.text_model.parameters()
-            if p.requires_grad
+        text_trainable, text_total = self._count_params(
+            self.backbone.inner.text_model.parameters()
         )
         self._log_model_summary(
             model_name="SigLIP2 Model",
@@ -118,14 +119,6 @@ class SigLIP2(BaseCLIPAdapter):
             freeze_vision=self.freeze_vision_encoder,
             freeze_text=self.freeze_text_encoder,
         )
-
-    def get_encoder_blocks(self, tower):
-        """Return ordered list of transformer blocks for a given tower."""
-        if tower == 'vision':
-            return list(self.backbone.inner.vision_model.encoder.layers)
-        elif tower == 'text':
-            return list(self.backbone.inner.text_model.encoder.layers)
-        raise ValueError(f"Unknown tower: {tower}")
 
     def vision_named_parameters(self):
         """Return named parameters for the vision encoder."""

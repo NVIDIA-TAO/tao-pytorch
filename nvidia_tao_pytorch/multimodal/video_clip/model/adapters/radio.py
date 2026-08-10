@@ -1,5 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """C-RADIO model adapter for CLIP-compatible training.
 
@@ -23,10 +36,10 @@ import torch
 import torch.nn.functional as F
 
 from nvidia_tao_pytorch.core.tlt_logging import logging
-from nvidia_tao_pytorch.multimodal.clip.model.adapters.base import (
+from nvidia_tao_pytorch.multimodal.video_clip.model.adapters.base import (
     BaseCLIPAdapter,
 )
-from nvidia_tao_pytorch.multimodal.clip.model.tokenizers import (
+from nvidia_tao_pytorch.multimodal.video_clip.model.tokenizers import (
     CLIPCompatibleTokenizer,
     OpenCLIPWrappedTokenizer,
     SigLIP2WrappedTokenizer,
@@ -129,11 +142,9 @@ class CRADIO(BaseCLIPAdapter):
 
     def _configure_trainable_params(self):
         """Configure trainable params based on freeze settings."""
-        if self.freeze_vision_encoder and self.freeze_text_encoder:
-            logging.warning(
-                "Both vision and text encoders are frozen. "
-                "Only logit_scale and logit_bias will be trained."
-            )
+        self._warn_if_fully_frozen(
+            self.freeze_vision_encoder, self.freeze_text_encoder
+        )
 
         text_param_ids = {id(p) for p in self.text_model.parameters()}
 
@@ -152,13 +163,11 @@ class CRADIO(BaseCLIPAdapter):
 
     def _log_parameters(self):
         """Log parameter configuration summary."""
-        text_total = sum(p.numel() for p in self.text_model.parameters())
-        text_train = sum(
-            p.numel() for p in self.text_model.parameters() if p.requires_grad
+        text_train, text_total = self._count_params(
+            self.text_model.parameters()
         )
-        radio_total = sum(p.numel() for p in self.radio_model.parameters())
-        radio_train = sum(
-            p.numel() for p in self.radio_model.parameters() if p.requires_grad
+        radio_train, radio_total = self._count_params(
+            self.radio_model.parameters()
         )
 
         self._log_model_summary(
@@ -170,14 +179,6 @@ class CRADIO(BaseCLIPAdapter):
             freeze_vision=self.freeze_vision_encoder,
             freeze_text=self.freeze_text_encoder,
         )
-
-    def get_encoder_blocks(self, tower):
-        """Return ordered list of transformer blocks for a given tower."""
-        if tower == 'vision':
-            return list(self.radio_model.model.blocks)
-        elif tower == 'text':
-            return list(self.text_model.encoder.layers)
-        raise ValueError(f"Unknown tower: {tower}")
 
     # -- Parameter enumeration for per-tower optimizer groups --
 

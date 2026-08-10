@@ -1,5 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Base adapter class for CLIP-compatible model training.
 
@@ -68,6 +81,40 @@ class BaseCLIPAdapter(nn.Module, ABC):
             return f"{n / 1e6:.1f}M"
         return f"{n:,}"
 
+    @staticmethod
+    def _param_status(trainable: int, total: int) -> str:
+        """Status from actual counts so it can't contradict the numbers.
+
+        'frozen' when nothing trains, 'trainable' when everything trains, and
+        'partial' when only part of a component trains (e.g. a frozen backbone
+        with a trainable alignment/projection head).
+        """
+        if trainable <= 0:
+            return "frozen"
+        if trainable >= total:
+            return "trainable"
+        return "partial"
+
+    @staticmethod
+    def _count_params(params):
+        """Return ``(trainable, total)`` parameter counts for an iterable.
+
+        Accepts either ``module.parameters()`` or the parameter values of
+        ``module.named_parameters()`` (pass ``(p for _, p in named)``).
+        """
+        params = list(params)
+        total = sum(p.numel() for p in params)
+        trainable = sum(p.numel() for p in params if p.requires_grad)
+        return trainable, total
+
+    def _warn_if_fully_frozen(self, freeze_vision, freeze_text):
+        """Warn when both encoders are frozen (only the logits would train)."""
+        if freeze_vision and freeze_text:
+            logging.warning(
+                "Both vision and text encoders are frozen. "
+                "Only logit_scale and logit_bias will be trained."
+            )
+
     def _log_model_summary(
         self,
         model_name: str,
@@ -77,6 +124,7 @@ class BaseCLIPAdapter(nn.Module, ABC):
         text_trainable: int,
         freeze_vision: bool,
         freeze_text: bool,
+        vision_subrows=None,
     ):
         """Log a formatted model parameter summary table.
 
@@ -86,20 +134,36 @@ class BaseCLIPAdapter(nn.Module, ABC):
             vision_trainable: Trainable vision encoder parameters.
             text_total: Total text encoder parameters.
             text_trainable: Trainable text encoder parameters.
-            freeze_vision: Whether vision encoder is frozen.
-            freeze_text: Whether text encoder is frozen.
+            freeze_vision: Whether vision encoder is frozen (kept for API
+                compatibility; the Status column is derived from the actual
+                trainable/total counts, not this flag).
+            freeze_text: Whether text encoder is frozen (see freeze_vision).
+            vision_subrows: Optional list of ``(label, trainable, total)`` rows
+                that replace the single "Vision encoder" row. Lets a model split
+                the vision tower into, e.g., a frozen backbone and a trainable
+                alignment head so the report is not misleading.
         """
+        del freeze_vision, freeze_text  # status now derived from counts
         fmt = self._format_params
+        status = self._param_status
         logit_params = self.logit_scale.numel() + self.logit_bias.numel()
         total_params = vision_total + text_total + logit_params
         total_trainable = vision_trainable + text_trainable + logit_params
 
-        vision_status = "frozen" if freeze_vision else "trainable"
-        text_status = "frozen" if freeze_text else "trainable"
+        if vision_subrows:
+            vision_rows = [
+                [label, fmt(tr), fmt(tot), status(tr, tot)]
+                for label, tr, tot in vision_subrows
+            ]
+        else:
+            vision_rows = [
+                ["Vision encoder", fmt(vision_trainable), fmt(vision_total),
+                 status(vision_trainable, vision_total)],
+            ]
 
         table_data = [
-            ["Vision encoder", fmt(vision_trainable), fmt(vision_total), vision_status],
-            ["Text encoder", fmt(text_trainable), fmt(text_total), text_status],
+            *vision_rows,
+            ["Text encoder", fmt(text_trainable), fmt(text_total), status(text_trainable, text_total)],
             ["Logit params", fmt(logit_params), fmt(logit_params), "trainable"],
             ["Total", fmt(total_trainable), fmt(total_params), ""],
         ]
@@ -107,30 +171,10 @@ class BaseCLIPAdapter(nn.Module, ABC):
         table = tabulate(table_data, headers=headers, tablefmt="simple")
 
         logit_info = (
-            f"Logit scale: {self.logit_scale.exp().item():.2f}, "
-            f"Logit bias: {self.logit_bias.item():.2f}"
+            f"Logit scale: {self.logit_scale.exp().detach().item():.2f}, "
+            f"Logit bias: {self.logit_bias.detach().item():.2f}"
         )
         logging.info(f"{model_name}\n{table}\n{logit_info}")
-
-    def get_encoder_blocks(self, tower: str):
-        """Return an ordered list of transformer blocks for a given tower.
-
-        Used by LoRA injection to identify the last N blocks for adaptation.
-
-        Args:
-            tower: 'vision' or 'text'.
-
-        Returns:
-            List of nn.Module, one per transformer block, in forward order.
-
-        Raises:
-            ValueError: If tower is not 'vision' or 'text'.
-            NotImplementedError: If the subclass does not support this tower.
-        """
-        raise NotImplementedError(
-            f"{self.__class__.__name__} does not implement "
-            f"get_encoder_blocks for tower='{tower}'."
-        )
 
     @abstractmethod
     def vision_named_parameters(self):
@@ -164,6 +208,27 @@ class BaseCLIPAdapter(nn.Module, ABC):
         """
         yield 'logit_scale', self.logit_scale
         yield 'logit_bias', self.logit_bias
+
+    def get_encoder_blocks(self, tower: str):
+        """Return an ordered list of transformer blocks for a given tower.
+
+        Used by LoRA injection (see ``multimodal.clip.model.lora.inject_lora``)
+        to identify the last N blocks of a tower to adapt.
+
+        Args:
+            tower: 'vision' or 'text'.
+
+        Returns:
+            List of nn.Module, one per transformer block, in forward order.
+
+        Raises:
+            ValueError: If tower is not 'vision' or 'text'.
+            NotImplementedError: If the subclass does not support this tower.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement "
+            f"get_encoder_blocks for tower='{tower}'."
+        )
 
     @abstractmethod
     def encode_image(
