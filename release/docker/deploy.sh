@@ -95,6 +95,9 @@ if [ $BUILD_DOCKER = "1" ]; then
           mkdir -p $wheel_dir
         fi
         echo "Building source code wheel ..."
+        # Never let an artifact from a previous invocation satisfy the build
+        # gate when tao_pt swallows the container's exit status.
+        rm -f "${wheel_dir}"/*.whl
         if [ "$USE_CUDA_CACHE" = "1" ] && "$NV_TAO_PYTORCH_TOP/scripts/cuda_cache.sh" check; then
             echo "Restoring cached CUDA build artifacts ..."
             cache_build_succeeded="0"
@@ -106,6 +109,7 @@ if [ $BUILD_DOCKER = "1" ]; then
             fi
             if [ "$cache_build_succeeded" = "0" ]; then
                 echo "WARNING: cached CUDA build did not produce a wheel; rebuilding from source ..."
+                rm -f "${wheel_dir}"/*.whl
                 tao_pt --no-tty -- python setup.py bdist_wheel
                 "$NV_TAO_PYTORCH_TOP/scripts/cuda_cache.sh" save
             fi
@@ -117,7 +121,7 @@ if [ $BUILD_DOCKER = "1" ]; then
         fi
         # tao_pt swallows the container's exit code (see runner/tao_pt.py), so verify the
         # wheel was actually produced before trying to COPY it into the image.
-        if ! ls ${wheel_dir}/*.whl >/dev/null 2>&1; then
+        if ! find "${wheel_dir}" -maxdepth 1 -type f -name '*.whl' -size +0c -print -quit | grep -q .; then
             echo "ERROR: wheel build produced no artifact in ${wheel_dir}. Aborting." >&2
             exit 1
         fi
