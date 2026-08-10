@@ -252,11 +252,10 @@ class ChangeNetPlModel(TAOLightningModule):
         Returns FAR percentage in [0, 100], or None if the accumulated batch
         contains no defect or no pass samples (e.g. sanity check).
         """
-        import torch as _torch
         if not getattr(self, "_val_far_scores", None):
             return None
-        scores = _torch.cat(self._val_far_scores)
-        labels = _torch.cat(self._val_far_labels)
+        scores = torch.cat(self._val_far_scores)
+        labels = torch.cat(self._val_far_labels)
         defect = scores[labels == 1]
         passed = scores[labels == 0]
         if defect.numel() == 0 or passed.numel() == 0:
