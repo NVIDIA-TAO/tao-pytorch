@@ -30,7 +30,7 @@
 
 set -euo pipefail
 
-ARM="${ARM:?Set ARM to one of B, C, D, E.}"
+ARM="${ARM:?Set ARM to one of A, B, C, D, E.}"
 
 REPO_DIR="${REPO_DIR:-${SLURM_SUBMIT_DIR:-$PWD}}"
 TAO_CORE_DIR="${TAO_CORE_DIR:-${REPO_DIR}/tao-core}"
@@ -55,11 +55,17 @@ PROBE_NUM_IMAGES="${PROBE_NUM_IMAGES:-64}"
 # delta off it. Keeping the arms here rather than in four spec files guarantees that nothing
 # except these weights differs between them -- which is the whole point of the ablation.
 case "${ARM}" in
+    # Arm A is the full-FT drift baseline: no LoRA, no anchoring. The slurm plan assumed
+    # nnagrajrao's foxconn full-SSL run would supply it for free, but no such checkpoint was
+    # ever retained (session-log finding S0-e), so it is ours to run -- and the plan's own
+    # fallback applies: run it last, on the smallest schedule that shows drift.
+    # It is the arm the retention ordering D >= C >= B > A is measured against.
+    A)  ARM_OVERRIDES="model.lora.enable=false model.gram.enable=false model.gram.w_gram=0.0 model.preservation.enable=false" ;;
     B)  ARM_OVERRIDES="model.lora.enable=true model.gram.enable=false model.gram.w_gram=0.0 model.preservation.enable=false" ;;
     C)  ARM_OVERRIDES="model.lora.enable=true model.gram.enable=true model.gram.w_gram=1.0 model.preservation.enable=false" ;;
     D)  ARM_OVERRIDES="" ;;
     E)  ARM_OVERRIDES="model.lora.enable=true model.gram.enable=true model.gram.w_gram=2.0 model.preservation.enable=true model.preservation.cls_mse_weight=0.10 model.preservation.cls_cosine_weight=0.10" ;;
-    *)  echo "Unknown ARM '${ARM}'. Expected one of: B C D E." >&2; exit 2 ;;
+    *)  echo "Unknown ARM '${ARM}'. Expected one of: A B C D E." >&2; exit 2 ;;
 esac
 
 # Caller-supplied overrides win, so they come last on the command line.

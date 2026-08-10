@@ -11,14 +11,14 @@
 #
 # Usage: submit_lora_arm.sh <ARM> [DRY_RUN] [TIMEOUT_DURATION] [EXTRA_TRAIN_OVERRIDES...]
 #
-#   ARM                 B | C | D | E
+#   ARM                 A | B | C | D | E
 #   DRY_RUN             1 to validate paths and print the plan without submitting (default 0)
 #   TIMEOUT_DURATION    passed through to the sbatch (default 3.65h). The requeue-resume
 #                       drill uses a short value such as 15m to force one requeue cycle.
 
 set -euo pipefail
 
-ARM="${1:?Usage: submit_lora_arm.sh <ARM: B|C|D|E> [DRY_RUN] [TIMEOUT_DURATION] [overrides...]}"
+ARM="${1:?Usage: submit_lora_arm.sh <ARM: A|B|C|D|E> [DRY_RUN] [TIMEOUT_DURATION] [overrides...]}"
 DRY_RUN="${2:-0}"
 TIMEOUT_DURATION="${3:-3.65h}"
 shift $(( $# < 3 ? $# : 3 ))
@@ -29,8 +29,8 @@ REPO_DIR="${REPO_DIR:-${LUSTRE_USER}/repos/tao-pytorch}"
 RESULT_DIR="${RESULT_DIR:-${LUSTRE_USER}/outputs/dinov3_lora/arm_${ARM}}"
 
 case "${ARM}" in
-    B|C|D|E) ;;
-    *) echo "Unknown ARM '${ARM}'. Expected one of: B C D E." >&2; exit 2 ;;
+    A|B|C|D|E) ;;
+    *) echo "Unknown ARM '${ARM}'. Expected one of: A B C D E." >&2; exit 2 ;;
 esac
 
 cd "${REPO_DIR}"
