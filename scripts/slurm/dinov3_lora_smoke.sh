@@ -95,14 +95,23 @@ echo "train exit=$TRAIN_RC"
 
 echo
 echo "########## STEP 2: loss finiteness (G2.2) ##########"
-if grep -qiE 'nan|inf' "$RESULT_DIR/smoke_train.log"; then
-    echo "WARNING: 'nan'/'inf' appears in the log; showing context:"
-    grep -inE 'nan|inf' "$RESULT_DIR/smoke_train.log" | head -20
+# Word boundaries matter: a bare 'inf' pattern matches the word "inference", which appears in
+# every config dump, so the naive check reports a failure on every healthy run. Look for
+# nan/inf as whole words and, more precisely, as the value of a loss field.
+if grep -qiE '\b(nan|-?inf)\b|loss[a-z_]*=[[:space:]]*-?(nan|inf)' "$RESULT_DIR/smoke_train.log"; then
+    echo "WARNING: nan/inf appears as a value in the log; context:"
+    grep -inE '\b(nan|-?inf)\b|loss[a-z_]*=[[:space:]]*-?(nan|inf)' "$RESULT_DIR/smoke_train.log" | head -20
 else
-    echo "PASS: no nan/inf in the training log."
+    echo "PASS: no nan/inf loss values in the training log."
 fi
-echo "--- last loss lines ---"
-grep -oE 'train_loss[^,]*|dino_[a-z_]*loss[^,]*|ibot[^,]*|koleo[^,]*' "$RESULT_DIR/smoke_train.log" | tail -12
+# Lightning redraws its progress bar with \r, so the loss values never sit on their own line:
+# translate CR to LF before extracting or this reports nothing on a perfectly healthy run.
+echo "--- loss trajectory (first and last values seen) ---"
+tr '\r' '\n' < "$RESULT_DIR/smoke_train.log" \
+    | grep -oE 'train_loss_step=[0-9.]+|train_loss_epoch=[0-9.]+' | head -4
+echo "  ..."
+tr '\r' '\n' < "$RESULT_DIR/smoke_train.log" \
+    | grep -oE 'train_loss_step=[0-9.]+|train_loss_epoch=[0-9.]+' | tail -6
 
 CKPT="$(find "$RESULT_DIR/train" "$RESULT_DIR" -maxdepth 1 -type f -name 'model_*.pth' \
         -printf '%T@\t%p\n' 2>/dev/null | sort -n | tail -1 | cut -f2-)"
