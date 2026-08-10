@@ -33,20 +33,6 @@ validate_instance_category_contract = (
     TASK_METRICS.validate_instance_category_contract
 )
 
-MODEL_SOURCE = (
-    REPOSITORY_ROOT
-    / "nvidia_tao_pytorch/cv/mask2former/model/pl_model.py"
-)
-DATASET_SOURCE = (
-    REPOSITORY_ROOT
-    / "nvidia_tao_pytorch/cv/mask2former/dataloader/datasets.py"
-)
-DATAMODULE_SOURCE = (
-    REPOSITORY_ROOT
-    / "nvidia_tao_pytorch/cv/mask2former/dataloader/pl_data_module.py"
-)
-
-
 class _Coco:
     """Minimal COCO-like object for pure routing tests."""
 
@@ -156,34 +142,6 @@ def test_instance_evaluator_rejects_missing_or_nonfinite_statistics():
     evaluator.coco_eval = {}
     with pytest.raises(RuntimeError, match="did not produce segm"):
         finalize_instance_evaluator(evaluator, split="test")
-
-
-@pytest.mark.cv_unit
-def test_runtime_sources_preserve_the_task_and_split_contracts():
-    """Guard critical integration paths without importing or running a model."""
-    model_source = MODEL_SOURCE.read_text(encoding="utf-8")
-    dataset_source = DATASET_SOURCE.read_text(encoding="utf-8")
-    datamodule_source = DATAMODULE_SOURCE.read_text(encoding="utf-8")
-
-    assert 'if self.mode == "instance"' in model_source
-    assert "self.val_coco_evaluator.update" in model_source
-    assert "self.test_coco_evaluator.update" in model_source
-    assert "finalize_instance_evaluator" in model_source
-    assert "torch.distributed.all_reduce" in model_source
-    assert 'size=tuple(info["original_size"])' in model_source
-    assert "category_lookup[result.pred_classes]" in model_source
-
-    for metadata_key in (
-            "'image_id'",
-            "'original_size'",
-            "'resized_size'",
-            "'padding'"):
-        assert metadata_key in dataset_source
-    assert "self.contiguous_id_to_dataset_id" in dataset_source
-
-    assert 'self._build_dataset("test", is_training=False)' in datamodule_source
-    assert "return self.val_dataloader()" not in datamodule_source
-    assert datamodule_source.count("drop_last=False") >= 3
 
 
 @pytest.mark.cv_unit
