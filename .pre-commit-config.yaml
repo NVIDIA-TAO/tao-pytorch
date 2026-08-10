@@ -18,6 +18,14 @@ repos:
     - pre-commit
 - repo: local
   hooks:
+  - id: dependency-guard
+    name: dependency change guard
+    description: Dependency changes are routed to the TAO Infra team.
+    entry: python .github/hooks/check_dependency_change.py
+    language: python
+    files: '(?i)(^|/)(requirements[^/]*\.(txt|in)|constraints[^/]*\.txt|pyproject\.toml|setup\.py|setup\.cfg|Pipfile|Pipfile\.lock|poetry\.lock|uv\.lock|environment[^/]*\.ya?ml|conda[^/]*\.ya?ml|package\.json|package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb|go\.mod|go\.sum|Cargo\.toml|Cargo\.lock|Gemfile|Gemfile\.lock|pom\.xml|build\.gradle(\.kts)?|settings\.gradle(\.kts)?|gradle\.lockfile|composer\.json|composer\.lock|Package\.swift|Package\.resolved|Podfile|Podfile\.lock|Cartfile|conanfile\.(txt|py)|vcpkg\.json|packages\.config|paket\.dependencies|Chart\.ya?ml|Chart\.lock|Dockerfile|Dockerfile\.[^/]+|[^/]+\.Dockerfile|[^/]+\.csproj|\.gitmodules)$'
+    stages:
+    - pre-commit
   - id: license-header
     name: license header
     description: Every source file must carry an SPDX license header.
