@@ -34,3 +34,10 @@ For distributed validation and test, OneFormer sums semantic-confusion or PQ
 sufficient statistics across all workers before computing nonlinear metrics.
 All ranks log the same global values, and only global rank zero writes KPI
 status records.
+
+Panoptic PQ is computed from the resized/padded raster at the network input
+resolution. Ground-truth segments that disappear during that resize are
+excluded from the evaluated raster rather than counted as false negatives.
+This input-resolution contract is intentionally documented because the result
+is not directly comparable with an official `panopticapi` run on the original
+image resolution.

@@ -20,13 +20,8 @@ CONTAINER = {
         "nvcr.io/nvstaging/tao/tao-toolkit-pyt:"
         "7.1.0-rc-245-multiarch"
     ),
-    "sqsh_path": (
-        "/lustre/fsw/portfolios/edgeai/users/rarunachalam/"
-        "nvcr.io_nvstaging_tao_tao-toolkit-pyt_7.1.0-rc-245-multiarch.sqsh"
-    ),
     "sha256": "e36640f9ae7a03bc80828cf7de93bd6bdbbb0fecf509a71a243be0ab5b497fc2",
     "size_bytes": 28860358656,
-    "site_packages": "/usr/local/lib/python3.12/dist-packages",
 }
 PAYLOAD_PATHS = (
     "nvidia_tao_pytorch/config/oneformer/evaluate.py",
@@ -84,6 +79,10 @@ def build_overlay(repo_root, output):
 
     source_commit = _run(repo_root, "git", "rev-parse", "HEAD")
     base_commit = _run(repo_root, "git", "rev-parse", BASE_COMMIT)
+    # Verify the commit independently before treating a failed path lookup as
+    # a genuinely new file.  This keeps a missing commit from masquerading as
+    # an entirely-additive overlay.
+    _run(repo_root, "git", "cat-file", "-e", f"{BASE_COMMIT}^{{commit}}")
     files = []
     payload = {}
     for path in sorted(PAYLOAD_PATHS):
@@ -125,7 +124,7 @@ def build_overlay(repo_root, output):
             "status_writer": "global_rank_zero",
             "model_runs_during_build": 0,
             "slurm_jobs_submitted_during_build": 0,
-            "base_audit_root": CONTAINER["site_packages"],
+            "base_audit_root": "provided-at-install-time",
             "overlay_output_root": "ephemeral_pythonpath_site_packages",
         },
         "files": files,

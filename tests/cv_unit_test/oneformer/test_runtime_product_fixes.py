@@ -7,6 +7,7 @@ import ast
 import importlib.util
 from pathlib import Path
 import sys
+from unittest import mock
 
 import numpy as np
 import pytest
@@ -82,16 +83,11 @@ class _FakeTorch:
         return _FakeTensor(value)
 
 
-_real_torch = sys.modules.get("torch")
-sys.modules["torch"] = _FakeTorch
-metric_utils = _load_file_module(
-    "oneformer_metric_reduction_test_target",
-    "nvidia_tao_pytorch/cv/oneformer/utils/metric_reduction.py",
-)
-if _real_torch is None:
-    del sys.modules["torch"]
-else:
-    sys.modules["torch"] = _real_torch
+with mock.patch.dict(sys.modules, {"torch": _FakeTorch}, clear=False):
+    metric_utils = _load_file_module(
+        "oneformer_metric_reduction_test_target",
+        "nvidia_tao_pytorch/cv/oneformer/utils/metric_reduction.py",
+    )
 
 
 class _ShapeValue:

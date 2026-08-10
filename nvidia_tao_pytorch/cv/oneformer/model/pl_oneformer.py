@@ -742,9 +742,17 @@ class OneformerPlModule(TAOLightningModule):
             dataset_names: list of human-readable names (or None for single dataset).
             prefix: optional prefix for logged metric keys (e.g. "test_").
         """
-        if not outputs_by_dl:
-            raise RuntimeError("OneFormer evaluation produced no metric observations.")
-        multi = dataset_names is not None and len(outputs_by_dl) > 1
+        # Lightning can invoke this hook on a rank that received no samples.
+        # Still enter every configured dataloader's collective with zero local
+        # statistics so that ranks cannot diverge or deadlock.
+        if dataset_names is not None:
+            expected_indices = range(len(dataset_names))
+        else:
+            expected_indices = (0,)
+        outputs_by_dl = {
+            index: outputs_by_dl.get(index, []) for index in expected_indices
+        }
+        multi = len(outputs_by_dl) > 1
         self.status_logging_dict = {}
 
         if self.evaluation_task == "panoptic":
