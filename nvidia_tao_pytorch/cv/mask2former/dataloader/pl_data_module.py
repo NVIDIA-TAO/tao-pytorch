@@ -149,7 +149,25 @@ class SemSegmDataModule(pl.LightningDataModule):
         Returns:
             PyTorch DataLoader used for evaluation.
         """
-        dataset_test = self._build_dataset("test", is_training=False)
+        test_cfg = self.data_cfg.test
+        has_test_annotations = any(
+            bool(getattr(test_cfg, field, ""))
+            for field in ("annot_file", "instance_json", "panoptic_json")
+        )
+        if not has_test_annotations:
+            # Existing evaluation specs populate dataset.val and leave
+            # dataset.test image-only for prediction. Preserve those specs
+            # while keeping test_dataset available to the evaluator.
+            logger.warning(
+                "dataset.test has no annotation file; using dataset.val for "
+                "evaluation. Set dataset.test annotations to opt into a separate test split."
+            )
+            dataset_test = self._build_dataset("val", is_training=False)
+            self.test_dataset = dataset_test
+            split_cfg = self.data_cfg.val
+        else:
+            dataset_test = self._build_dataset("test", is_training=False)
+            split_cfg = test_cfg
         if is_dist_avail_and_initialized():
             test_sampler = torch.utils.data.distributed.DistributedSampler(
                 dataset_test)
@@ -157,10 +175,10 @@ class SemSegmDataModule(pl.LightningDataModule):
             test_sampler = torch.utils.data.SequentialSampler(dataset_test)
         return DataLoader(
             dataset_test,
-            batch_size=self.data_cfg.test.batch_size,
+            batch_size=split_cfg.batch_size,
             shuffle=False,
             collate_fn=dataset_test.collate_fn,
-            num_workers=self.data_cfg.test.num_workers,
+            num_workers=split_cfg.num_workers,
             drop_last=False,
             pin_memory=True,
             sampler=test_sampler)

@@ -150,6 +150,8 @@ class SemSegmDataModule(pl.LightningDataModule):
                 shuffle=False,
                 collate_fn=collate_fn,
                 num_workers=split_cfg.num_workers,
+                # Preserve every validation sample.  The metric reducer must
+                # handle DistributedSampler's padded tail consistently.
                 drop_last=False,
                 pin_memory=self.data_cfg.dataset.pin_memory,
                 sampler=sampler,

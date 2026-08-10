@@ -178,8 +178,11 @@ class OneFormerDatasetConfig:
             "instance": 0.66,
             "panoptic": 0.01
         },
-        description="Task probabilities",
-        display_name="task probabilities"
+        description=(
+            "Validation task probabilities used by the unified validation "
+            "dataset; retained for backward-compatible specs"
+        ),
+        display_name="validation task probabilities"
     )
     task_seq_len: int = INT_FIELD(
         value=77,

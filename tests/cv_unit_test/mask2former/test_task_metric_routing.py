@@ -87,8 +87,8 @@ class _FakeCocoEvaluator:
 def test_task_modes_and_metric_names_are_explicit():
     """Instance, semantic, and panoptic metrics cannot be confused."""
     assert normalize_task_mode(" INSTANCE ") == "instance"
-    assert instance_metric_names("val") == ("segm_val_mAP", "segm_val_mAP50")
-    assert instance_metric_names("test") == ("segm_test_mAP", "segm_test_mAP50")
+    assert instance_metric_names("val") == ("val_mAP", "val_mAP50")
+    assert instance_metric_names("test") == ("test_mAP", "test_mAP50")
     assert semantic_metric_names("semantic", "val") == ("mIoU", "all_acc")
 
     panoptic_names = semantic_metric_names("panoptic", "test")
@@ -144,8 +144,8 @@ def test_instance_evaluator_uses_segm_and_global_finalize_order():
         ("summarize", False),
     ]
     assert metrics == {
-        "segm_val_mAP": pytest.approx(0.42),
-        "segm_val_mAP50": pytest.approx(0.64),
+        "val_mAP": pytest.approx(0.42),
+        "val_mAP50": pytest.approx(0.64),
     }
 
 

@@ -40,7 +40,7 @@ def normalize_evaluation_split(split):
 def instance_metric_names(split):
     """Return the stable COCO mask-AP metric names for an evaluation split."""
     split = normalize_evaluation_split(split)
-    return f"segm_{split}_mAP", f"segm_{split}_mAP50"
+    return f"{split}_mAP", f"{split}_mAP50"
 
 
 def semantic_metric_names(mode, split):

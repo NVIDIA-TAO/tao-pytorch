@@ -691,7 +691,7 @@ class Mask2formerPlModule(TAOLightningModule):
             )
         if split == "val":
             self.log("current_epoch", self.current_epoch, sync_dist=True)
-        return {name: str(value) for name, value in metrics.items()}
+        return {name: float(value) for name, value in metrics.items()}
 
     def _logged_metric_value(self, name):
         """Return one finite logged scalar as a Python float when available."""
