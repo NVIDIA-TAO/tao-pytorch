@@ -155,14 +155,19 @@ class MeanIoUMeter:
 
     def _globally_reduce_sufficient_statistics(self, device=None):
         """Sum metric sufficient statistics across all distributed ranks."""
-        statistics = np.stack(
-            (
-                self.area_intersect,
-                self.area_union,
-                self.area_pred_label,
-                self.area_label,
+        if not self.initialized:
+            # Empty ranks still participate in the collective and contribute
+            # zeros, preventing asymmetric DDP failures on empty splits.
+            statistics = np.zeros((4, self.n_class), dtype=np.float64)
+        else:
+            statistics = np.stack(
+                (
+                    self.area_intersect,
+                    self.area_union,
+                    self.area_pred_label,
+                    self.area_label,
+                )
             )
-        )
         if not is_dist_avail_and_initialized():
             return tuple(statistics)
 

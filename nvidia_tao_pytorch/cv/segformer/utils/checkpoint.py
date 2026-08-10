@@ -62,18 +62,21 @@ def _candidate_model_keys(key):
     candidate = key
     add(candidate)
 
-    # DDP and torch.compile add these outer wrappers. Only leading wrappers
-    # are removed so similarly named components inside a backbone are intact.
-    while candidate.startswith(("module.", "_orig_mod.")):
-        prefix = "module." if candidate.startswith("module.") else "_orig_mod."
+    # DDP, torch.compile, and Lightning can be nested in any order. Only
+    # leading wrappers are removed so similarly named components inside a
+    # backbone remain intact.
+    while True:
+        prefix = next(
+            (
+                value
+                for value in ("module.", "_orig_mod.", "model.")
+                if candidate.startswith(value)
+            ),
+            None,
+        )
+        if prefix is None:
+            break
         candidate = candidate[len(prefix):]
-        add(candidate)
-
-    # A Lightning state_dict contains ``model.*`` keys, while this helper
-    # loads the wrapped torch model whose state_dict starts at ``backbone.*``
-    # and ``decoder.*``. Repeated wrappers cover nested Lightning modules.
-    while candidate.startswith("model."):
-        candidate = candidate[len("model."):]
         add(candidate)
 
     return tuple(variants)
@@ -116,38 +119,49 @@ def _candidate_backbone_keys(key):
 
 
 def _log_report(label, component, report, shape_mismatches):
-    """Log complete sorted missing/skipped information."""
+    """Log compact load information and put complete lists at DEBUG."""
+    sample_limit = 12
+
+    def sample(values):
+        values = list(values)
+        return values[:sample_limit] + (["..."] if len(values) > sample_limit else [])
+
     logging.info(
-        "Loaded %d compatible SegFormer %s pretrained tensors from %s: %s",
+        "Loaded %d compatible SegFormer %s pretrained tensors from %s (sample=%s)",
         len(report.loaded_keys),
         component,
         label,
-        list(report.loaded_keys),
+        sample(report.loaded_keys),
     )
+    logging.debug("Full loaded SegFormer keys: %s", list(report.loaded_keys))
     if report.missing_keys:
         logging.warning(
-            "SegFormer tensors kept at initialization (%d): %s",
+            "SegFormer tensors kept at initialization (%d, sample=%s)",
             len(report.missing_keys),
-            list(report.missing_keys),
+            sample(report.missing_keys),
         )
+        logging.debug("Full missing SegFormer keys: %s", list(report.missing_keys))
     if shape_mismatches:
         logging.warning(
-            "Skipped SegFormer pretrained tensors with incompatible shapes (%d): %s",
+            "Skipped SegFormer pretrained tensors with incompatible shapes (%d, sample=%s)",
             len(shape_mismatches),
-            list(shape_mismatches),
+            sample(shape_mismatches),
         )
+        logging.debug("Full SegFormer shape mismatches: %s", list(shape_mismatches))
     if report.unmatched_keys:
         logging.warning(
-            "Skipped SegFormer pretrained tensors without model matches (%d): %s",
+            "Skipped SegFormer pretrained tensors without model matches (%d, sample=%s)",
             len(report.unmatched_keys),
-            list(report.unmatched_keys),
+            sample(report.unmatched_keys),
         )
+        logging.debug("Full unmatched SegFormer keys: %s", list(report.unmatched_keys))
     if report.non_tensor_keys:
         logging.warning(
-            "Skipped SegFormer pretrained non-tensor values (%d): %s",
+            "Skipped SegFormer pretrained non-tensor values (%d, sample=%s)",
             len(report.non_tensor_keys),
-            list(report.non_tensor_keys),
+            sample(report.non_tensor_keys),
         )
+        logging.debug("Full non-tensor SegFormer keys: %s", list(report.non_tensor_keys))
 
 
 def _log_structured_report(label, component, report):

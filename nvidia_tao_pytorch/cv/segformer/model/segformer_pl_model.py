@@ -337,9 +337,9 @@ class SegFormerPlModel(TAOLightningModule):
         scores, mean_score_dict = self.running_metric.get_scores(device=self.device)
         self.epoch_acc = scores['mf1']
         # message = 'Scores per class'
-        self.log_dict(scores, on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
+        self.log_dict(scores, on_step=False, on_epoch=True, prog_bar=False, sync_dist=False)
         # message = 'Mean scores for all classes: '
-        self.log_dict(mean_score_dict, on_step=False, on_epoch=True, sync_dist=True)
+        self.log_dict(mean_score_dict, on_step=False, on_epoch=True, sync_dist=False)
         return scores, mean_score_dict
 
     def _prepare_batch(self, batch):
@@ -375,7 +375,7 @@ class SegFormerPlModel(TAOLightningModule):
         return loss
 
     def _write_status_kpis(self, kpis, message):
-        """Write status KPIs exactly once from the global rank-zero process."""
+        """Write status KPIs from the global rank-zero process only."""
         if get_global_rank() != 0:
             return
         self.status_logging_dict = kpis
@@ -416,8 +416,8 @@ class SegFormerPlModel(TAOLightningModule):
         # FLUSHING VALIDATION EPOCH METRICS
         if not self.trainer.sanity_checking:
             scores, mean_scores = self._collect_epoch_states()  # logs all evaluation metrics
-            self.log("val_acc", scores['acc'], on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
-            self.log("val_miou", scores['miou'], on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+            self.log("val_acc", scores['acc'], on_step=False, on_epoch=True, prog_bar=True, sync_dist=False)
+            self.log("val_miou", scores['miou'], on_step=False, on_epoch=True, prog_bar=True, sync_dist=False)
         self._clear_cache()
 
         average_val_loss = self.trainer.logged_metrics["val_loss"].item()
