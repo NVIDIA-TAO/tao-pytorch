@@ -4,8 +4,12 @@
 """Regression tests for the BEVFusion CPU rotated-IoU fallback."""
 
 import numpy as np
+import pytest
 
 from nvidia_tao_pytorch.cv.bevfusion.evaluation.functional import rotate_iou
+
+
+pytestmark = [pytest.mark.cv_unit, pytest.mark.bevfusion]
 
 
 def test_default_backend_uses_cpu_without_initializing_cuda(monkeypatch):

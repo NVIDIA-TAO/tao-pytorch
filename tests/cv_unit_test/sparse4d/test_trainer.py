@@ -102,6 +102,8 @@ def test_trainer_fit(_train_spec):
     trainer.fit(pt_model, dm)
 
 
+@pytest.mark.cv_unit
+@pytest.mark.sparse4d
 def test_run_experiment_uses_step_budget_as_only_stop_condition(monkeypatch):
     """A resumed Sparse4D run must consume its increased step budget."""
     cfg = OmegaConf.structured(ExperimentConfig())
