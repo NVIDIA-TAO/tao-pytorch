@@ -11,6 +11,8 @@ remaining independent of checkpoints and accelerator availability.
 import ast
 from pathlib import Path
 
+import pytest
+
 
 MODEL_PATH = (
     Path(__file__).parents[3]
@@ -20,6 +22,8 @@ MODEL_PATH = (
     / "model"
     / "pl_gdino_model.py"
 )
+
+pytestmark = pytest.mark.cv_unit
 
 
 def _function(tree: ast.Module, name: str) -> ast.FunctionDef:
@@ -73,8 +77,7 @@ def test_object_detection_uses_distributed_coco_evaluator():
 def test_object_detection_emits_task_correct_bbox_and_mask_metrics():
     source = MODEL_PATH.read_text(encoding="utf-8")
 
-    for stage in ("val", "test"):
-        assert f'"[{chr(123)}iou_type{chr(125)}] {stage}_{chr(123)}key{chr(125)}"' in source
-    assert '"mAP@50-95"' in source
-    assert '"mAP@50"' in source
-
+    assert 'metric_name = f"{prefix}val_{key}"' in source
+    assert 'metric_name = f"{prefix}test_{key}"' in source
+    assert '"mAP"' in source
+    assert '"mAP50"' in source

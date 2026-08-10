@@ -369,24 +369,35 @@ class MaskGDINOPlModel(TAOLightningModule):
         self.status_logging_dict = {}
         if self.experiment_spec.dataset.val_data_sources.data_type == "OD":
             self.val_evaluator.synchronize_between_processes()
-            self.val_evaluator.overall_accumulate()
-            self.val_evaluator.overall_summarize(is_print=False)
-            if self.trainer.is_global_zero:
+            if self.val_evaluator.img_ids:
+                self.val_evaluator.overall_accumulate()
+                self.val_evaluator.overall_summarize(is_print=False)
+            if self.trainer.is_global_zero and self.val_evaluator.img_ids:
                 for iou_type in self.iou_types:
                     stats = self.val_evaluator.coco_eval[iou_type].stats
                     metrics = {
-                        "mAP@50-95": float(stats[0]),
-                        "mAP@50": float(stats[1]),
+                        "mAP": float(stats[0]),
+                        "mAP50": float(stats[1]),
+                        "mAP75": float(stats[2]),
+                        "mAP_small": float(stats[3]),
+                        "mAP_medium": float(stats[4]),
+                        "mAP_large": float(stats[5]),
+                        "AR1": float(stats[6]),
+                        "AR10": float(stats[7]),
+                        "AR100": float(stats[8]),
+                        "AR_small": float(stats[9]),
+                        "AR_medium": float(stats[10]),
+                        "AR_large": float(stats[11]),
                     }
                     for key, value in metrics.items():
+                        prefix = "" if iou_type == "bbox" else f"{iou_type}_"
+                        metric_name = f"{prefix}val_{key}"
                         self.log(
-                            f"[{iou_type}] val_{key}",
+                            metric_name,
                             value,
                             rank_zero_only=True,
                         )
-                        self.status_logging_dict[
-                            f"[{iou_type}] val_{key}"
-                        ] = str(value)
+                        self.status_logging_dict[metric_name] = str(value)
         else:
             eval_results = self.val_evaluator.evaluate()
             if self.trainer.is_global_zero:
@@ -472,15 +483,17 @@ class MaskGDINOPlModel(TAOLightningModule):
             text_threshold=self.experiment_spec.evaluate.text_threshold,
             ioi_threshold=self.experiment_spec.evaluate.ioi_threshold
         )
-        filtered_res = threshold_predictions(
-            results,
-            self.experiment_spec.evaluate.conf_threshold,
-            self.experiment_spec.evaluate.nms_threshold
-        )
         if self.experiment_spec.dataset.test_data_sources.data_type == "OD":
-            res = {target['image_id'].item(): output for target, output in zip(targets, filtered_res)}
+            # COCO AP must receive the complete ranked detections; applying a
+            # confidence/NMS threshold first changes the metric definition.
+            res = {target['image_id'].item(): output for target, output in zip(targets, results)}
             self.test_evaluator.update(res)
         else:
+            filtered_res = threshold_predictions(
+                results,
+                self.experiment_spec.evaluate.conf_threshold,
+                self.experiment_spec.evaluate.nms_threshold
+            )
             self.test_evaluator.update(filtered_res, targets, no_targets)
 
     def on_test_epoch_end(self):
@@ -491,24 +504,35 @@ class MaskGDINOPlModel(TAOLightningModule):
         self.status_logging_dict = {}
         if self.experiment_spec.dataset.test_data_sources.data_type == "OD":
             self.test_evaluator.synchronize_between_processes()
-            self.test_evaluator.overall_accumulate()
-            self.test_evaluator.overall_summarize(is_print=True)
-            if self.trainer.is_global_zero:
+            if self.test_evaluator.img_ids:
+                self.test_evaluator.overall_accumulate()
+                self.test_evaluator.overall_summarize(is_print=False)
+            if self.trainer.is_global_zero and self.test_evaluator.img_ids:
                 for iou_type in self.iou_types:
                     stats = self.test_evaluator.coco_eval[iou_type].stats
                     metrics = {
-                        "mAP@50-95": float(stats[0]),
-                        "mAP@50": float(stats[1]),
+                        "mAP": float(stats[0]),
+                        "mAP50": float(stats[1]),
+                        "mAP75": float(stats[2]),
+                        "mAP_small": float(stats[3]),
+                        "mAP_medium": float(stats[4]),
+                        "mAP_large": float(stats[5]),
+                        "AR1": float(stats[6]),
+                        "AR10": float(stats[7]),
+                        "AR100": float(stats[8]),
+                        "AR_small": float(stats[9]),
+                        "AR_medium": float(stats[10]),
+                        "AR_large": float(stats[11]),
                     }
                     for key, value in metrics.items():
+                        prefix = "" if iou_type == "bbox" else f"{iou_type}_"
+                        metric_name = f"{prefix}test_{key}"
                         self.log(
-                            f"[{iou_type}] test_{key}",
+                            metric_name,
                             value,
                             rank_zero_only=True,
                         )
-                        self.status_logging_dict[
-                            f"[{iou_type}] test_{key}"
-                        ] = str(value)
+                        self.status_logging_dict[metric_name] = str(value)
         else:
             eval_results = self.test_evaluator.evaluate()
             if self.trainer.is_global_zero:
