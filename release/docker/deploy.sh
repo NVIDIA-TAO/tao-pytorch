@@ -97,9 +97,18 @@ if [ $BUILD_DOCKER = "1" ]; then
         echo "Building source code wheel ..."
         if [ "$USE_CUDA_CACHE" = "1" ] && "$NV_TAO_PYTORCH_TOP/scripts/cuda_cache.sh" check; then
             echo "Restoring cached CUDA build artifacts ..."
-            "$NV_TAO_PYTORCH_TOP/scripts/cuda_cache.sh" restore
-            tao_pt --no-tty -- python setup.py build_py
-            tao_pt --no-tty -- python setup.py bdist_wheel --skip-build
+            cache_build_succeeded="0"
+            if "$NV_TAO_PYTORCH_TOP/scripts/cuda_cache.sh" restore \
+                && tao_pt --no-tty -- python setup.py build_py \
+                && tao_pt --no-tty -- python setup.py bdist_wheel --skip-build \
+                && ls ${wheel_dir}/*.whl >/dev/null 2>&1; then
+                cache_build_succeeded="1"
+            fi
+            if [ "$cache_build_succeeded" = "0" ]; then
+                echo "WARNING: cached CUDA build did not produce a wheel; rebuilding from source ..."
+                tao_pt --no-tty -- python setup.py bdist_wheel
+                "$NV_TAO_PYTORCH_TOP/scripts/cuda_cache.sh" save
+            fi
         else
             tao_pt --no-tty -- python setup.py bdist_wheel
             if [ "$USE_CUDA_CACHE" = "1" ]; then

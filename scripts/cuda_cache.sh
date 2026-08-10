@@ -9,13 +9,31 @@ PROJECT_ROOT="${NV_TAO_PYTORCH_TOP:-$(pwd)}"
 BUILD_DIR="${PROJECT_ROOT}/build"
 HASH_FILE="${CACHE_DIR}/source.hash"
 
+ensure_tree_writable() {
+    local path="$1"
+    [ ! -e "$path" ] && return 0
+    local blocked
+    blocked=$(find "$path" ! -writable -print -quit 2>/dev/null || true)
+    if [ -n "$blocked" ]; then
+        echo "ERROR: cache path is not writable: $blocked" >&2
+        echo "Run cache operations inside the container that owns build artifacts, or remove the root-owned path." >&2
+        return 1
+    fi
+}
+
 generate_hash() {
     {
         find "$PROJECT_ROOT/nvidia_tao_pytorch" \
-            \( -name "*.cu" -o -name "*.cpp" \) -print0 2>/dev/null \
+            \( -name "*.cu" -o -name "*.cpp" -o -name "*.cc" \
+               -o -name "*.h" -o -name "*.cuh" \) -print0 2>/dev/null \
             | sort -z | xargs -0 -r md5sum 2>/dev/null || true
         [ -f "$PROJECT_ROOT/setup.py" ] \
             && md5sum "$PROJECT_ROOT/setup.py" 2>/dev/null || true
+        [ -f "$PROJECT_ROOT/docker/manifest.json" ] \
+            && sha256sum "$PROJECT_ROOT/docker/manifest.json" 2>/dev/null || true
+        [ -f "$PROJECT_ROOT/docker/Dockerfile" ] \
+            && grep -E '^ENV TORCH_CUDA_ARCH_LIST=' "$PROJECT_ROOT/docker/Dockerfile" || true
+        printf 'TORCH_CUDA_ARCH_LIST=%s\n' "${TORCH_CUDA_ARCH_LIST-}"
     } | md5sum | cut -d' ' -f1
 }
 
@@ -31,7 +49,7 @@ case "${1:-}" in
             echo "No valid cache found"
             exit 1
         fi
-        [ ! -d "$BUILD_DIR" ] || chmod -R u+w "$BUILD_DIR" 2>/dev/null || true
+        ensure_tree_writable "$BUILD_DIR"
         rm -rf "$BUILD_DIR"
         cp -r "$CACHE_DIR/build" "$BUILD_DIR"
         find "$BUILD_DIR" \( -name "*.so" -o -name "*.o" -o \
@@ -45,9 +63,9 @@ case "${1:-}" in
             exit 1
         fi
         mkdir -p "$CACHE_DIR"
+        ensure_tree_writable "$CACHE_DIR/build"
         rm -rf "$CACHE_DIR/build"
         cp -r "$BUILD_DIR" "$CACHE_DIR/"
-        chmod -R u+w "$CACHE_DIR/build" 2>/dev/null || true
         generate_hash > "$HASH_FILE"
         echo "Cache saved successfully"
         ;;
@@ -60,7 +78,7 @@ case "${1:-}" in
         exit 1
         ;;
     clean)
-        [ ! -d "$CACHE_DIR" ] || chmod -R u+w "$CACHE_DIR" 2>/dev/null || true
+        ensure_tree_writable "$CACHE_DIR"
         rm -rf "$CACHE_DIR"
         echo "Cache cleaned"
         ;;
