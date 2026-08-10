@@ -54,6 +54,11 @@ for p in "$REPO_DIR" "$TAO_CORE_DIR" "$SPEC_DIR/$SPEC_NAME" "$DATA_DIR" "$PRETRA
     [ -e "$p" ] || { echo "Missing required path: $p" >&2; exit 2; }
 done
 
+# TAO_VISIBLE_DEVICES is not optional: the TAO runner reads it unguarded and every rank dies
+# with KeyError: 'TAO_VISIBLE_DEVICES' without it. The foxconn sbatch exports it before srun;
+# this standalone smoke has to do the same.
+export TAO_VISIBLE_DEVICES
+TAO_VISIBLE_DEVICES="$(seq -s, 0 "$((GPUS - 1))")"
 export TAO_SSL_CHECKPOINT_KEEP_LAST_N=5
 export MKL_NUM_THREADS=1
 export OMP_NUM_THREADS=1
