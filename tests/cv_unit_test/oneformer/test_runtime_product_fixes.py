@@ -149,6 +149,14 @@ def test_distributed_reduction_precedes_nonlinear_semantic_summary():
     assert summary["all_acc"] == 0.375
 
 
+def test_empty_global_semantic_summary_fails_closed():
+    """An empty evaluation split must not emit a plausible zero KPI."""
+    with pytest.raises(ValueError, match="no evaluated pixels"):
+        metric_utils.summarize_semantic_iou(
+            np.zeros(2), np.zeros(2), np.zeros(2)
+        )
+
+
 def test_perfect_panoptic_prediction_has_unit_pq():
     """Exact thing/stuff matches produce unit PQ, SQ, and RQ."""
     id_map = np.asarray([[1, 1, 2], [1, 2, 2]], dtype=np.int64)
@@ -184,6 +192,12 @@ def test_wrong_category_is_false_positive_and_false_negative():
     assert stats[0, pq_utils.FALSE_NEGATIVE] == 1
     assert stats[1, pq_utils.FALSE_POSITIVE] == 1
     assert pq_utils.summarize_panoptic_quality(stats, [True, True])["PQ"] == 0.0
+
+
+def test_empty_global_panoptic_summary_fails_closed():
+    """An empty panoptic split must not emit zero-valued PQ metrics."""
+    with pytest.raises(ValueError, match="no evaluated categories"):
+        pq_utils.summarize_panoptic_quality(np.zeros((2, 4)), [True, False])
 
 
 def test_void_and_same_category_crowd_overlap_are_ignored():

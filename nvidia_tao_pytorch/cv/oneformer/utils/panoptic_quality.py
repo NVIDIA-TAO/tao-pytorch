@@ -238,6 +238,8 @@ def summarize_panoptic_quality(stats, is_thing, class_names=None):
         raise ValueError("class_names must contain exactly one name per class.")
 
     all_result = _mean_quality(stats, np.ones(stats.shape[0], dtype=bool))
+    if all_result["n"] == 0:
+        raise ValueError("PQ statistics contain no evaluated categories.")
     thing_result = _mean_quality(stats, is_thing)
     stuff_result = _mean_quality(stats, ~is_thing)
     summary = {

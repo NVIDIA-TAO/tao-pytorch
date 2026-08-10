@@ -56,6 +56,50 @@ def _base_blob(repo_root, path):
     return result.stdout if result.returncode == 0 else None
 
 
+def _ensure_base_commit(repo_root):
+    """Fetch the pinned provenance commit when a checkout is shallow."""
+    object_name = f"{BASE_COMMIT}^{{commit}}"
+    present = subprocess.run(
+        ("git", "cat-file", "-e", object_name),
+        cwd=repo_root,
+        check=False,
+        capture_output=True,
+    )
+    if present.returncode == 0:
+        return
+
+    ref_name = BASE_REF.split("/", 1)[-1]
+    fetch = subprocess.run(
+        ("git", "fetch", "--no-tags", "origin", ref_name),
+        cwd=repo_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if fetch.returncode != 0:
+        fetch = subprocess.run(
+            ("git", "fetch", "--no-tags", "origin", BASE_COMMIT),
+            cwd=repo_root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+    present = subprocess.run(
+        ("git", "cat-file", "-e", object_name),
+        cwd=repo_root,
+        check=False,
+        capture_output=True,
+    )
+    if present.returncode != 0:
+        detail = (fetch.stderr or fetch.stdout).strip()
+        raise RuntimeError(
+            "Pinned OneFormer overlay base commit "
+            f"{BASE_COMMIT} is unavailable. Fetch it from origin before building."
+            + (f" Git reported: {detail}" if detail else "")
+        )
+
+
 def _tar_info(name, data, mode=0o644):
     info = tarfile.TarInfo(name)
     info.size = len(data)
@@ -76,12 +120,9 @@ def build_overlay(repo_root, output):
             "runtime changes first."
         )
 
+    _ensure_base_commit(repo_root)
     source_commit = _run(repo_root, "git", "rev-parse", "HEAD")
     base_commit = _run(repo_root, "git", "rev-parse", BASE_COMMIT)
-    # Verify the commit independently before treating a failed path lookup as
-    # a genuinely new file.  This keeps a missing commit from masquerading as
-    # an entirely-additive overlay.
-    _run(repo_root, "git", "cat-file", "-e", f"{BASE_COMMIT}^{{commit}}")
     files = []
     payload = {}
     for path in sorted(PAYLOAD_PATHS):

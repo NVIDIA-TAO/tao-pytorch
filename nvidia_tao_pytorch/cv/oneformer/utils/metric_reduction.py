@@ -39,6 +39,11 @@ def summarize_semantic_iou(area_intersect, area_union, area_label):
             raise ValueError(f"{name} must contain finite non-negative values.")
 
     valid_union = area_union > 0
+    label_total = float(area_label.sum())
+    if not valid_union.any() and label_total <= 0:
+        raise ValueError(
+            "Semantic metric statistics contain no evaluated pixels."
+        )
     iou = np.divide(
         area_intersect,
         area_union,
@@ -46,6 +51,5 @@ def summarize_semantic_iou(area_intersect, area_union, area_label):
         where=valid_union,
     )
     miou = float(np.nanmean(iou)) if valid_union.any() else 0.0
-    label_total = float(area_label.sum())
     accuracy = float(area_intersect.sum() / label_total) if label_total > 0 else 0.0
     return {"iou": iou, "mIoU": miou, "all_acc": accuracy}

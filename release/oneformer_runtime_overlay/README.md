@@ -28,6 +28,11 @@ sha256sum -c \
   <overlay-output>/oneformer-runtime-overlay.tar.sha256
 ```
 
+The builder verifies the pinned base commit and fetches it from the checkout's
+`origin` when the repository is shallow. The checkout must therefore have
+network access to the TAO PyTorch remote, or the commit must be fetched before
+running the command.
+
 The tar archive is deterministic: file order, ownership, modes, and mtimes are
 fixed. Rebuilding twice from the same clean commit must produce the same
 SHA-256.
