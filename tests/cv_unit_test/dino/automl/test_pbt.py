@@ -39,7 +39,8 @@ def test_dino_automl_pbt_resumes_population_and_exploits_best_checkpoint(dino_ca
 
     first_generation = runner.next_recommendations()
     assert len(first_generation) == 2
-    [dino_case.train(rec, target_epoch=1) for rec in first_generation]
+    for rec in first_generation:
+        dino_case.train(rec, target_epoch=1)
     best_first_generation = min(first_generation, key=lambda rec: rec.result)
 
     next_generation = runner.next_recommendations()

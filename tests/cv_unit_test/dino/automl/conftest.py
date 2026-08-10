@@ -18,10 +18,47 @@
 """Shared fixtures for DINO AutoML integration tests."""
 
 import os
+import sys
+from pathlib import Path
 
 import pytest
 
 from .dataset import create_tiny_coco_dataset
+
+
+REPO_ROOT = Path(__file__).resolve().parents[4]
+
+
+def _add_tao_automl_source_path():
+    """Append an explicit or sibling tao-automl checkout for test imports."""
+    candidates = []
+    env_src = os.getenv("TAO_AUTOML_SRC")
+    if env_src:
+        candidates.append(Path(env_src).expanduser())
+    candidates.append(REPO_ROOT.parent / "tao-automl" / "src")
+    for candidate in candidates:
+        if (candidate / "tao_automl").exists():
+            sys.path.append(str(candidate))
+            return candidate
+    return None
+
+
+_add_tao_automl_source_path()
+
+
+@pytest.fixture(scope="package", autouse=True)
+def _patch_deformable_attention_loader():
+    """Patch release-image ops only for this package and restore on teardown."""
+    from . import harness
+
+    original_functions_loader = harness.deformable_ops_functions.load_ops
+    original_modules_loader = harness.deformable_ops_modules.load_ops
+    harness._patch_deformable_attention_loader_for_release_image()
+    try:
+        yield
+    finally:
+        harness.deformable_ops_functions.load_ops = original_functions_loader
+        harness.deformable_ops_modules.load_ops = original_modules_loader
 
 
 @pytest.fixture(autouse=True)

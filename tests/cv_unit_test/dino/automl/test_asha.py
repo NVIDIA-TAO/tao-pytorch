@@ -42,7 +42,8 @@ def test_dino_automl_asha_promotes_best_async_rung_from_checkpoint(dino_case):
     first_rung = runner.next_recommendations()
     assert len(first_rung) == 2
     assert [rec.early_stop_epoch for rec in first_rung] == [1, 1]
-    [dino_case.train(rec, target_epoch=rec.early_stop_epoch) for rec in first_rung]
+    for rec in first_rung:
+        dino_case.train(rec, target_epoch=rec.early_stop_epoch)
 
     best_first_rung = min(first_rung, key=lambda rec: rec.result)
     promotion = runner.next_recommendations()
