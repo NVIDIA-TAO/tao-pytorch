@@ -484,6 +484,9 @@ class StyleganPlModel(TAOLightningModule):
         self.log('fid_score', fid_score, prog_bar=True)
         # Custom logging with x-axis equal to self.cur_nimg
         self.logger.experiment.add_scalar("fid_score by samples", fid_score, self.cur_nimg // 1000)
+        # Keep status.json limited to numeric optimizable KPIs.  Progress
+        # counters such as seen_images and epoch are internal training state,
+        # not metrics consumed by the AutoML/TAO API monitor.
         # Log to status.json
         self.status_logging_dict = {}
         self.status_logging_dict["fid50k_full"] = float(fid_score)
