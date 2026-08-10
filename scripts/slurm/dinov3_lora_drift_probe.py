@@ -73,6 +73,9 @@ def parse_args():
                         help="Probe subset size. Deterministic: the first N by sorted name.")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--arm", default=os.environ.get("ARM", "unknown"))
+    parser.add_argument("--pretrained", default=None,
+                        help=("Pretrained snapshot that defines the anchor. Defaults to the "
+                              "spec's train.pretrained_model_path."))
     parser.add_argument("--fp32", action="store_true", default=True,
                         help=("Run the probe in fp32 (default). Drift is measured at 1e-7 "
                               "scale at identity, which fp16 cannot resolve."))
@@ -172,6 +175,17 @@ def main():
     # snapshot and syncs gram_teacher from them -- that sync is what makes gram_teacher the
     # *pretrained* anchor. Injecting adapters after the load matches the training lifecycle
     # (design doc "Injection point and lifecycle") and leaves base keys untouched.
+    #
+    # pretrained_weights is an attribute train.py assigns before calling restore; it is not
+    # set in __init__, so the probe has to assign it the same way or restore raises
+    # AttributeError.
+    pretrained = args.pretrained or config.train.pretrained_model_path
+    if not pretrained:
+        raise ValueError(
+            "No pretrained snapshot: pass --pretrained or set train.pretrained_model_path. "
+            "The anchor IS the pretrained backbone, so drift cannot be measured without it."
+        )
+    model.pretrained_weights = pretrained
     model.restore_pretrained_weights()
     if config.model.lora.enable:
         model.inject_lora_adapters()
@@ -226,6 +240,7 @@ def main():
         "arm": args.arm,
         "checkpoint": os.path.abspath(args.checkpoint),
         "spec": os.path.abspath(args.spec),
+        "pretrained": pretrained,
         "source": args.source,
         "protocol": {
             "mode": "eval",
