@@ -95,10 +95,25 @@ train:
   num_epochs: 3
 
   # Step-unit checkpointing, NOT epoch-unit. An epoch here is ~4,669 steps and the cluster caps
-  # GPU jobs at 4h, so epoch-unit checkpointing risks a requeue landing mid-epoch and throwing
-  # away everything since the last epoch boundary. At 1,000 steps we lose at most ~1k steps to a
-  # requeue, and TAO_SSL_CHECKPOINT_KEEP_LAST_N=3 (exported by the launcher) bounds the disk.
-  checkpoint_interval: 1000
+  # GPU jobs at 4h, so epoch-unit checkpointing cannot produce a checkpoint at all -- the epoch
+  # boundary is never reached inside one allocation.
+  #
+  # The interval is set by the recomputation cost of a requeue, measured on the first Stage-4
+  # boundary. A 3.65h window covers ~1,900 steps, and the kill lands uniformly within the
+  # checkpoint interval, so expected loss is interval/2 per boundary:
+  #
+  #   interval 1000 -> ~500 steps lost = 26.3% recompute + 0.4% write = 26.7% overhead
+  #   interval  500 -> ~250 steps lost = 13.2% recompute + 0.8% write = 14.0% overhead
+  #   interval  250 -> ~125 steps lost =  6.6% recompute + 1.7% write =  8.3% overhead
+  #
+  # Observed at 1000: arms C/D/E each recomputed ~870 steps (47% of the window) because the
+  # kill landed just before their next checkpoint. 250 trades ~1.7% write time for ~18% less
+  # recomputation and is the better default.
+  #
+  # Disk: 14,004/250 = 56 checkpoints x 1.29 GB = ~72 GB per arm. Fine against a 250 TB quota,
+  # but note TAO_SSL_CHECKPOINT_KEEP_LAST_N has no reader anywhere in the codebase (it is a
+  # no-op), so nothing prunes these -- tightening the interval further scales disk linearly.
+  checkpoint_interval: 250
   checkpoint_interval_unit: step
 
   layerwise_decay: 1.0
