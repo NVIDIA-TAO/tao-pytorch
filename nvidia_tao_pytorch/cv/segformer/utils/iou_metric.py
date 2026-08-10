@@ -113,17 +113,47 @@ class MeanIoUMeter:
             total_area_label (np.ndarray): The ground truth histogram on
                 all classes.
         """
-        all_acc = total_area_intersect.sum() / total_area_label.sum()
-        iou = total_area_intersect / total_area_union
-        precision = total_area_intersect / total_area_pred_label
-        recall = total_area_intersect / total_area_label
-        f1 = 2 * recall * precision / (recall + precision)
+        total_area_intersect = np.asarray(total_area_intersect, dtype=np.float64)
+        total_area_union = np.asarray(total_area_union, dtype=np.float64)
+        total_area_pred_label = np.asarray(total_area_pred_label, dtype=np.float64)
+        total_area_label = np.asarray(total_area_label, dtype=np.float64)
+        if total_area_label.sum() == 0 and total_area_pred_label.sum() == 0:
+            raise ValueError("SegFormer metric statistics contain no evaluated pixels.")
 
-        all_acc = all_acc.astype(float)
-        iou = iou.astype(float)
-        precision = precision.astype(float)
-        recall = recall.astype(float)
-        f1 = f1.astype(float)
+        all_acc = float(
+            total_area_intersect.sum() / total_area_label.sum()
+            if total_area_label.sum() > 0
+            else 0.0
+        )
+        iou = np.divide(
+            total_area_intersect,
+            total_area_union,
+            out=np.full_like(total_area_union, np.nan),
+            where=total_area_union > 0,
+        )
+        precision = np.divide(
+            total_area_intersect,
+            total_area_pred_label,
+            out=np.full_like(total_area_pred_label, np.nan),
+            where=total_area_pred_label > 0,
+        )
+        recall = np.divide(
+            total_area_intersect,
+            total_area_label,
+            out=np.full_like(total_area_label, np.nan),
+            where=total_area_label > 0,
+        )
+        f1 = np.divide(
+            2 * recall * precision,
+            recall + precision,
+            out=np.full_like(recall, np.nan),
+            where=(recall + precision) > 0,
+        )
+
+        def _finite_mean(values):
+            """Return a stable mean when some classes are absent."""
+            finite = values[np.isfinite(values)]
+            return float(finite.mean()) if finite.size else 0.0
 
         cls_iou = {}
         cls_precision = {}
@@ -135,13 +165,16 @@ class MeanIoUMeter:
             cls_recall["recall_" + str(i)] = np.nan_to_num(recall[i])
             cls_f1["f1_" + str(i)] = np.nan_to_num(f1[i])
 
-        score_dict = {"acc": all_acc, "miou": np.nanmean(iou), "mf1": np.nanmean(f1)}
+        score_dict = {"acc": all_acc, "miou": _finite_mean(iou), "mf1": _finite_mean(f1)}
         score_dict.update(cls_iou)
         score_dict.update(cls_f1)
         score_dict.update(cls_precision)
         score_dict.update(cls_recall)
 
-        mean_score_dict = {"mprecision": np.nanmean(precision), "mrecall": np.nanmean(recall)}
+        mean_score_dict = {
+            "mprecision": _finite_mean(precision),
+            "mrecall": _finite_mean(recall),
+        }
         return score_dict, mean_score_dict
 
     def update_cm(self, pr: torch.Tensor, gt: torch.Tensor):

@@ -96,6 +96,20 @@ def test_scores_do_not_reduce_without_distributed_initialization(monkeypatch):
 
 @pytest.mark.cv_unit
 @pytest.mark.segformer
+def test_empty_global_split_fails_closed():
+    """An empty split must not publish NaN aggregate metrics."""
+    with pytest.raises(ValueError, match="no evaluated pixels"):
+        MeanIoUMeter.total_area_to_metrics(
+            np.zeros(2),
+            np.zeros(2),
+            np.zeros(2),
+            np.zeros(2),
+            n_class=2,
+        )
+
+
+@pytest.mark.cv_unit
+@pytest.mark.segformer
 def test_status_kpis_are_written_only_by_global_rank_zero(monkeypatch):
     """Nonzero ranks cannot race the global writer for status.json."""
     status_logger = mock.Mock()
