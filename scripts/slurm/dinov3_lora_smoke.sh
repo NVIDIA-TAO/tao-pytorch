@@ -126,6 +126,7 @@ srun --partition="$PARTITION" --account=edgeai_tao-ptm_image-foundation-model-cl
         set -euo pipefail
         export PYTHONUNBUFFERED=1
         export HOME='$HOST_HOME'
+        export TAO_VISIBLE_DEVICES=0
         export PYTHONPATH='$REPO_DIR:$TAO_CORE_DIR:'\"\${PYTHONPATH:-}\"
         cd '$REPO_DIR'
         /usr/bin/python scripts/slurm/dinov3_lora_smoke_audit.py \\
@@ -146,6 +147,7 @@ srun --partition="$PARTITION" --account=edgeai_tao-ptm_image-foundation-model-cl
         set -euo pipefail
         export PYTHONUNBUFFERED=1
         export HOME='$HOST_HOME'
+        export TAO_VISIBLE_DEVICES=0
         export PYTHONPATH='$REPO_DIR:$TAO_CORE_DIR:'\"\${PYTHONPATH:-}\"
         cd '$REPO_DIR'
         /usr/bin/python scripts/slurm/dinov3_lora_drift_probe.py \\
