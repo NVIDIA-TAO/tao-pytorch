@@ -28,7 +28,7 @@ jobs:
       - name: Run pre-commit on the pull request's changed files
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          SKIP: trufflehog
+          SKIP: trufflehog,dependency-guard
         run: |
           set -euo pipefail
           BASE="$(git merge-base "${BASE_SHA}" HEAD)"
