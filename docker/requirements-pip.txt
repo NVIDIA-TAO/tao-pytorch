@@ -3,6 +3,12 @@ anyconfig==0.15.1
 astroid==3.3.11  # held at 3.3.x to match pylint 3.3.x; pylint 4.x requires isort>=5 which conflicts with nvidia-eff's isort<5
 beartype==0.22.9
 braceexpand
+# video decoder: fast in-process frame sampling for video_clip (loader preferred backend).
+# Required, not optional: the codec-disabled base ffmpeg (TAO-2183 / FF-4) ships no pipe
+# protocol, no rawvideo muxer and no select filter, and OpenCV is built WITH_FFMPEG=OFF, so
+# decord is the only working mp4 decoder in the image. Its manylinux wheel bundles its own
+# libav* and libx264 under decord.libs/, which the OpenCV leak check does not scan.
+decord==0.6.0
 einops
 # sam3 is installed --no-deps from its own Dockerfile layer: its setup.py
 # pins numpy<2, which conflicts with the 26.03 base (numpy 2.x) and
@@ -79,3 +85,4 @@ notebook==7.5.6         # GHSA-rch3-82jr-f9w9 (7.5.5 vulnerable)
 jupyterlab==4.5.7       # GHSA-rch3-82jr-f9w9, GHSA-37w4-hwhx-4rc4 (4.5.6 vulnerable)
 jupyter-server==2.18.0  # GHSA-5mrq-x3x5-8v8f, GHSA-5789-5fc7-67v3, GHSA-24qx-w28j-9m6p (2.17.0 vulnerable)
 onnx==1.21.0            # GHSA-q56x-g2fj-4rj6, GHSA-hqmj-h5c6-369m, GHSA-538c-55jv-c5g9, GHSA-3r9x-f23j-gc73 (1.18.0 vulnerable)
+onnxscript==0.7.1       # opset-23 RMSNormalization fusion in video_clip ONNX export (needs onnxruntime>=1.23 to validate opset 23)
