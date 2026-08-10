@@ -1,17 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Regression contract for Mask Grounding DINO COCO metric routing.
-
-This test intentionally inspects the module without importing or constructing the
-model.  It protects the evaluator routing used by full GPU validation while
-remaining independent of checkpoints and accelerator availability.
-"""
+"""Regression coverage for Mask Grounding DINO COCO metric routing."""
 
 import ast
 from pathlib import Path
 
 import pytest
+
+from nvidia_tao_pytorch.cv.mask_grounding_dino.model.pl_gdino_model import (
+    coco_metric_values,
+)
 
 
 MODEL_PATH = (
@@ -81,3 +80,13 @@ def test_object_detection_emits_task_correct_bbox_and_mask_metrics():
     assert 'metric_name = f"{prefix}test_{key}"' in source
     assert '"mAP"' in source
     assert '"mAP50"' in source
+
+
+def test_coco_metric_values_maps_ordered_stats_to_runtime_kpis():
+    """The production conversion preserves COCOeval's metric ordering."""
+    metrics = coco_metric_values(range(12))
+
+    assert metrics["mAP"] == 0.0
+    assert metrics["mAP50"] == 1.0
+    assert metrics["AR100"] == 8.0
+    assert metrics["AR_large"] == 11.0

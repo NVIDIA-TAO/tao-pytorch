@@ -7,6 +7,7 @@ import copy
 import os
 from pathlib import Path
 
+import numpy as np
 import pytorch_lightning as pl
 import torch
 from torch.optim.lr_scheduler import MultiStepLR, StepLR
@@ -32,6 +33,29 @@ from nvidia_tao_pytorch.cv.mask_grounding_dino.model.post_process import (
     save_inference_prediction,
     threshold_predictions,
 )
+
+
+def coco_metric_values(stats):
+    """Convert COCOeval's ordered statistics into TAO metric names."""
+    stats = np.asarray(stats, dtype=np.float64)
+    if stats.ndim != 1 or stats.size < 12:
+        raise ValueError("COCO evaluator statistics must contain 12 values.")
+    if not np.isfinite(stats[:12]).all():
+        raise RuntimeError("COCO evaluator produced non-finite statistics.")
+    return {
+        "mAP": float(stats[0]),
+        "mAP50": float(stats[1]),
+        "mAP75": float(stats[2]),
+        "mAP_small": float(stats[3]),
+        "mAP_medium": float(stats[4]),
+        "mAP_large": float(stats[5]),
+        "AR1": float(stats[6]),
+        "AR10": float(stats[7]),
+        "AR100": float(stats[8]),
+        "AR_small": float(stats[9]),
+        "AR_medium": float(stats[10]),
+        "AR_large": float(stats[11]),
+    }
 
 
 # pylint:disable=too-many-ancestors
@@ -375,20 +399,7 @@ class MaskGDINOPlModel(TAOLightningModule):
             if self.trainer.is_global_zero and self.val_evaluator.img_ids:
                 for iou_type in self.iou_types:
                     stats = self.val_evaluator.coco_eval[iou_type].stats
-                    metrics = {
-                        "mAP": float(stats[0]),
-                        "mAP50": float(stats[1]),
-                        "mAP75": float(stats[2]),
-                        "mAP_small": float(stats[3]),
-                        "mAP_medium": float(stats[4]),
-                        "mAP_large": float(stats[5]),
-                        "AR1": float(stats[6]),
-                        "AR10": float(stats[7]),
-                        "AR100": float(stats[8]),
-                        "AR_small": float(stats[9]),
-                        "AR_medium": float(stats[10]),
-                        "AR_large": float(stats[11]),
-                    }
+                    metrics = coco_metric_values(stats)
                     for key, value in metrics.items():
                         prefix = "" if iou_type == "bbox" else f"{iou_type}_"
                         metric_name = f"{prefix}val_{key}"
@@ -510,20 +521,7 @@ class MaskGDINOPlModel(TAOLightningModule):
             if self.trainer.is_global_zero and self.test_evaluator.img_ids:
                 for iou_type in self.iou_types:
                     stats = self.test_evaluator.coco_eval[iou_type].stats
-                    metrics = {
-                        "mAP": float(stats[0]),
-                        "mAP50": float(stats[1]),
-                        "mAP75": float(stats[2]),
-                        "mAP_small": float(stats[3]),
-                        "mAP_medium": float(stats[4]),
-                        "mAP_large": float(stats[5]),
-                        "AR1": float(stats[6]),
-                        "AR10": float(stats[7]),
-                        "AR100": float(stats[8]),
-                        "AR_small": float(stats[9]),
-                        "AR_medium": float(stats[10]),
-                        "AR_large": float(stats[11]),
-                    }
+                    metrics = coco_metric_values(stats)
                     for key, value in metrics.items():
                         prefix = "" if iou_type == "bbox" else f"{iou_type}_"
                         metric_name = f"{prefix}test_{key}"
