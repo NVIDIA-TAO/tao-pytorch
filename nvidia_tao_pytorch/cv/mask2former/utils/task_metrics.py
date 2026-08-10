@@ -44,17 +44,17 @@ def instance_metric_names(split):
 
 
 def semantic_metric_names(mode, split):
-    """Return semantic metric names without mislabelling panoptic diagnostics."""
+    """Return the stable semantic metric names for either task mode."""
     mode = normalize_task_mode(mode)
     split = normalize_evaluation_split(split)
     if mode == "instance":
         raise ValueError("Instance mode must use COCO mask AP, not semantic metrics.")
     if mode == "semantic":
         return "mIoU", "all_acc"
-    return (
-        f"panoptic_{split}_semantic_mIoU_diagnostic",
-        f"panoptic_{split}_semantic_all_acc_diagnostic",
-    )
+    # Panoptic evaluation still exposes semantic diagnostics. Keep the
+    # historical names so monitor configs remain compatible across modes and
+    # with tao-deploy.
+    return "mIoU", "all_acc"
 
 
 def ordered_coco_category_ids(coco):

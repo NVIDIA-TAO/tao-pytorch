@@ -91,12 +91,7 @@ def test_task_modes_and_metric_names_are_explicit():
     assert instance_metric_names("test") == ("test_mAP", "test_mAP50")
     assert semantic_metric_names("semantic", "val") == ("mIoU", "all_acc")
 
-    panoptic_names = semantic_metric_names("panoptic", "test")
-    assert panoptic_names == (
-        "panoptic_test_semantic_mIoU_diagnostic",
-        "panoptic_test_semantic_all_acc_diagnostic",
-    )
-    assert "PQ" not in " ".join(panoptic_names)
+    assert semantic_metric_names("panoptic", "test") == ("mIoU", "all_acc")
     with pytest.raises(ValueError, match="must use COCO mask AP"):
         semantic_metric_names("instance", "val")
     with pytest.raises(ValueError, match="Unsupported Mask2Former task mode"):

@@ -128,7 +128,9 @@ class SemSegmDataModule(pl.LightningDataModule):
 
         val_sampler = None
         if is_dist_avail_and_initialized():
-            val_sampler = torch.utils.data.distributed.DistributedSampler(
+            # Do not pad the final rank with duplicate samples: semantic
+            # metrics are summed across ranks and must count each image once.
+            val_sampler = pl.overrides.distributed.UnrepeatedDistributedSampler(
                 dataset_val)
         else:
             val_sampler = torch.utils.data.SequentialSampler(dataset_val)
@@ -169,7 +171,7 @@ class SemSegmDataModule(pl.LightningDataModule):
             dataset_test = self._build_dataset("test", is_training=False)
             split_cfg = test_cfg
         if is_dist_avail_and_initialized():
-            test_sampler = torch.utils.data.distributed.DistributedSampler(
+            test_sampler = pl.overrides.distributed.UnrepeatedDistributedSampler(
                 dataset_test)
         else:
             test_sampler = torch.utils.data.SequentialSampler(dataset_test)
