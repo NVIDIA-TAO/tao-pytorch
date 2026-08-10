@@ -557,8 +557,8 @@ class Mask2formerPlModule(TAOLightningModule):
             resized_height, resized_width = info["resized_size"]
             padding_height, padding_width = info["padding"]
             if (
-                resized_height + padding_height != padded_height
-                or resized_width + padding_width != padded_width
+                resized_height + padding_height != padded_height or
+                resized_width + padding_width != padded_width
             ):
                 raise ValueError(
                     "Mask2Former evaluation geometry metadata does not match "
