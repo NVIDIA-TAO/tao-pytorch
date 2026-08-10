@@ -290,6 +290,10 @@ class AutoMLBrainHarness:
             parameter_names=self.param_names,
         )
         self.history: list[Recommendation] = []
+        # Controller.is_complete() owns the Bayesian/BFBO max-recommendation
+        # contract and reads controller.history.  Keep it aliased to the
+        # harness history that receives each generated recommendation.
+        self.controller.history = self.history
         self._next_id = 0
 
     def next_recommendations(self):
