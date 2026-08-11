@@ -35,33 +35,43 @@ class MemoryEfficientAttention(Attention):
         size. Measured on H100 against timm's reference DINOv3, CLS cosine was 1.000 at batch 1,
         0.658 at 2, 0.368 at 4 and 0.193 at 8, and ImageNet k-NN fell from 82.4% to 4.0%.
 
+        The mask is applied by **splitting**, not by materializing. A dense
+        ``[1, heads, N, N]`` mask is what xformers' structured ``BlockDiagonalMask`` exists to
+        avoid: for DINOv3 training (2 global crops at 512 px + 4 local at 112 px, batch 16) the
+        concatenated sequence is ~36k tokens, so the dense mask would be ~55 GiB and OOMs
+        immediately. Splitting back into per-crop blocks and attending within each is
+        mathematically identical and allocates nothing extra.
+
         Args:
             q, k, v: ``[B, N, num_heads, head_dim]`` (xformers layout, post QK-norm).
-            attn_bias: xformers block-diagonal mask, or ``None``. Materialized into an
-                additive float mask for SDPA.
+            attn_bias: xformers block-diagonal mask, or ``None``.
 
         Returns:
             torch.Tensor: ``[B, N, num_heads, head_dim]`` (same layout as the input).
         """
         out_dtype = q.dtype
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-        attn_mask = None
-        if attn_bias is not None:
-            # Materialize to [B, num_heads, N, N]; -inf off-block keeps crops separated.
-            attn_mask = attn_bias.materialize(
-                (q.shape[0], q.shape[1], q.shape[2], k.shape[2]),
-                dtype=torch.float32, device=q.device,
-            )
-        with torch.autocast("cuda", enabled=False):
-            x = F.scaled_dot_product_attention(
-                q.float(), k.float(), v.float(),
-                attn_mask=attn_mask,
-                dropout_p=self.attn_drop.p if self.training else 0.0,
-                scale=self.scale,
-            )
-        return x.to(out_dtype).transpose(1, 2)
+
+        def _sdpa(qh, kh, vh):
+            """SDPA on ``[b, n, heads, dim]`` inputs, returning the same layout."""
+            with torch.autocast("cuda", enabled=False):
+                x = F.scaled_dot_product_attention(
+                    qh.transpose(1, 2).float(),
+                    kh.transpose(1, 2).float(),
+                    vh.transpose(1, 2).float(),
+                    dropout_p=self.attn_drop.p if self.training else 0.0,
+                    scale=self.scale,
+                )
+            return x.to(out_dtype).transpose(1, 2)
+
+        if attn_bias is None:
+            return _sdpa(q, k, v)
+
+        # Block-diagonal attention == independent attention per crop block. `split` is the
+        # documented inverse of `get_attn_bias_and_cat`, so this restores the per-crop batches,
+        # attends within each, and re-concatenates in the original order.
+        qs, ks, vs = attn_bias.split(q), attn_bias.split(k), attn_bias.split(v)
+        outs = [_sdpa(qi, ki, vi) for qi, ki, vi in zip(qs, ks, vs)]
+        return torch.cat([o.reshape(1, -1, o.shape[2], o.shape[3]) for o in outs], dim=1)
 
     def forward(self, x, attn_bias=None, use_custom_attention=True):
         """Apply memory_efficient_attention in xformers
