@@ -312,19 +312,19 @@ def compute_lr(step, base_lr, warmup_steps, max_steps, scheduler='cosine'):
         Learning rate for the current step.
     """
     if step < warmup_steps:
-        return base_lr * (step + 1) / max(warmup_steps, 1)
+        return float(base_lr * (step + 1) / max(warmup_steps, 1))
 
     if scheduler == 'constant':
-        return base_lr
+        return float(base_lr)
 
     progress = step - warmup_steps
     total = max(max_steps - warmup_steps, 1)
 
     if scheduler == 'linear':
-        return base_lr * max(1.0 - progress / total, 0.0)
+        return float(base_lr * max(1.0 - progress / total, 0.0))
 
     # cosine (default)
-    return 0.5 * (1 + np.cos(np.pi * progress / total)) * base_lr
+    return float(0.5 * (1 + np.cos(np.pi * progress / total)) * base_lr)
 
 
 def load_model_from_checkpoint(model_path, experiment_config, model_class):
