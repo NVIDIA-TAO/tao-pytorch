@@ -64,7 +64,6 @@ train:
   iters_per_epoch: 8000
 
 evaluate:
-  task: semantic
   checkpoint: 
   num_gpus: 4
   gpu_ids: [0,1,2,3]

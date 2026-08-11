@@ -22,8 +22,9 @@ evaluate:
 - `panoptic` reports COCO-style `PQ`, `SQ`, `RQ`, and thing/stuff breakdowns.
 
 `inference.mode` controls prediction visualization only; it does not select an
-evaluation metric. Existing recipes explicitly retain `evaluate.task:
-semantic`. A COCO panoptic campaign must set `evaluate.task: panoptic` and
+evaluation metric. Existing recipes use the schema default
+(`evaluate.task: semantic`) for cross-project compatibility. A COCO panoptic
+campaign must set `evaluate.task: panoptic` and
 consume `PQ`, never relabel semantic mIoU as PQ.
 
 Panoptic data loading requires

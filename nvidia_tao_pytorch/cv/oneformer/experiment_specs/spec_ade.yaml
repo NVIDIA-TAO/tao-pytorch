@@ -60,4 +60,3 @@ train:
   iters_per_epoch: 15000
 
 evaluate:
-  task: semantic
