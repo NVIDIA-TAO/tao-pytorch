@@ -26,6 +26,10 @@ from nvidia_tao_pytorch.config.clip.default_config import (
     CLIPExperimentConfig as ExperimentConfig,
 )
 from nvidia_tao_pytorch.multimodal.clip.model.pl_clip_model import CLIPPlModel
+from nvidia_tao_pytorch.multimodal.clip.model.logit_calibration import (
+    resolve_logit_bias_parameter,
+    resolve_logit_scale_parameter,
+)
 from nvidia_tao_pytorch.multimodal.clip.model.tokenizers import save_tokenizer
 from nvidia_tao_pytorch.multimodal.clip.utils.utils import (
     register_checkpoint_safe_globals,
@@ -61,6 +65,16 @@ def _onnx_upsample_bilinear2d_aa(g, inp, output_size, align_corners, *args):
 torch.onnx.register_custom_op_symbolic(
     "aten::_upsample_bilinear2d_aa", _onnx_upsample_bilinear2d_aa, 17
 )
+
+
+def _export_logit_calibration(model):
+    """Return exported multiplier and bias from canonical parameters."""
+    logit_scale = resolve_logit_scale_parameter(model).exp().reshape(())
+    logit_bias = resolve_logit_bias_parameter(model)
+    if logit_bias is None:
+        logit_bias = torch.zeros_like(logit_scale)
+    logit_bias = logit_bias.reshape(())
+    return logit_scale, logit_bias
 
 
 class ExportFriendlyMHA(nn.Module):
@@ -228,7 +242,8 @@ class CLIPVisionEncoder(nn.Module):
             image_features = output["image_features"]
         else:
             image_features = output[0]
-        return image_features, self.model.logit_scale.exp(), self.model.logit_bias
+        logit_scale, logit_bias = _export_logit_calibration(self.model)
+        return image_features, logit_scale, logit_bias
 
 
 class CLIPTextEncoder(nn.Module):
@@ -281,7 +296,8 @@ class CLIPTextEncoder(nn.Module):
             text_features = output["text_features"]
         else:
             text_features = output[1]
-        return text_features, self.model.logit_scale.exp(), self.model.logit_bias
+        logit_scale, logit_bias = _export_logit_calibration(self.model)
+        return text_features, logit_scale, logit_bias
 
 
 class CLIPCombinedEncoder(nn.Module):
@@ -331,9 +347,15 @@ class CLIPCombinedEncoder(nn.Module):
         # Ignore user-provided attention_mask (see CLIPTextEncoder for rationale)
         input_ids = input_ids + (attention_mask * 0).to(input_ids.dtype)
         text_input = {'input_ids': input_ids, 'attention_mask': torch.ones_like(input_ids)}
-        image_features, text_features, logit_scale, logit_bias = self.model(
+        outputs = self.model(
             image=image, text=text_input
         )
+        if isinstance(outputs, dict):
+            image_features = outputs['image_features']
+            text_features = outputs['text_features']
+        else:
+            image_features, text_features = outputs[:2]
+        logit_scale, logit_bias = _export_logit_calibration(self.model)
         return image_features, text_features, logit_scale, logit_bias
 
 
@@ -841,11 +863,11 @@ def run_export(experiment_config: ExperimentConfig) -> None:
 
     # Inject learned logit parameters into the config so the saved YAML
     # contains trained values, not just initial ones.
-    experiment_config.model.init_logit_scale = (
-        pl_model.model.logit_scale.item()
-    )
+    logit_scale = resolve_logit_scale_parameter(pl_model.model)
+    logit_bias = resolve_logit_bias_parameter(pl_model.model)
+    experiment_config.model.init_logit_scale = logit_scale.item()
     experiment_config.model.init_logit_bias = (
-        pl_model.model.logit_bias.item()
+        None if logit_bias is None else logit_bias.item()
     )
 
     # Save experiment config alongside ONNX for deployment inference

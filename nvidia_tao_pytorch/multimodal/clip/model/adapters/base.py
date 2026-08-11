@@ -18,6 +18,13 @@ import torch.nn as nn
 from tabulate import tabulate
 
 from nvidia_tao_pytorch.core.tlt_logging import logging
+from nvidia_tao_pytorch.multimodal.clip.model.logit_calibration import (
+    DEFAULT_MAX_LOGIT_SCALE,
+    default_logit_calibration,
+    named_logit_parameters,
+    scalar_override,
+    validate_logit_parameter,
+)
 
 
 class BaseCLIPAdapter(nn.Module, ABC):
@@ -28,29 +35,48 @@ class BaseCLIPAdapter(nn.Module, ABC):
     encode_image and encode_text methods.
 
     Args:
-        logit_scale_init: Initial value for logit scale. Default: 2.3026
-        logit_bias_init: Initial value for logit bias parameter. Default: -10.0
+        logit_scale_init: Adapter-owned fallback raw scale override.
+        logit_bias_init: Adapter-owned fallback bias override.
+        loss_type: Loss family used to select missing-value fallbacks.
+        owns_logit_parameters: Whether this adapter owns calibration locally.
 
     Attributes:
-        logit_scale: Learnable temperature parameter for contrastive loss
-        logit_bias: Learnable bias parameter for SigLIP loss
         tokenizer: Tokenizer for text encoding (set by subclasses)
     """
 
+    logit_scale_max = DEFAULT_MAX_LOGIT_SCALE
+
     def __init__(
         self,
-        logit_scale_init: float = 2.3026,
-        logit_bias_init: float = -10.0,
+        logit_scale_init=None,
+        logit_bias_init=None,
+        loss_type='siglip',
+        owns_logit_parameters=True,
     ):
-        """Initialize the base adapter with logit scale and bias parameters."""
+        """Initialize shared state and optional local calibration."""
         super().__init__()
-
-        # Initialize logit_scale and logit_bias for SigLIP/CLIP loss
-        self.logit_scale = nn.Parameter(torch.ones([]) * logit_scale_init)
-        self.logit_bias = nn.Parameter(torch.ones([]) * logit_bias_init)
-
-        # Tokenizer should be set by subclasses
         self.tokenizer = None
+        self.logit_scale_max = DEFAULT_MAX_LOGIT_SCALE
+        if owns_logit_parameters:
+            self._create_local_logit_parameters(
+                logit_scale_init=logit_scale_init,
+                logit_bias_init=logit_bias_init,
+                loss_type=loss_type,
+            )
+
+    def _create_local_logit_parameters(
+        self, logit_scale_init=None, logit_bias_init=None, loss_type='siglip'
+    ):
+        """Create one adapter-owned fallback calibration pair."""
+        fallback_scale, fallback_bias = default_logit_calibration(loss_type)
+        scale = fallback_scale if logit_scale_init is None else logit_scale_init
+        bias = fallback_bias if logit_bias_init is None else logit_bias_init
+        self.logit_scale = nn.Parameter(torch.tensor(scalar_override(
+            scale, 'init_logit_scale'
+        )))
+        self.logit_bias = nn.Parameter(torch.tensor(scalar_override(
+            bias, 'init_logit_bias'
+        )))
 
     @staticmethod
     def _format_params(n: int) -> str:
@@ -90,9 +116,13 @@ class BaseCLIPAdapter(nn.Module, ABC):
             freeze_text: Whether text encoder is frozen.
         """
         fmt = self._format_params
-        logit_params = self.logit_scale.numel() + self.logit_bias.numel()
+        logit_named_params = list(self.named_logit_parameters())
+        logit_params = sum(param.numel() for _, param in logit_named_params)
+        logit_trainable = sum(
+            param.numel() for _, param in logit_named_params if param.requires_grad
+        )
         total_params = vision_total + text_total + logit_params
-        total_trainable = vision_trainable + text_trainable + logit_params
+        total_trainable = vision_trainable + text_trainable + logit_trainable
 
         vision_status = "frozen" if freeze_vision else "trainable"
         text_status = "frozen" if freeze_text else "trainable"
@@ -100,15 +130,20 @@ class BaseCLIPAdapter(nn.Module, ABC):
         table_data = [
             ["Vision encoder", fmt(vision_trainable), fmt(vision_total), vision_status],
             ["Text encoder", fmt(text_trainable), fmt(text_total), text_status],
-            ["Logit params", fmt(logit_params), fmt(logit_params), "trainable"],
+            ["Logit params", fmt(logit_trainable), fmt(logit_params), "trainable"],
             ["Total", fmt(total_trainable), fmt(total_params), ""],
         ]
         headers = ["Component", "Trainable", "Total", "Status"]
         table = tabulate(table_data, headers=headers, tablefmt="simple")
 
+        scale = self.get_logit_scale_parameter()
+        bias = self.get_logit_bias_parameter()
+        bias_info = (
+            f"{bias.item():.2f}" if bias is not None else "not present"
+        )
         logit_info = (
-            f"Logit scale: {self.logit_scale.exp().item():.2f}, "
-            f"Logit bias: {self.logit_bias.item():.2f}"
+            f"Logit scale: {scale.exp().item():.2f}, "
+            f"Logit bias: {bias_info}"
         )
         logging.info(f"{model_name}\n{table}\n{logit_info}")
 
@@ -134,16 +169,41 @@ class BaseCLIPAdapter(nn.Module, ABC):
         """
         pass
 
+    def get_logit_scale_parameter(self):
+        """Return the canonical raw logit-scale parameter."""
+        return validate_logit_parameter(
+            getattr(self, 'logit_scale', None),
+            'logit_scale',
+            required=True,
+        )
+
+    def get_logit_bias_parameter(self):
+        """Return the optional canonical logit-bias parameter."""
+        return validate_logit_parameter(
+            getattr(self, 'logit_bias', None),
+            'logit_bias',
+            required=False,
+        )
+
+    def named_logit_parameters(self):
+        """Yield canonical calibration parameters in stable optimizer order."""
+        yield from named_logit_parameters(self)
+
     def other_named_parameters(self):
         """Return named parameters not belonging to either tower.
 
-        By default returns logit_scale and logit_bias. Override if needed.
+        Kept as a compatibility alias for existing optimizer callers.
 
         Returns:
             Iterator of (name, parameter) tuples.
         """
-        yield 'logit_scale', self.logit_scale
-        yield 'logit_bias', self.logit_bias
+        yield from self.named_logit_parameters()
+
+    def clamp_logit_scale_(self):
+        """Apply this model family's raw logit-scale bounds in place."""
+        scale = self.get_logit_scale_parameter()
+        with torch.no_grad():
+            scale.clamp_(min=0, max=self.logit_scale_max)
 
     @abstractmethod
     def encode_image(
@@ -184,12 +244,12 @@ class BaseCLIPAdapter(nn.Module, ABC):
 
         Returns:
             If both image and text:
-                Tuple of (image_features, text_features, logit_scale,
-                logit_bias)
+                Tuple of image features, text features, exponentiated scalar
+                logit scale, and optional scalar logit bias.
             If only image:
-                Dict with 'image_features' key
+                Dict with 'image_features' key.
             If only text:
-                Dict with 'text_features' key
+                Dict with 'text_features' key.
 
         Raises:
             ValueError: If neither image nor text is provided.
@@ -197,12 +257,15 @@ class BaseCLIPAdapter(nn.Module, ABC):
         if image is not None and text is not None:
             image_features = self.encode_image(image, normalize=True)
             text_features = self.encode_text(text, normalize=True)
-            return (
+            outputs = (
                 image_features,
                 text_features,
-                self.logit_scale.exp(),
-                self.logit_bias,
+                self.get_logit_scale_parameter().exp().reshape(()),
             )
+            logit_bias = self.get_logit_bias_parameter()
+            if logit_bias is not None:
+                outputs += (logit_bias.reshape(()),)
+            return outputs
         elif image is not None:
             image_features = self.encode_image(image, normalize=True)
             return {"image_features": image_features}

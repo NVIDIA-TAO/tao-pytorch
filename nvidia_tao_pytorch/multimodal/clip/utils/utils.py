@@ -12,6 +12,9 @@ from tabulate import tabulate
 from torch.optim import AdamW
 
 from nvidia_tao_pytorch.core.tlt_logging import logging
+from nvidia_tao_pytorch.multimodal.clip.model.logit_calibration import (
+    named_logit_parameters,
+)
 
 
 SUPPORTED_CHECKPOINT_EXTENSIONS = {'.pth', '.ckpt'}
@@ -146,13 +149,73 @@ class _TowerCfg:
         self.eps = eps
 
 
+def _named_parameter_partition(model):
+    """Return disjoint vision, text, and canonical calibration parameters."""
+    logit_getter = getattr(model, 'named_logit_parameters', None)
+    logit = list(
+        logit_getter() if callable(logit_getter)
+        else named_logit_parameters(model)
+    )
+    other_getter = getattr(model, 'other_named_parameters', None)
+    if callable(other_getter):
+        logit_ids = {id(parameter) for _, parameter in logit}
+        logit.extend(
+            (name, parameter)
+            for name, parameter in other_getter()
+            if id(parameter) not in logit_ids
+        )
+
+    vision_getter = getattr(model, 'vision_named_parameters', None)
+    text_getter = getattr(model, 'text_named_parameters', None)
+
+    if callable(vision_getter) and callable(text_getter):
+        vision = list(vision_getter())
+        text = list(text_getter())
+    else:
+        visual = getattr(model, 'visual', None)
+        if visual is None:
+            raise TypeError(
+                "CLIP model must expose tower parameter accessors or a "
+                "native visual module."
+            )
+        vision = [
+            (f'visual.{name}', param)
+            for name, param in visual.named_parameters()
+        ]
+        excluded_ids = {
+            id(param) for _, param in vision + logit
+        }
+        text = [
+            (name, param) for name, param in model.named_parameters()
+            if id(param) not in excluded_ids
+        ]
+
+    groups = {
+        'vision': vision,
+        'text': text,
+        'logit': logit,
+    }
+    seen = {}
+    for tower, named_params in groups.items():
+        for name, parameter in named_params:
+            parameter_id = id(parameter)
+            if parameter_id in seen:
+                previous_tower, previous_name = seen[parameter_id]
+                raise ValueError(
+                    f"Parameter {name!r} in {tower} also appears as "
+                    f"{previous_name!r} in {previous_tower}."
+                )
+            seen[parameter_id] = (tower, name)
+    return groups
+
+
 def build_optimizer(model, train_cfg):
     """Build optimizer with per-tower parameter groups.
 
     Parameters
     ----------
-    model : BaseCLIPAdapter
-        Model with vision_named_parameters() and text_named_parameters().
+    model : torch.nn.Module
+        CLIP adapter or native OpenCLIP model exposing canonical calibration.
     train_cfg : CLIPTrainConfig
         Training config with optim containing vision_lr/text_lr.
 
@@ -172,15 +235,16 @@ def build_optimizer(model, train_cfg):
         betas=cfg.betas, eps=cfg.eps,
     )
 
+    named_partition = _named_parameter_partition(model)
     param_groups = []
     param_groups.extend(
-        _make_tower_groups(model.vision_named_parameters(), v_cfg, 'vision')
+        _make_tower_groups(named_partition['vision'], v_cfg, 'vision')
     )
     param_groups.extend(
-        _make_tower_groups(model.text_named_parameters(), t_cfg, 'text')
+        _make_tower_groups(named_partition['text'], t_cfg, 'text')
     )
     param_groups.extend(
-        _make_tower_groups(model.other_named_parameters(), t_cfg, 'logit')
+        _make_tower_groups(named_partition['logit'], t_cfg, 'logit')
     )
 
     if not param_groups:
