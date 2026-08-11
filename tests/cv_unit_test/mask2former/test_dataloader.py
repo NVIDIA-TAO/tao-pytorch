@@ -34,6 +34,8 @@ def _test_sample_json():
                                     {"supercategory": "bag","id": 3, "name": "bag"}]
                    }
     os.makedirs(tmp_top_dir, exist_ok=True)
+    jsonl_path = os.path.join(tmp_top_dir, "test_ade.jsonl")
+    jsonl_records = []
     for image_id in range(0, 10):
         sample_w = int(np.random.randint(low=TEST_WIDTH-20, high=TEST_WIDTH+20, size=1)[0])
         sample_h = int(np.random.randint(low=TEST_HEIGHT-20, high=TEST_HEIGHT+20, size=1)[0])
@@ -44,11 +46,7 @@ def _test_sample_json():
         img.save(img_file)
         segm.save(segm_file)
 
-        jsonl_path = os.path.join(tmp_top_dir, "test_ade.jsonl")
-        with open(jsonl_path, mode="w", encoding="utf-8") as writer:
-            line = {"img": img_file, "segm": segm_file}
-            json.dump(line, writer)
-            writer.write("\n")
+        jsonl_records.append({"img": img_file, "segm": segm_file})
 
         images_info = {
             "id": image_id,
@@ -79,6 +77,11 @@ def _test_sample_json():
                         }
 
             json_output["annotations"].append(annotation_info)
+
+    with open(jsonl_path, mode="w", encoding="utf-8") as writer:
+        for line in jsonl_records:
+            json.dump(line, writer)
+            writer.write("\n")
 
     with open(json_file, 'w+') as outfile:
         json.dump(json_output, outfile)
