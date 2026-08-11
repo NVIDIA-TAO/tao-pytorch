@@ -22,6 +22,15 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# Default HF repo for the InternVideo2-CLIP L14 assets, pinned to a commit so a
+# repo-side change cannot silently alter the weights we train and ship on. Point
+# model.internvideo2clip_hf_id (or the per-component fields) at your own repo to
+# opt out; the pin is only applied to the default repo below.
+DEFAULT_INTERNVIDEO2CLIP_HF_ID = "OpenGVLab/InternVideo2_distillation_models"
+DEFAULT_INTERNVIDEO2CLIP_REVISION = (
+    "449f7ea1d7d3b70b6b5630e70d238b44d3b7aaac"
+)
+
 # Known filenames inside the InternVideo2-CLIP HF repo / MobileCLIP release.
 VISION_FILENAME = "stage1/L14/L14_dist_1B_stage2/pytorch_model.bin"
 CLIP_HEAD_FILENAME = "clip/L14/pytorch_model.bin"
@@ -90,12 +99,29 @@ def _require_file(path, label):
 
 
 def _hf_download(repo_id, filename, label):
-    """Download (or resolve from the ambient HF_HOME cache) an HF file."""
+    """Download (or resolve from the ambient HF_HOME cache) an HF file.
+
+    Requests for the default InternVideo2-CLIP repo are pinned to
+    ``DEFAULT_INTERNVIDEO2CLIP_REVISION``; a user-supplied repo id resolves at
+    its own ``main`` because we cannot know a valid commit for it.
+    """
     from huggingface_hub import hf_hub_download  # pylint: disable=import-outside-toplevel
 
+    revision = (
+        DEFAULT_INTERNVIDEO2CLIP_REVISION
+        if repo_id == DEFAULT_INTERNVIDEO2CLIP_HF_ID
+        else None
+    )
+    if revision:
+        logger.info(
+            "Resolving %s from %s at pinned revision %s",
+            filename, repo_id, revision,
+        )
     # No cache_dir/local_files_only: rely on ambient HF_HOME; cache-aware
     # (downloads only if missing). Token via the standard HF_TOKEN env if set.
-    resolved = hf_hub_download(repo_id=repo_id, filename=filename)
+    resolved = hf_hub_download(
+        repo_id=repo_id, filename=filename, revision=revision,
+    )
     return _require_file(resolved, label)
 
 
@@ -128,7 +154,7 @@ def resolve_internvideo2_l14_assets(model_cfg):
     Logs each component's source and the overwrite precedence.
     """
     default_repo = _get(model_cfg, "internvideo2clip_hf_id",
-                        "OpenGVLab/InternVideo2_distillation_models")
+                        DEFAULT_INTERNVIDEO2CLIP_HF_ID)
     component_values = (
         default_repo,
         _get(model_cfg, "vision_encoder"),

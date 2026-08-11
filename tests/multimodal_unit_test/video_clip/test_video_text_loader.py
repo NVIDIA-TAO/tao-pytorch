@@ -76,7 +76,7 @@ def _vadr1_records():
         "video_id": "vid1",
         "anomaly_type": "Animals Obstructing Traffic",
         "total_frames": 300,
-        "video_path": "/media/wbf/Vad-Reasoning-SFT/NEW/vid1.mp4",
+        "video_path": "/orig_dataset/Vad-Reasoning-SFT/NEW/vid1.mp4",
         "what": "an elk blocks the road",
         "where": "center",
         "why": "traffic is obstructed",
@@ -114,6 +114,7 @@ class TestVideoTextEntries:
             metadata=str(metadata),
             metadata_format="vadr1_chunks",
             data_root=str(tmp_path),
+            path_prefix_mapping={"/orig_dataset/": f"{tmp_path}/"},
             split="train",
             caption_fields=["anomaly_type", "what"],
             idx_mode="category",
@@ -149,13 +150,14 @@ class TestVideoTextEntries:
         file_a = _write_json(tmp_path / "vadr1_a.json", _vadr1_records())
         records_b = _vadr1_records()
         records_b[0]["video_id"] = "vid2"
-        records_b[0]["video_path"] = "/media/wbf/Vad-Reasoning-SFT/NEW/vid2.mp4"
+        records_b[0]["video_path"] = "/orig_dataset/Vad-Reasoning-SFT/NEW/vid2.mp4"
         file_b = _write_json(tmp_path / "vadr1_b.json", records_b)
 
         entries = load_video_text_entries(
             metadata=[str(file_a), str(file_b)],
             metadata_format="vadr1_chunks",
             data_root=str(tmp_path),
+            path_prefix_mapping={"/orig_dataset/": f"{tmp_path}/"},
             split="train",
             caption_fields=["anomaly_type"],
             idx_mode="sample_id",

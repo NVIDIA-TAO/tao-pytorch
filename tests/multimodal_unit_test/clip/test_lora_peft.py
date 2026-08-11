@@ -517,6 +517,37 @@ class TestInjectLoRA:
         assert not any('k_proj' in n for n in mod_names)
         assert not any('v_proj' in n for n in mod_names)
 
+    def test_zero_matching_targets_raises(self, adapter):
+        """An enabled tower that matches nothing must fail loudly.
+
+        inject_lora freezes the backbone before injecting, so a silent no-op
+        would leave training with nothing trainable. 'in_proj' is the real-world
+        case: on nn.MultiheadAttention it is a Parameter, not a Linear.
+        """
+        cfg = MockPEFTConfig(
+            enabled=True, vision_enabled=True,
+            target_modules=['in_proj'],  # matches no nn.Linear
+            num_last_blocks=1,
+        )
+
+        with pytest.raises(ValueError, match="no LoRA"):
+            inject_lora(adapter, cfg)
+
+    def test_zero_matching_targets_error_lists_available_leaves(self, adapter):
+        """The error must name the leaves that were actually available."""
+        cfg = MockPEFTConfig(
+            enabled=True, vision_enabled=True,
+            target_modules=['in_proj'],
+            num_last_blocks=1,
+        )
+
+        with pytest.raises(ValueError) as excinfo:
+            inject_lora(adapter, cfg)
+
+        message = str(excinfo.value)
+        assert 'vision' in message
+        assert 'q_proj' in message
+
     def test_fused_qkv_injection(self, fused_adapter):
         """Test LoRA injection into fused qkv Linear."""
         cfg = MockPEFTConfig(

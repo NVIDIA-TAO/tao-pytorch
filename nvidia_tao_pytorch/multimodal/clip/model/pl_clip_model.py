@@ -25,6 +25,7 @@ from nvidia_tao_pytorch.multimodal.clip.model.clip import build_model  # noqa: E
 from nvidia_tao_pytorch.multimodal.clip.model.lora import inject_lora  # noqa: E402
 from nvidia_tao_pytorch.multimodal.clip.model.preservation_loss import (  # noqa: E402
     build_preservation_loss,
+    normalize_teacher_state,
 )
 from nvidia_tao_pytorch.multimodal.clip.loss.masked_siglip_loss import (  # noqa: E402
     MetadataMaskedSigLipLoss,
@@ -302,6 +303,14 @@ class CLIPPlModel(TAOLightningModule):
             else []
         )
         self._pas_validation_pairs = None
+
+    def on_load_checkpoint(self, checkpoint):
+        """Reconcile the frozen preservation teacher with the running config."""
+        super().on_load_checkpoint(checkpoint)
+        state_dict = checkpoint.get("state_dict", checkpoint)
+        normalize_teacher_state(
+            state_dict, getattr(self, "preservation_loss", None)
+        )
 
     def setup(self, stage=None):
         """Set up training after Trainer is initialized."""
@@ -739,7 +748,7 @@ class CLIPPlModel(TAOLightningModule):
         # Collect teacher embeddings for drift metric
         if self.preservation_loss is not None:
             with torch.no_grad():
-                t_img, t_txt = self.preservation_loss._teacher_forward(
+                t_img, t_txt = self.preservation_loss.teacher_forward(
                     batch[0], text
                 )
                 self.teacher_image_embeddings.append(t_img.cpu())

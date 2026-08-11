@@ -131,8 +131,6 @@ def _resolve_video_path(video_path, data_root=None, path_prefix_mapping=None):
 
     path = Path(video_path)
     if path.is_absolute():
-        if data_root and video_path.startswith("/media/wbf/"):
-            return str(Path(data_root) / video_path[len("/media/wbf/"):])
         return str(path)
     if data_root:
         return str(Path(data_root) / path)
@@ -1225,9 +1223,11 @@ def get_video_text_dataloader(
     frame_loader: Optional[Callable] = None,
 ):
     """Create a DataLoader for normalized video-text metadata."""
-    random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    # Keep randomness local to this loader. Reseeding the global RNGs here used
+    # to reset whatever seed_everything() established, once per loader, in the
+    # middle of datamodule setup.
+    generator = torch.Generator()
+    generator.manual_seed(seed)
 
     dataset = build_video_text_dataset(
         cfg,
@@ -1242,9 +1242,9 @@ def get_video_text_dataloader(
     if mode == 'train':
         if is_distributed:
             batch_sampler = distributed.DistributedSampler(
-                dataset, shuffle=True)
+                dataset, shuffle=True, seed=seed)
         else:
-            batch_sampler = RandomSampler(dataset)
+            batch_sampler = RandomSampler(dataset, generator=generator)
     if batch_sampler:
         dataloader_kwargs['batch_sampler'] = BatchSampler(
             batch_sampler, batch_size, drop_last=True)
@@ -1264,5 +1264,6 @@ def get_video_text_dataloader(
         dataset,
         num_workers=num_workers,
         pin_memory=pin_memory,
+        generator=generator,
         **dataloader_kwargs,
     )

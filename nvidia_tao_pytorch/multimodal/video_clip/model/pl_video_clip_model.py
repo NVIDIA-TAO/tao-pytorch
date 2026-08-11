@@ -38,6 +38,7 @@ from nvidia_tao_pytorch.multimodal.video_clip.model.video_clip import build_mode
 from nvidia_tao_pytorch.multimodal.clip.model.lora import inject_lora  # noqa: E402
 from nvidia_tao_pytorch.multimodal.clip.model.preservation_loss import (  # noqa: E402
     build_preservation_loss,
+    normalize_teacher_state,
 )
 from nvidia_tao_pytorch.multimodal.video_clip.utils.utils import (  # noqa: E402
     build_optimizer,
@@ -139,6 +140,9 @@ class VideoCLIPPlModel(TAOLightningModule):
         """Validate PEFT structure using Lightning's loaded checkpoint."""
         super().on_load_checkpoint(checkpoint)
         state_dict = checkpoint.get("state_dict", checkpoint)
+        normalize_teacher_state(
+            state_dict, getattr(self, "preservation_loss", None)
+        )
         validate_peft_state_dict(
             state_dict,
             self.experiment_spec,

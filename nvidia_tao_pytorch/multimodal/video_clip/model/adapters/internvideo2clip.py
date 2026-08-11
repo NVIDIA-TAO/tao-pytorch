@@ -27,6 +27,7 @@ from nvidia_tao_pytorch.multimodal.video_clip.model.adapters.base import (
     BaseCLIPAdapter,
 )
 from nvidia_tao_pytorch.multimodal.video_clip.utils.internvideo2_assets import (
+    DEFAULT_INTERNVIDEO2CLIP_HF_ID,
     AttrDict,
     build_internvideo2_l14_config,
     resolve_internvideo2_l14_assets,
@@ -98,7 +99,7 @@ class InternVideo2CLIP(BaseCLIPAdapter):
 
     def __init__(
         self,
-        internvideo2clip_hf_id="OpenGVLab/InternVideo2_distillation_models",
+        internvideo2clip_hf_id=DEFAULT_INTERNVIDEO2CLIP_HF_ID,
         vision_encoder=None,
         text_encoder=None,
         clip_head=None,

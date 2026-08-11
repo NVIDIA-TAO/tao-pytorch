@@ -14,4 +14,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Entrypoint script for the CLIP task."""
+"""Entrypoint script for the video_clip task."""

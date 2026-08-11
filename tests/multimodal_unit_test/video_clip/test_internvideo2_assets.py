@@ -24,6 +24,8 @@ import torch
 from nvidia_tao_pytorch.multimodal.video_clip.model.adapters.internvideo2clip import InternVideo2Tokenizer
 
 from nvidia_tao_pytorch.multimodal.video_clip.utils.internvideo2_assets import (
+    DEFAULT_INTERNVIDEO2CLIP_HF_ID,
+    DEFAULT_INTERNVIDEO2CLIP_REVISION,
     AttrDict,
     build_internvideo2_l14_config,
     resolve_internvideo2_l14_assets,
@@ -70,8 +72,8 @@ class TestInternVideo2Assets:
         text = tmp_path / "mobileclip.pt"
         text.write_bytes(b"ckpt")
 
-        def fake_hf_hub_download(repo_id, filename):
-            del repo_id
+        def fake_hf_hub_download(repo_id, filename, revision=None):
+            del repo_id, revision
             path = tmp_path / filename.replace("/", "_")
             path.write_bytes(b"hf")
             return str(path)
@@ -95,6 +97,61 @@ class TestInternVideo2Assets:
             "stage1_L14_L14_dist_1B_stage2_pytorch_model.bin"
         )
         assert assets["extra_ckpt"].endswith("clip_L14_pytorch_model.bin")
+
+    def test_default_repo_is_pinned_to_a_revision(self, tmp_path, monkeypatch):
+        """The default InternVideo2-CLIP repo must resolve at the pinned sha."""
+        text = tmp_path / "mobileclip.pt"
+        text.write_bytes(b"ckpt")
+        seen = []
+
+        def fake_hf_hub_download(repo_id, filename, revision=None):
+            seen.append((repo_id, revision))
+            path = tmp_path / filename.replace("/", "_")
+            path.write_bytes(b"hf")
+            return str(path)
+
+        monkeypatch.setattr(
+            "huggingface_hub.hf_hub_download", fake_hf_hub_download
+        )
+
+        resolve_internvideo2_l14_assets(SimpleNamespace(
+            vision_encoder=None,
+            text_encoder=str(text),
+            clip_head=None,
+            internvideo2clip_hf_id=DEFAULT_INTERNVIDEO2CLIP_HF_ID,
+        ))
+
+        assert seen, "expected hf_hub_download to be called"
+        assert all(
+            revision == DEFAULT_INTERNVIDEO2CLIP_REVISION
+            for _, revision in seen
+        )
+
+    def test_custom_repo_is_not_pinned(self, tmp_path, monkeypatch):
+        """A user's own repo resolves at its own main, not our pinned sha."""
+        text = tmp_path / "mobileclip.pt"
+        text.write_bytes(b"ckpt")
+        seen = []
+
+        def fake_hf_hub_download(repo_id, filename, revision=None):
+            seen.append((repo_id, revision))
+            path = tmp_path / filename.replace("/", "_")
+            path.write_bytes(b"hf")
+            return str(path)
+
+        monkeypatch.setattr(
+            "huggingface_hub.hf_hub_download", fake_hf_hub_download
+        )
+
+        resolve_internvideo2_l14_assets(SimpleNamespace(
+            vision_encoder=None,
+            text_encoder=str(text),
+            clip_head=None,
+            internvideo2clip_hf_id="someone-else/their-iv2clip-fork",
+        ))
+
+        assert seen, "expected hf_hub_download to be called"
+        assert all(revision is None for _, revision in seen)
 
     def test_all_null_sources_return_architecture_only_assets(self):
         """All-null is the explicit random/architecture-only configuration."""

@@ -52,7 +52,7 @@ class PreservationLoss(nn.Module):
         self.similarity_weight = reg_config.similarity_weight
 
     @torch.no_grad()
-    def _teacher_forward(self, image, text):
+    def teacher_forward(self, image, text):
         """Run teacher forward pass without gradients.
 
         Returns:
@@ -61,6 +61,24 @@ class PreservationLoss(nn.Module):
         teacher_out = self.teacher(image=image, text=text)
         # teacher forward returns (img_feat, txt_feat, logit_scale, logit_bias)
         return teacher_out[0], teacher_out[1]
+
+    def state_dict(self, *args, **kwargs):
+        """Return the module state without the frozen teacher.
+
+        The teacher is a deep copy of the pretrained model, so persisting it
+        would roughly double every checkpoint. It is rebuilt from the base
+        weights in the LightningModule constructor, before LoRA injection,
+        so it never needs to be restored from a checkpoint.
+        """
+        state = super().state_dict(*args, **kwargs)
+        prefix = kwargs.get("prefix", "")
+        if not prefix and len(args) >= 2:
+            prefix = args[1]
+        for key in [
+            k for k in state if k.startswith(prefix + "teacher.")
+        ]:
+            state.pop(key)
+        return state
 
     def forward(self, student_image_feat, student_text_feat, image, text):
         """Compute preservation losses.
@@ -78,7 +96,7 @@ class PreservationLoss(nn.Module):
                 - 'cosine': Unweighted cosine preservation loss.
                 - 'similarity': Unweighted similarity matrix preservation loss.
         """
-        teacher_image_feat, teacher_text_feat = self._teacher_forward(
+        teacher_image_feat, teacher_text_feat = self.teacher_forward(
             image, text
         )
 
@@ -116,6 +134,38 @@ class PreservationLoss(nn.Module):
         losses['preservation_total'] = total
 
         return losses
+
+
+TEACHER_STATE_PREFIX = "preservation_loss.teacher."
+
+
+def normalize_teacher_state(state_dict, preservation_loss=None):
+    """Reconcile a checkpoint's teacher weights with the running config.
+
+    Checkpoints written before the teacher was excluded still carry
+    ``preservation_loss.teacher.*``; new ones do not. Either way the teacher
+    held by ``preservation_loss`` is already the correct pretrained copy, so
+    drop whatever the checkpoint has and re-seed from the live module. This
+    keeps strict loading working for old and new checkpoints, with or
+    without ``regularization.enabled``.
+
+    Args:
+        state_dict: The checkpoint state dict, modified in place.
+        preservation_loss: The live PreservationLoss, or None when
+            regularization is disabled for this run.
+
+    Returns:
+        The same ``state_dict`` object.
+    """
+    for key in [
+        k for k in state_dict if k.startswith(TEACHER_STATE_PREFIX)
+    ]:
+        state_dict.pop(key)
+    if preservation_loss is not None:
+        teacher_state = preservation_loss.teacher.state_dict()
+        for key, value in teacher_state.items():
+            state_dict[TEACHER_STATE_PREFIX + key] = value
+    return state_dict
 
 
 def build_preservation_loss(model, reg_config):

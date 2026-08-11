@@ -16,6 +16,7 @@
 
 """Export CLIP model to ONNX."""
 
+import copy
 import math
 import os
 from typing import Optional, Tuple
@@ -1102,11 +1103,17 @@ def run_export(experiment_config: ExperimentConfig) -> None:
     # Load model from checkpoint or build from HuggingFace pretrained weights
     if model_path:
         logging.info(f"Loading model from checkpoint: {model_path}")
+        # Preservation regularization is training-only; skip the frozen-teacher
+        # deep copy so export does not carry a second copy of the backbone.
+        restore_config = copy.deepcopy(experiment_config)
+        restore_reg = getattr(restore_config, "regularization", None)
+        if restore_reg is not None and getattr(restore_reg, "enabled", False):
+            restore_reg.enabled = False
         # pylint: disable=no-value-for-parameter
         pl_model = VideoCLIPPlModel.load_from_checkpoint(
             model_path,
             map_location=device,
-            experiment_spec=experiment_config
+            experiment_spec=restore_config
         )
     else:
         logging.info(

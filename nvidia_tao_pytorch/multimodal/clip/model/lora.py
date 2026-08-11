@@ -151,12 +151,15 @@ def inject_lora(model, peft_config):
             target_blocks = blocks[-tower_cfg.num_last_blocks:]
 
         start_idx = num_blocks - len(target_blocks)
+        tower_injected = 0
+        seen_linear_leaves = set()
 
         for block_offset, block in enumerate(target_blocks):
             block_idx = start_idx + block_offset
             for name, module in block.named_modules():
                 if not isinstance(module, nn.Linear):
                     continue
+                seen_linear_leaves.add(name.rsplit('.', 1)[-1])
                 if not _match_target(name, tower_cfg.target_modules):
                     continue
 
@@ -177,9 +180,24 @@ def inject_lora(model, peft_config):
                     setattr(parent, parts[1], lora_module)
 
                 injected.append((tower_name, f"block[{block_idx}].{name}"))
+                tower_injected += 1
                 lora_param_count += (
                     lora_module.lora_A.numel() + lora_module.lora_B.numel()
                 )
+
+        if tower_injected == 0:
+            raise ValueError(
+                f"PEFT is enabled for the {tower_name} tower but no LoRA "
+                f"adapters were injected: target_modules "
+                f"{list(tower_cfg.target_modules)} matched no nn.Linear in the "
+                f"last {len(target_blocks)} of {num_blocks} blocks. The "
+                f"backbone is already frozen at this point, so training would "
+                f"proceed with nothing trainable. nn.Linear leaf names "
+                f"available in those blocks: {sorted(seen_linear_leaves)}. "
+                f"(Fused attention, e.g. nn.MultiheadAttention's in_proj, is a "
+                f"Parameter rather than a Linear submodule and cannot be "
+                f"targeted by name.)"
+            )
 
     # Phase 3: Unfreeze logit_scale and logit_bias
     if hasattr(model, 'logit_scale'):

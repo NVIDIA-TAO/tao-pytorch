@@ -207,7 +207,8 @@ class InternVideo2_CLIP_small(nn.Module):
 
         # load vision_encoder
         logger.info(f"Load vision_encoder checkpoint from {vision_ckpt_path}")
-        vision_ckpt = torch.load(vision_ckpt_path, map_location='cpu')
+        vision_ckpt = torch.load(
+            vision_ckpt_path, map_location='cpu', weights_only=True)
         if 'module' in vision_ckpt.keys():
             vision_ckpt = vision_ckpt['module']
         elif 'model' in vision_ckpt.keys():
@@ -238,7 +239,8 @@ class InternVideo2_CLIP_small(nn.Module):
 
         # load text_encoder
         logger.info(f"Load text_encoder checkpoint from {text_ckpt_path}")
-        test_ckpt = torch.load(text_ckpt_path, map_location='cpu')
+        test_ckpt = torch.load(
+            text_ckpt_path, map_location='cpu', weights_only=True)
         if 'module' in test_ckpt.keys():
             test_ckpt = test_ckpt['module']
         for k, v in test_ckpt.items():
@@ -249,7 +251,8 @@ class InternVideo2_CLIP_small(nn.Module):
         # often when post-pretrain after previous pretraining, thus the keys are same
         if extra_ckpt_path is not None:
             logger.info(f"Load extra checkpoint from {extra_ckpt_path}")
-            extra_ckpt = torch.load(extra_ckpt_path, map_location='cpu')
+            extra_ckpt = torch.load(
+                extra_ckpt_path, map_location='cpu', weights_only=True)
             if 'module' in extra_ckpt.keys():
                 extra_ckpt = extra_ckpt['module']
             for k, v in extra_ckpt.items():

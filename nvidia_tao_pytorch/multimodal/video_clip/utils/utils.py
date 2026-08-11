@@ -468,6 +468,12 @@ def load_model_from_checkpoint(model_path, experiment_config, model_class):
         ):
             if hasattr(model_cfg, field):
                 setattr(model_cfg, field, None)
+        # Preservation regularization is training-only. Skip the frozen-teacher
+        # deep copy on restore: the weight sources above were just nulled, so a
+        # teacher built here would hold random weights.
+        reg_cfg = getattr(restore_config, "regularization", None)
+        if reg_cfg is not None and getattr(reg_cfg, "enabled", False):
+            reg_cfg.enabled = False
         model = model_class.load_from_checkpoint(
             model_path,
             map_location="cpu",
