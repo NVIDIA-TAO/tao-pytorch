@@ -137,6 +137,30 @@ def main():
     print("\n  A working DINOv3 ViT-B should be far above chance here. If it is, the features "
           "are fine and the fault is in the evaluation harness, not the backbone.")
 
+    # Hand the SAME known-good embeddings to the library's k-NN. This splits the remaining
+    # space cleanly: if it agrees with the number above, the fault is in extraction/loading at
+    # full scale; if it returns chance on data we just scored correctly, the fault is in the
+    # library's k-NN path.
+    print("\n=== library knn_top1_offline on the same embeddings ===")
+    from nvidia_tao_pytorch.core.evaluation.knn import knn_top1_offline
+    for use_faiss in (False, True):
+        try:
+            acc = knn_top1_offline(db, db_lbl, qu, q_lbl,
+                                   num_classes=len(classes), K=k, use_faiss=use_faiss)
+            print(f"  use_faiss={str(use_faiss):5s} -> {acc:.2f}%")
+        except Exception as exc:  # noqa: BLE001 - faiss is known to be unstable here
+            print(f"  use_faiss={str(use_faiss):5s} -> RAISED {type(exc).__name__}: {exc}")
+
+    # And with labels spanning the full 1000-class space, as the real run has them: the vote
+    # allocates a [Q, num_classes] tensor and scatter-adds into it, so a num_classes that does
+    # not match the label range is a candidate failure the small test would never surface.
+    print("\n=== same embeddings, num_classes=1000 (as in the full run) ===")
+    try:
+        acc = knn_top1_offline(db, db_lbl, qu, q_lbl, num_classes=1000, K=k, use_faiss=False)
+        print(f"  num_classes=1000 -> {acc:.2f}%   (labels only span 0..{len(classes)-1})")
+    except Exception as exc:  # noqa: BLE001
+        print(f"  num_classes=1000 -> RAISED {type(exc).__name__}: {exc}")
+
 
 if __name__ == "__main__":
     main()
