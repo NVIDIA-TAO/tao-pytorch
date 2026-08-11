@@ -25,6 +25,7 @@ DINOV3_DOWNSTREAM_BACKBONES = [
     "vit_base_dinov3",
     "vit_large_dinov3",
     "vit_huge_plus_dinov3",
+    "vit_7b_dinov3",
 ]
 
 

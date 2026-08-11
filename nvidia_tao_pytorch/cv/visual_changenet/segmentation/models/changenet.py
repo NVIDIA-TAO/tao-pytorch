@@ -26,6 +26,7 @@ from nvidia_tao_pytorch.core.distributed.comm import get_global_rank
 from nvidia_tao_pytorch.core.tlt_logging import logger
 from nvidia_tao_pytorch.core.utils.pos_embed_interpolation import interpolate_patch_embed, interpolate_pos_embed
 from nvidia_tao_pytorch.core.utils.ptm_utils import load_pretrained_weights
+from nvidia_tao_pytorch.cv.backbone_v2.dino_v3 import validate_dinov3_checkpoint
 from nvidia_tao_pytorch.cv.backbone_v2.nn.norm import FrozenBatchNorm2d
 from nvidia_tao_pytorch.cv.visual_changenet.backbone.fan import fan_model_dict
 from nvidia_tao_pytorch.cv.visual_changenet.backbone.utils import ptm_adapter, visual_changenet_parser
@@ -318,11 +319,20 @@ class ChangeNetSegment(nn.Module):
 
         freeze_at = None
         if freeze_backbone:
-            if pretrained_backbone_path is None:
+            if not pretrained_backbone_path and 'dinov3' not in self.model_name:
                 raise ValueError("You shouldn't freeze a model without specifying pretrained_backbone_path")
             freeze_at = "all"
+
+        use_dinov3_hf_weights = (
+            freeze_backbone and
+            not pretrained_backbone_path and
+            'dinov3' in self.model_name
+        )
+
         if get_global_rank() == 0:
             logger.info(f"Number of output classes: {output_nc}")
+            if use_dinov3_hf_weights:
+                logger.info("Loading frozen DINOv3 backbone weights from timm/Hugging Face")
         assert img_size % feature_strides[-1] == 0, f"Input image size must be a multiple of {feature_strides[-1]}"
 
         if 'fan' in self.model_name:
@@ -349,6 +359,7 @@ class ChangeNetSegment(nn.Module):
                 resolution=img_size,
                 activation_checkpoint=activation_checkpoint,
                 use_summary_token=use_summary_token,
+                pretrained=use_dinov3_hf_weights,
                 freeze_at=freeze_at,
                 export=export,
             )
@@ -377,6 +388,8 @@ class ChangeNetSegment(nn.Module):
                     target_patch_size=16,
                     target_resolution=img_size,
                 )
+            if 'dinov3' in self.model_name:
+                validate_dinov3_checkpoint(pretrained_backbone_ckp)
             msg = self.backbone.load_state_dict(pretrained_backbone_ckp, strict=False)
             if get_global_rank() == 0:
                 logger.info(f"Loaded pretrained weights from {pretrained_backbone_path}")
@@ -446,6 +459,7 @@ def build_model(experiment_config,
                     "vit_base_dinov3": [768, 768, 768, 768],
                     "vit_large_dinov3": [1024, 1024, 1024, 1024],
                     "vit_huge_plus_dinov3": [1280, 1280, 1280, 1280],
+                    "vit_7b_dinov3": [4096, 4096, 4096, 4096],
                     "c_radio_p1_vit_huge_patch16_224_mlpnorm": [1280, 1280, 1280, 1280],
                     "c_radio_p2_vit_huge_patch16_224_mlpnorm": [1280, 1280, 1280, 1280],
                     "c_radio_p3_vit_huge_patch16_224_mlpnorm": [1280, 1280, 1280, 1280],

@@ -17,18 +17,20 @@ RADIO summary tokens.
 import math
 from functools import partial
 
-import timm
 import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.nn.init import normal_, trunc_normal_
 
 from nvidia_tao_pytorch.cv.backbone_v2.dino_v3 import (
+    create_dinov3_model,
+    dinov3_vit7b16,
     dinov3_vitb16,
     dinov3_vith16plus,
     dinov3_vitl16,
     dinov3_vits16,
     dinov3_vits16plus,
+    validate_dinov3_checkpoint,
 )
 from nvidia_tao_pytorch.cv.backbone_v2.nn.norm import FrozenBatchNorm2d
 from nvidia_tao_pytorch.cv.deformable_detr.model.ops.modules import MSDeformAttn
@@ -425,6 +427,10 @@ class DINOV3Adapter(nn.Module):
         The prefixing is all-or-nothing: it only triggers when no key is already an
         adapter/``vit.`` key.
         """
+        validate_dinov3_checkpoint(
+            state_dict,
+            allow_partial=not kwargs.get("strict", True),
+        )
         adapter_prefixes = (
             "vit.", "spm.", "interactions.", "level_embed", "up.",
             "norm1.", "norm2.", "norm3.", "norm4.",
@@ -438,14 +444,18 @@ class DINOV3Adapter(nn.Module):
 def _make_dinov3_adapter(
     timm_name, interaction_indexes,
     out_indices=None, resolution=224, activation_checkpoint=False,
-    use_summary_token=True, **kwargs
+    use_summary_token=True, pretrained=False, **kwargs
 ):
     """Build a DINOv3 ViT-Adapter with the family-shared adapter hyper-parameters.
 
-    The timm model is randomly initialized; weights come from
-    ``pretrained_backbone_path`` after construction.
+    Setting pretrained fetches timm's matching Hugging Face weights. Otherwise
+    Visual ChangeNet loads an explicit converted checkpoint after construction.
     """
-    dino_model = timm.create_model(timm_name, pretrained=False, img_size=resolution)
+    dino_model = create_dinov3_model(
+        timm_name,
+        pretrained=pretrained,
+        img_size=resolution,
+    )
     return DINOV3Adapter(
         dino_model,
         conv_inplane=56,
@@ -467,6 +477,7 @@ def _make_dinov3_adapter(
 _IDX_12 = [[0, 2], [3, 5], [6, 8], [9, 11]]
 _IDX_24 = [[0, 5], [6, 11], [12, 17], [18, 23]]
 _IDX_32 = [[0, 7], [8, 15], [16, 23], [24, 31]]
+_IDX_40 = [[0, 9], [10, 19], [20, 29], [30, 39]]
 
 
 def vit_small_dinov3(**kwargs):
@@ -494,6 +505,11 @@ def vit_huge_plus_dinov3(**kwargs):
     return _make_dinov3_adapter("vit_huge_plus_patch16_dinov3.lvd1689m", _IDX_32, **kwargs)
 
 
+def vit_7b_dinov3(**kwargs):
+    """DINOv3 ViT-7B/16 ViT-Adapter (embed_dim 4096, depth 40, SwiGLU)."""
+    return _make_dinov3_adapter("vit_7b_patch16_dinov3.lvd1689m", _IDX_40, **kwargs)
+
+
 # Arch 1 (euclidean difference): the DINOV3Wrapper cls-token backbone from backbone_v2,
 # mirroring vit_model_dict in dino_v2.py. With num_classes=0, forward(x) returns the
 # (B, embed_dim) cls token, matching ChangeNetClassify's fc_ip_dim = embed_dims[-1].
@@ -503,4 +519,5 @@ dinov3_model_dict = {
     "vit_base_dinov3": partial(dinov3_vitb16, num_classes=0),
     "vit_large_dinov3": partial(dinov3_vitl16, num_classes=0),
     "vit_huge_plus_dinov3": partial(dinov3_vith16plus, num_classes=0),
+    "vit_7b_dinov3": partial(dinov3_vit7b16, num_classes=0),
 }

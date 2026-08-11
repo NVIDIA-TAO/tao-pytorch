@@ -131,7 +131,8 @@ class BackboneConfig:
         valid_options=(
             "fan_tiny_8_p4_hybrid,fan_small_12_p4_hybrid,"
             "fan_base_16_p4_hybrid,fan_large_16_p4_hybrid,vit_large_nvdinov2,"
-            "vit_small_dinov3,vit_small_plus_dinov3,vit_base_dinov3,vit_large_dinov3,vit_huge_plus_dinov3"
+            "vit_small_dinov3,vit_small_plus_dinov3,vit_base_dinov3,vit_large_dinov3,"
+            "vit_huge_plus_dinov3,vit_7b_dinov3"
         )
     )
     feat_downsample: bool = BOOL_FIELD(
