@@ -111,7 +111,7 @@ def test_empty_global_split_fails_closed():
 @pytest.mark.cv_unit
 @pytest.mark.segformer
 def test_status_kpis_are_written_only_by_global_rank_zero(monkeypatch):
-    """Nonzero ranks cannot race the global writer for status.json."""
+    """Nonzero ranks leave KPI state untouched; rank zero remains the only writer."""
     status_logger = mock.Mock()
     monkeypatch.setattr(
         segformer_pl_model.status_logging,
