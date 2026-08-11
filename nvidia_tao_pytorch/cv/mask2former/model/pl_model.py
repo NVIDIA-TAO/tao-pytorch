@@ -456,11 +456,20 @@ class Mask2formerPlModule(TAOLightningModule):
         if self.mode == "instance":
             self.test_coco_evaluator = self._create_instance_evaluator("test")
 
+    def _test_eval_config(self):
+        """Return the config for the split used by standalone evaluation."""
+        test_cfg = self.cfg.dataset.test
+        has_test_annotations = any(
+            bool(getattr(test_cfg, field, ""))
+            for field in ("annot_file", "instance_json", "panoptic_json")
+        )
+        return test_cfg if has_test_annotations else self.cfg.dataset.val
+
     def test_step(self, batch, batch_idx):
         """Evaluate a standalone test batch using the configured task metric."""
         inputs = batch['images']
         if inputs.shape[0] > 1:
-            assert len(self.cfg.dataset.test.target_size) > 0, \
+            assert len(self._test_eval_config().target_size) > 0, \
                 "target_size must be set for batch evaluation."
         outputs = self.model(inputs)
         if self.mode == "instance":
