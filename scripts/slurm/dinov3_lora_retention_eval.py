@@ -72,6 +72,10 @@ def parse_args():
                              "so a shared cache would silently serve one arm's features "
                              "for another.")
     parser.add_argument("--source", default="teacher", choices=["teacher", "student"])
+    parser.add_argument("--no-faiss", action="store_true",
+                        help="Force the brute-force top-K path. The library's own docstring "
+                             "warns faiss-gpu can be unstable in this container, and the two "
+                             "paths are numerically identical, so this is the control.")
     return parser.parse_args()
 
 
@@ -147,7 +151,7 @@ def main():
         imagenet_normalize=True,
         max_train_samples=args.max_train_samples,
         amp=True,
-        use_faiss=True,
+        use_faiss=not args.no_faiss,
     ))
 
     ctx = EvalContext(
@@ -175,6 +179,7 @@ def main():
             "crop": args.crop,
             "normalization": "imagenet",
             "max_train_samples": args.max_train_samples,
+            "use_faiss": not args.no_faiss,
             "train_root": args.train_root,
             "val_root": args.val_root,
             "note": ("max_train_samples changes absolute accuracy, so this number is only "
