@@ -17,6 +17,9 @@ from nvidia_tao_pytorch.core.tlt_logging import logging
 from nvidia_tao_pytorch.multimodal.clip.model.adapters.base import (
     BaseCLIPAdapter,
 )
+from nvidia_tao_pytorch.multimodal.clip.model.logit_calibration import (
+    configure_source_logit_calibration,
+)
 from nvidia_tao_pytorch.multimodal.clip.model.tokenizers import (
     SigLIP2WrappedTokenizer,
     CLIPCompatibleTokenizer,
@@ -26,14 +29,19 @@ from nvidia_tao_pytorch.multimodal.clip.model.tokenizers import (
 class SigLIP2(BaseCLIPAdapter):
     """Adapter to make backbone_v2.siglip2 compatible with CLIP training.
 
+    Calibration is owned by the wrapped Hugging Face model.
+
     This wraps the backbone_v2 SigLIP2Wrapper to provide the same interface
     as the CLIP SigLIP2Wrapper for training compatibility.
 
     Args:
         backbone_model: The backbone_v2 SigLIP2 model
         processor: HuggingFace processor for tokenization
-        logit_scale_init: Initial value for logit scale parameter
-        logit_bias_init: Initial value for logit bias parameter
+        logit_scale_init: Optional raw scale override; None preserves native
+            calibration.
+        logit_bias_init: Optional bias override; None preserves native
+            calibration.
+        loss_type: Contrastive loss family used for missing-value fallback
         freeze_vision_encoder: Freeze vision encoder parameters
         freeze_text_encoder: Freeze text encoder parameters
         canonicalize_text: Apply text canonicalization before tokenization
@@ -43,19 +51,29 @@ class SigLIP2(BaseCLIPAdapter):
         self,
         backbone_model,
         processor,
-        logit_scale_init=2.3026,
-        logit_bias_init=-10.0,
+        logit_scale_init=None,
+        logit_bias_init=None,
         freeze_vision_encoder=False,
         freeze_text_encoder=False,
         canonicalize_text=False,
+        loss_type='siglip',
     ):
         """Initialize SigLIP2 adapter."""
         super().__init__(
-            logit_scale_init=logit_scale_init,
-            logit_bias_init=logit_bias_init,
+            loss_type=loss_type,
+            owns_logit_parameters=False,
         )
 
         self.backbone = backbone_model
+        configure_source_logit_calibration(
+            self.backbone.inner,
+            logit_scale_init=logit_scale_init,
+            logit_bias_init=logit_bias_init,
+            loss_type=loss_type,
+            bias_required=True,
+        )
+        self.logit_scale_max = self.backbone.inner.logit_scale_max
+
         self.processor = processor
         self.freeze_vision_encoder = freeze_vision_encoder
         self.freeze_text_encoder = freeze_text_encoder
@@ -71,6 +89,16 @@ class SigLIP2(BaseCLIPAdapter):
 
         # Log parameters
         self._log_parameters()
+
+    @property
+    def logit_scale(self):
+        """Return the canonical Hugging Face raw logit scale."""
+        return self.backbone.inner.logit_scale
+
+    @property
+    def logit_bias(self):
+        """Return the canonical Hugging Face logit bias."""
+        return self.backbone.inner.logit_bias
 
     def _configure_trainable_params(self):
         """Configure trainable params based on freeze settings."""

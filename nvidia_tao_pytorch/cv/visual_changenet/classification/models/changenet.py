@@ -27,6 +27,7 @@ from nvidia_tao_pytorch.core.tlt_logging import logger
 from nvidia_tao_pytorch.core.utils.pos_embed_interpolation import interpolate_patch_embed, interpolate_pos_embed
 from nvidia_tao_pytorch.core.utils.ptm_utils import load_pretrained_weights
 from nvidia_tao_pytorch.cv.backbone_v2.dino_v2 import DINOV2
+from nvidia_tao_pytorch.cv.backbone_v2.dino_v3 import validate_dinov3_checkpoint
 from nvidia_tao_pytorch.cv.visual_changenet.backbone.dino_v2 import vit_model_dict
 from nvidia_tao_pytorch.cv.visual_changenet.backbone.dino_v3 import dinov3_model_dict
 from nvidia_tao_pytorch.cv.visual_changenet.backbone.fan import fan_model_dict
@@ -425,12 +426,20 @@ class ChangeNetClassify(nn.Module):
 
         freeze_at = None
         if freeze_backbone:
-            if pretrained_backbone_path is None:
+            if not pretrained_backbone_path and 'dinov3' not in self.model_name:
                 raise ValueError("You shouldn't freeze a model without specifying pretrained_backbone_path")
             freeze_at = "all"
 
+        use_dinov3_hf_weights = (
+            freeze_backbone and
+            not pretrained_backbone_path and
+            'dinov3' in self.model_name
+        )
+
         if get_global_rank() == 0:
             logger.info(f"Number of output classes: {output_nc}")
+            if use_dinov3_hf_weights:
+                logger.info("Loading frozen DINOv3 backbone weights from timm/Hugging Face")
 
         if 'fan' in self.model_name:
             assert (output_shape[0] % feature_strides[-1] == 0) and (output_shape[1] % feature_strides[-1] == 0), 'Input image size must be a multiple of 16'
@@ -465,11 +474,13 @@ class ChangeNetClassify(nn.Module):
                     resolution=output_shape[0],
                     activation_checkpoint=activation_checkpoint,
                     use_summary_token=use_summary_token,
+                    pretrained=use_dinov3_hf_weights,
                     freeze_at=freeze_at,
                     export=export,
                 )
             elif self.difference_module == 'euclidean':
                 self.backbone = dinov3_model_dict[self.model_name](
+                    pretrained=use_dinov3_hf_weights,
                     freeze_at=freeze_at,
                     export=export,
                 )
@@ -506,6 +517,8 @@ class ChangeNetClassify(nn.Module):
                     target_patch_size=14,
                     target_resolution=518,
                 )
+            if 'dinov3' in self.model_name:
+                validate_dinov3_checkpoint(state_dict)
             msg = self.backbone.load_state_dict(state_dict, strict=False)
             if get_global_rank() == 0:
                 logger.info(f"Loaded pretrained weights from {pretrained_backbone_path}")
@@ -639,6 +652,7 @@ def build_model(experiment_config,
                     "vit_base_dinov3": [768, 768, 768, 768],
                     "vit_large_dinov3": [1024, 1024, 1024, 1024],
                     "vit_huge_plus_dinov3": [1280, 1280, 1280, 1280],
+                    "vit_7b_dinov3": [4096, 4096, 4096, 4096],
                     "c_radio_p1_vit_huge_patch16_224_mlpnorm": [1280, 1280, 1280, 1280],
                     "c_radio_p2_vit_huge_patch16_224_mlpnorm": [1280, 1280, 1280, 1280],
                     "c_radio_p3_vit_huge_patch16_224_mlpnorm": [1280, 1280, 1280, 1280],

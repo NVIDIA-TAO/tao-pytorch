@@ -264,9 +264,10 @@ class VideoCLIPPlModel(TAOLightningModule):
             else clip_loss
         )
 
-        if self.preservation_loss is not None and batch is not None:
+        preservation_loss = getattr(self, "preservation_loss", None)
+        if preservation_loss is not None and batch is not None:
             image, text = batch[0], batch[1]
-            pres_losses = self.preservation_loss(
+            pres_losses = preservation_loss(
                 image_features, text_features, image, text
             )
             total_loss = contrastive_value + pres_losses['preservation_total']

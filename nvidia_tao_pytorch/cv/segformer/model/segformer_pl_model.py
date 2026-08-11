@@ -12,6 +12,7 @@ import torch
 import torch.optim as optim
 from torch.optim import lr_scheduler
 
+from nvidia_tao_pytorch.core.distributed.comm import get_global_rank
 from nvidia_tao_pytorch.core.lightning.tao_lightning_module import TAOLightningModule
 from nvidia_tao_pytorch.core.path_utils import expand_path
 import nvidia_tao_pytorch.core.loggers.api_logging as status_logging
@@ -333,12 +334,12 @@ class SegFormerPlModel(TAOLightningModule):
 
     def _collect_epoch_states(self):
         """Collect evaluation metrics for each epoch (train, val, test)"""
-        scores, mean_score_dict = self.running_metric.get_scores()
+        scores, mean_score_dict = self.running_metric.get_scores(device=self.device)
         self.epoch_acc = scores['mf1']
         # message = 'Scores per class'
-        self.log_dict(scores, on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
+        self.log_dict(scores, on_step=False, on_epoch=True, prog_bar=False, sync_dist=False)
         # message = 'Mean scores for all classes: '
-        self.log_dict(mean_score_dict, on_step=False, on_epoch=True, sync_dist=True)
+        self.log_dict(mean_score_dict, on_step=False, on_epoch=True, sync_dist=False)
         return scores, mean_score_dict
 
     def _prepare_batch(self, batch):
@@ -373,17 +374,25 @@ class SegFormerPlModel(TAOLightningModule):
         )
         return loss
 
+    def _write_status_kpis(self, kpis, message):
+        """Write status KPIs from the global rank-zero process only."""
+        if get_global_rank() != 0:
+            return
+        self.status_logging_dict = kpis
+        status_logger = status_logging.get_status_logger()
+        status_logger.kpi = self.status_logging_dict
+        status_logger.write(
+            message=message,
+            status_level=status_logging.Status.RUNNING,
+        )
+
     def on_train_epoch_end(self):
         """Log Training metrics to status.json"""
         average_train_loss = self.trainer.logged_metrics["train_loss_epoch"].item()
 
-        self.status_logging_dict = {}
-        self.status_logging_dict["train_loss"] = average_train_loss
-
-        status_logging.get_status_logger().kpi = self.status_logging_dict
-        status_logging.get_status_logger().write(
-            message="Train metrics generated.",
-            status_level=status_logging.Status.RUNNING
+        self._write_status_kpis(
+            {"train_loss": average_train_loss},
+            "Train metrics generated.",
         )
 
     def on_validation_epoch_start(self) -> None:
@@ -407,24 +416,23 @@ class SegFormerPlModel(TAOLightningModule):
         # FLUSHING VALIDATION EPOCH METRICS
         if not self.trainer.sanity_checking:
             scores, mean_scores = self._collect_epoch_states()  # logs all evaluation metrics
-            self.log("val_acc", scores['acc'], on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
-            self.log("val_miou", scores['miou'], on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+            self.log("val_acc", scores['acc'], on_step=False, on_epoch=True, prog_bar=True, sync_dist=False)
+            self.log("val_miou", scores['miou'], on_step=False, on_epoch=True, prog_bar=True, sync_dist=False)
         self._clear_cache()
 
         average_val_loss = self.trainer.logged_metrics["val_loss"].item()
 
         if not self.trainer.sanity_checking:
-            self.status_logging_dict = {}
-            self.status_logging_dict["val_loss"] = average_val_loss
-            self.status_logging_dict["val_acc"] = scores['acc']
-            self.status_logging_dict["val_miou"] = scores['miou']
-            self.status_logging_dict["val_mf1"] = scores['mf1']
-            self.status_logging_dict["val_mprecision"] = mean_scores['mprecision']
-            self.status_logging_dict["val_mrecall"] = mean_scores['mrecall']
-            status_logging.get_status_logger().kpi = self.status_logging_dict
-            status_logging.get_status_logger().write(
-                message="Eval metrics generated.",
-                status_level=status_logging.Status.RUNNING
+            self._write_status_kpis(
+                {
+                    "val_loss": average_val_loss,
+                    "val_acc": scores['acc'],
+                    "val_miou": scores['miou'],
+                    "val_mf1": scores['mf1'],
+                    "val_mprecision": mean_scores['mprecision'],
+                    "val_mrecall": mean_scores['mrecall'],
+                },
+                "Eval metrics generated.",
             )
 
         pl.utilities.memory.garbage_collection_cuda()
@@ -453,16 +461,15 @@ class SegFormerPlModel(TAOLightningModule):
         """Test epoch end."""
         scores, mean_scores = self._collect_epoch_states()  # needed for update metrics
 
-        self.status_logging_dict = {}
-        self.status_logging_dict["test_acc"] = scores['acc']
-        self.status_logging_dict["test_miou"] = scores['miou']
-        self.status_logging_dict["test_mf1"] = scores['mf1']
-        self.status_logging_dict["test_mprecision"] = mean_scores['mprecision']
-        self.status_logging_dict["test_mrecall"] = mean_scores['mrecall']
-        status_logging.get_status_logger().kpi = self.status_logging_dict
-        status_logging.get_status_logger().write(
-            message="Test metrics generated.",
-            status_level=status_logging.Status.RUNNING
+        self._write_status_kpis(
+            {
+                "test_acc": scores['acc'],
+                "test_miou": scores['miou'],
+                "test_mf1": scores['mf1'],
+                "test_mprecision": mean_scores['mprecision'],
+                "test_mrecall": mean_scores['mrecall'],
+            },
+            "Test metrics generated.",
         )
 
     def predict_step(self, batch, batch_idx):

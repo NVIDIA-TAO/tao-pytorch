@@ -13,6 +13,7 @@ import h5py
 import numpy as np
 import pytest
 import torch
+import torch.nn as nn
 from PIL import Image
 
 import nvidia_tao_pytorch.multimodal.clip.scripts.evaluate as evaluate_script
@@ -35,6 +36,7 @@ from nvidia_tao_pytorch.multimodal.clip.scripts.export import (
 )
 from nvidia_tao_pytorch.multimodal.clip.scripts.train import (
     _RankLocalDDPStrategy,
+    _load_pretrained_model_state,
 )
 
 
@@ -74,6 +76,32 @@ class TestRankLocalDDPSetup:
             timeout=timeout,
         )
         assert "device_id" not in init_dist.call_args.kwargs
+
+
+@pytest.mark.multimodal_unit
+class TestPretrainedCalibrationLoad:
+    """Test trusted calibration restoration from model-only weights."""
+
+    def test_loaded_scale_refreshes_ceiling(self):
+        """A successfully loaded canonical scale may raise a stale cap."""
+        from nvidia_tao_pytorch.multimodal.clip.model.logit_calibration import (
+            DEFAULT_MAX_LOGIT_SCALE,
+        )
+
+        model = nn.Module()
+        model.logit_scale = nn.Parameter(torch.tensor(3.0))
+        model.logit_scale_max = DEFAULT_MAX_LOGIT_SCALE
+        restored_state = {'logit_scale': torch.tensor(5.5)}
+
+        with patch(
+            'nvidia_tao_pytorch.multimodal.clip.scripts.train.'
+            'load_pretrained_weights',
+            return_value=restored_state,
+        ):
+            _load_pretrained_model_state(model, 'weights.pth')
+
+        assert model.logit_scale.item() == pytest.approx(5.5)
+        assert model.logit_scale_max == pytest.approx(5.5)
 
 
 @pytest.mark.multimodal_unit

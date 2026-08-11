@@ -199,11 +199,18 @@ def inject_lora(model, peft_config):
                 f"targeted by name.)"
             )
 
-    # Phase 3: Unfreeze logit_scale and logit_bias
-    if hasattr(model, 'logit_scale'):
-        model.logit_scale.requires_grad = True
-    if hasattr(model, 'logit_bias'):
-        model.logit_bias.requires_grad = True
+    # Phase 3: Unfreeze the canonical logit calibration parameters. An adapter
+    # either owns them directly or exposes them through get_logit_*_parameter
+    # when calibration is held centrally (see model/logit_calibration.py), so
+    # ask the getter first and fall back to the attribute.
+    for logit_name in ('logit_scale', 'logit_bias'):
+        getter = getattr(model, f'get_{logit_name}_parameter', None)
+        logit_param = (
+            getter() if callable(getter)
+            else getattr(model, logit_name, None)
+        )
+        if isinstance(logit_param, nn.Parameter):
+            logit_param.requires_grad = True
 
     # Compute stats
     total_params = sum(p.numel() for p in model.parameters())
