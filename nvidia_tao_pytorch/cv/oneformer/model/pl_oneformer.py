@@ -14,6 +14,10 @@ from torch.nn import functional as F
 from torch.optim.lr_scheduler import MultiStepLR
 from nvidia_tao_pytorch.core.lightning.tao_lightning_module import TAOLightningModule
 import nvidia_tao_pytorch.core.loggers.api_logging as status_logging
+from nvidia_tao_pytorch.core.utils.ptm_utils import (
+    StateDictAdapter,
+    load_pretrained_weights as load_ptm_state_dict,
+)
 import json
 import os
 import cv2
@@ -27,6 +31,17 @@ from nvidia_tao_pytorch.cv.mask2former.utils.metrics import total_intersect_over
 from nvidia_tao_pytorch.cv.mask2former.utils.d2.visualizer import ColorMode, Visualizer
 from nvidia_tao_pytorch.cv.mask2former.utils.d2.catalog import MetadataCatalog
 from nvidia_tao_pytorch.cv.mask2former.utils.d2.structures import Instances
+from nvidia_tao_pytorch.cv.oneformer.utils.checkpoint import (
+    match_pretrained_state_dict,
+)
+from nvidia_tao_pytorch.cv.oneformer.utils.metric_reduction import (
+    distributed_sum_array,
+    summarize_semantic_iou,
+)
+from nvidia_tao_pytorch.cv.oneformer.utils.panoptic_quality import (
+    panoptic_quality_stats,
+    summarize_panoptic_quality,
+)
 
 
 def rgetattr(obj, attr, *args):
@@ -72,6 +87,14 @@ class OneformerPlModule(TAOLightningModule):
         self.checkpoint_filename = "oneformer_model"
         self.status_logging_dict = {}
         self.mode = self.cfg.inference.mode.lower()
+        self.evaluation_task = str(
+            getattr(self.cfg.evaluate, "task", "semantic")
+        ).lower()
+        if self.evaluation_task not in {"semantic", "panoptic"}:
+            raise ValueError(
+                "OneFormer evaluate.task must be either 'semantic' or "
+                f"'panoptic'; got {self.evaluation_task!r}."
+            )
         if not self.model_config.export:
             metadata = self.get_metadata()
             self.metadata = MetadataCatalog.get("custom").set(
@@ -168,6 +191,63 @@ class OneformerPlModule(TAOLightningModule):
             logging.info(
                 f"The backbone weights were loaded successfully. {successful_keys_count} keys loaded out of {total_keys}."
             )
+
+    def load_pretrained_weights(self, pm=None):
+        """Load a full OneFormer transfer checkpoint into ``self.model``.
+
+        TAO Lightning checkpoints store model parameters below ``state_dict``
+        with a leading ``model.`` prefix. Public checkpoints may instead expose
+        ``state_dict`` or ``model`` directly. The common PTM loader handles
+        those containers and encrypted TAO checkpoints; shape-aware matching
+        then excludes only genuinely incompatible transfer heads.
+
+        Args:
+            pm: Local path to a resolved OneFormer checkpoint.
+
+        Returns:
+            A JSON-serializable state-dictionary match report, or ``None`` when
+            no checkpoint path is supplied.
+        """
+        if not pm:
+            return None
+        if not os.path.isfile(pm):
+            raise FileNotFoundError(f"OneFormer pretrained model was not found: {pm}")
+
+        adapter = StateDictAdapter()
+        adapter.add("oneformer", "model.")
+        source_state = load_ptm_state_dict(
+            pm,
+            map_location="cpu",
+            weights_only=False,
+            ptm_adapter=adapter,
+        )
+        compatible_state, report = match_pretrained_state_dict(
+            source_state,
+            self.model.state_dict(),
+        )
+        if report.loaded_key_count == 0:
+            raise RuntimeError(
+                "The OneFormer pretrained checkpoint has no parameters compatible "
+                "with the configured model."
+            )
+
+        incompatible_keys = self.model.load_state_dict(compatible_state, strict=False)
+        if incompatible_keys.unexpected_keys:
+            raise RuntimeError(
+                "Unexpected OneFormer keys remained after checkpoint matching: "
+                f"{sorted(incompatible_keys.unexpected_keys)}"
+            )
+        logging.info(
+            "Loaded %d/%d OneFormer checkpoint tensors from %s "
+            "(missing=%d, unexpected=%d, shape_incompatible=%d).",
+            report.loaded_key_count,
+            report.target_key_count,
+            pm,
+            len(report.missing_keys),
+            len(report.unexpected_keys),
+            len(report.incompatible_shape_keys),
+        )
+        return report.to_dict()
 
     def _build_model(self):
         # Opt-in deterministic MSDeformAttn path (no-op unless precise_msda=True).
@@ -553,11 +633,12 @@ class OneformerPlModule(TAOLightningModule):
         average_train_loss = self.trainer.logged_metrics["train_loss_epoch"].item()
         self.status_logging_dict = {}
         self.status_logging_dict["train_loss"] = average_train_loss
-        status_logging.get_status_logger().kpi = self.status_logging_dict
-        status_logging.get_status_logger().write(
-            message="Train metrics generated.",
-            status_level=status_logging.Status.RUNNING
-        )
+        if self.trainer.is_global_zero:
+            status_logging.get_status_logger().kpi = self.status_logging_dict
+            status_logging.get_status_logger().write(
+                message="Train metrics generated.",
+                status_level=status_logging.Status.RUNNING
+            )
 
     def _get_val_dataset_names(self):
         """Return dataset names from the data module, falling back to indices."""
@@ -582,37 +663,70 @@ class OneformerPlModule(TAOLightningModule):
     def _eval_step(self, batch):
         """Shared inference logic for validation and test steps."""
         inputs = batch["images"]
-        segms = batch["sem_segs"]
-        tasks = batch["tasks"]
+        tasks = [
+            f"The task is {self.evaluation_task}"
+            for _ in range(inputs.shape[0])
+        ]
         outputs = self.model(inputs, tasks=tasks, texts=None)
 
         mask_cls_results = outputs["pred_logits"]
         mask_pred_results = outputs["pred_masks"]
-        pred_masks = self.batch_semantic_inference(mask_cls_results, mask_pred_results)
 
-        mask_pred_resize = F.interpolate(
-            pred_masks,
+        if self.evaluation_task == "semantic":
+            pred_masks = self.batch_semantic_inference(
+                mask_cls_results, mask_pred_results
+            )
+            mask_pred_resize = F.interpolate(
+                pred_masks,
+                size=(inputs.shape[-2], inputs.shape[-1]),
+                mode="bilinear",
+                align_corners=False,
+            )
+
+            pred_semseg = torch.argmax(mask_pred_resize, dim=1).cpu().numpy()
+            area_intersect, area_union, area_pred_label, area_label = (
+                total_intersect_over_union(
+                    pred_semseg,
+                    batch["sem_segs"].cpu().numpy(),
+                    self.num_classes,
+                    ignore_index=2**self.n_bits - 1,
+                    reduce_zero_label=False,
+                )
+            )
+            return {
+                "area_intersect": area_intersect,
+                "area_union": area_union,
+                "area_pred_label": area_pred_label,
+                "area_label": area_label,
+            }
+
+        if "panoptic_segs" not in batch or "panoptic_segments_info" not in batch:
+            raise ValueError(
+                "Panoptic evaluation requires panoptic ID maps and segments_info "
+                "from the OneFormer evaluation dataloader."
+            )
+        resized_masks = F.interpolate(
+            mask_pred_results,
             size=(inputs.shape[-2], inputs.shape[-1]),
             mode="bilinear",
             align_corners=False,
         )
-
-        pred_semseg = torch.argmax(mask_pred_resize, dim=1).cpu().numpy()
-        area_intersect, area_union, area_pred_label, area_label = (
-            total_intersect_over_union(
-                pred_semseg,
-                segms.cpu().numpy(),
+        stats = np.zeros((self.num_classes, 4), dtype=np.float64)
+        for mask_cls, mask_pred, gt_seg, gt_info in zip(
+            mask_cls_results,
+            resized_masks,
+            batch["panoptic_segs"],
+            batch["panoptic_segments_info"],
+        ):
+            pred_seg, pred_info = self.panoptic_inference(mask_cls, mask_pred)
+            stats += panoptic_quality_stats(
+                pred_seg.detach().cpu().numpy(),
+                pred_info,
+                gt_seg.detach().cpu().numpy(),
+                gt_info,
                 self.num_classes,
-                ignore_index=2**self.n_bits - 1,
-                reduce_zero_label=False,
             )
-        )
-        return {
-            "area_intersect": area_intersect,
-            "area_union": area_union,
-            "area_pred_label": area_pred_label,
-            "area_label": area_label,
-        }
+        return {"panoptic_stats": stats}
 
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
         """Perform a validation step."""
@@ -621,86 +735,173 @@ class OneformerPlModule(TAOLightningModule):
         return metrics
 
     def _compute_and_log_metrics(self, outputs_by_dl, dataset_names, prefix=""):
-        """Compute IoU metrics per dataloader and combined, then log them.
+        """Globally reduce sufficient statistics, then compute task metrics.
 
         Args:
             outputs_by_dl: dict mapping dataloader_idx -> list of metric dicts.
             dataset_names: list of human-readable names (or None for single dataset).
             prefix: optional prefix for logged metric keys (e.g. "test_").
         """
-        multi = dataset_names is not None and len(outputs_by_dl) > 1
-        combined_intersect, combined_union, combined_label = 0, 0, 0
-
+        # Lightning can invoke this hook on a rank that received no samples.
+        # Still enter every configured dataloader's collective with zero local
+        # statistics so that ranks cannot diverge or deadlock.
+        if dataset_names is not None:
+            expected_indices = range(len(dataset_names))
+        else:
+            expected_indices = (0,)
+        outputs_by_dl = {
+            index: outputs_by_dl.get(index, []) for index in expected_indices
+        }
+        multi = len(outputs_by_dl) > 1
         self.status_logging_dict = {}
 
-        for dl_idx in sorted(outputs_by_dl.keys()):
-            total_intersect, total_union, total_label = 0, 0, 0
-            for out in outputs_by_dl[dl_idx]:
-                total_intersect += out["area_intersect"]
-                total_union += out["area_union"]
-                total_label += out["area_label"]
+        if self.evaluation_task == "panoptic":
+            self._compute_and_log_panoptic_metrics(
+                outputs_by_dl, dataset_names, prefix, multi
+            )
+            return
+        self._compute_and_log_semantic_metrics(
+            outputs_by_dl, dataset_names, prefix, multi
+        )
 
-            combined_intersect += total_intersect
-            combined_union += total_union
-            combined_label += total_label
+    def _global_semantic_stats(self, outputs):
+        """Globally sum semantic confusion statistics for one dataloader."""
+        local = np.zeros((3, self.num_classes), dtype=np.float64)
+        for output in outputs:
+            local[0] += output["area_intersect"]
+            local[1] += output["area_union"]
+            local[2] += output["area_label"]
+        reduced = distributed_sum_array(local, device=self.device)
+        return reduced[0], reduced[1], reduced[2]
 
-            if multi:
-                ds_name = dataset_names[dl_idx]
-                iou = total_intersect / total_union
-                miou = float(np.nanmean(iou))
-                acc = float(total_intersect.sum() / total_label.sum())
-                self.log(
-                    f"{prefix}mIoU/{ds_name}", miou,
-                    on_step=False, on_epoch=True, prog_bar=False, sync_dist=True,
-                    add_dataloader_idx=False,
-                )
-                self.log(
-                    f"{prefix}all_acc/{ds_name}", acc,
-                    on_step=False, on_epoch=True, prog_bar=False, sync_dist=True,
-                    add_dataloader_idx=False,
-                )
-                self.status_logging_dict[f"mIoU/{ds_name}"] = miou
-                self.status_logging_dict[f"ACC/{ds_name}"] = acc
+    def _global_panoptic_stats(self, outputs):
+        """Globally sum additive PQ statistics for one dataloader."""
+        local = np.zeros((self.num_classes, 4), dtype=np.float64)
+        for output in outputs:
+            local += output["panoptic_stats"]
+        return distributed_sum_array(local, device=self.device)
 
-                if self.iou_per_class:
-                    class_names = self.metadata.stuff_classes
-                    for i, class_iou in enumerate(iou):
-                        if i < len(class_names):
-                            cname = class_names[i].replace(" ", "_")
-                            self.log(
-                                f"{prefix}{cname}/{ds_name}", class_iou,
-                                on_step=False, on_epoch=True, prog_bar=False, sync_dist=True,
-                                add_dataloader_idx=False,
-                            )
-
-        combined_iou = combined_intersect / combined_union
-        combined_miou = float(np.nanmean(combined_iou))
-        combined_acc = float(combined_intersect.sum() / combined_label.sum())
-
+    def _log_value(self, name, value, *, prog_bar=False):
+        """Log a metric already made identical across all distributed ranks."""
         self.log(
-            f"{prefix}mIoU", combined_miou,
-            on_step=False, on_epoch=True, prog_bar=True, sync_dist=True,
+            name,
+            value,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=prog_bar,
+            sync_dist=False,
             add_dataloader_idx=False,
         )
-        self.log(
-            f"{prefix}all_acc", combined_acc,
-            on_step=False, on_epoch=True, prog_bar=True, sync_dist=True,
-            add_dataloader_idx=False,
-        )
-        self.status_logging_dict[f"{prefix}mIoU"] = combined_miou
-        self.status_logging_dict[f"{prefix}ACC_all"] = combined_acc
+
+    def _record_semantic_summary(
+        self, stats, prefix="", dataset_name=None, prog_bar=False
+    ):
+        """Log one semantic summary from globally reduced statistics."""
+        summary = summarize_semantic_iou(*stats)
+        suffix = f"/{dataset_name}" if dataset_name else ""
+        miou_key = f"{prefix}mIoU{suffix}"
+        accuracy_key = f"{prefix}all_acc{suffix}"
+        self._log_value(miou_key, summary["mIoU"], prog_bar=prog_bar)
+        self._log_value(accuracy_key, summary["all_acc"], prog_bar=prog_bar)
+        if dataset_name:
+            # Preserve the existing semantic status-key contract.
+            self.status_logging_dict[f"mIoU/{dataset_name}"] = summary["mIoU"]
+            self.status_logging_dict[f"ACC/{dataset_name}"] = summary["all_acc"]
+        else:
+            self.status_logging_dict[f"{prefix}mIoU"] = summary["mIoU"]
+            self.status_logging_dict[f"{prefix}ACC_all"] = summary["all_acc"]
 
         if self.iou_per_class:
-            class_names = self.metadata.stuff_classes
-            for i, class_iou in enumerate(combined_iou):
-                if i < len(class_names):
-                    cname = class_names[i].replace(" ", "_")
-                    self.log(
-                        f"{prefix}{cname}", class_iou,
-                        on_step=False, on_epoch=True, prog_bar=False, sync_dist=True,
-                        add_dataloader_idx=False,
-                    )
-                    self.status_logging_dict[f"IoU_{cname}"] = float(class_iou)
+            for index, class_iou in enumerate(summary["iou"]):
+                if index >= len(self.metadata.stuff_classes) or np.isnan(class_iou):
+                    continue
+                class_name = self.metadata.stuff_classes[index].replace(" ", "_")
+                class_key = f"{prefix}{class_name}{suffix}"
+                self._log_value(class_key, float(class_iou))
+                if dataset_name is None:
+                    self.status_logging_dict[f"IoU_{class_name}"] = float(class_iou)
+        return summary
+
+    def _compute_and_log_semantic_metrics(
+        self, outputs_by_dl, dataset_names, prefix, multi
+    ):
+        """Compute semantic metrics after global sufficient-statistic reduction."""
+        combined = np.zeros((3, self.num_classes), dtype=np.float64)
+        for dl_idx in sorted(outputs_by_dl.keys()):
+            stats = self._global_semantic_stats(outputs_by_dl[dl_idx])
+            combined += np.stack(stats)
+            if multi:
+                ds_name = dataset_names[dl_idx]
+                self._record_semantic_summary(
+                    stats, prefix=prefix, dataset_name=ds_name
+                )
+        self._record_semantic_summary(
+            (combined[0], combined[1], combined[2]),
+            prefix=prefix,
+            prog_bar=True,
+        )
+
+    def _panoptic_thing_flags(self):
+        """Return the model's contiguous thing/stuff category partition."""
+        thing_ids = set(self.metadata.thing_dataset_id_to_contiguous_id.values())
+        return np.asarray(
+            [category_id in thing_ids for category_id in range(self.num_classes)],
+            dtype=bool,
+        )
+
+    def _record_panoptic_summary(
+        self, stats, prefix="", dataset_name=None, prog_bar=False
+    ):
+        """Log one task-correct PQ summary from globally reduced statistics."""
+        summary = summarize_panoptic_quality(
+            stats,
+            self._panoptic_thing_flags(),
+            self.metadata.stuff_classes,
+        )
+        suffix = f"/{dataset_name}" if dataset_name else ""
+        for metric_name in (
+            "PQ",
+            "SQ",
+            "RQ",
+            "PQ_th",
+            "SQ_th",
+            "RQ_th",
+            "PQ_st",
+            "SQ_st",
+            "RQ_st",
+        ):
+            key = f"{prefix}{metric_name}{suffix}"
+            self._log_value(
+                key,
+                summary[metric_name],
+                prog_bar=prog_bar and metric_name == "PQ",
+            )
+            self.status_logging_dict[key] = summary[metric_name]
+
+        if self.iou_per_class:
+            for class_name, class_metrics in summary["per_class"].items():
+                safe_name = class_name.replace(" ", "_")
+                key = f"{prefix}PQ_{safe_name}{suffix}"
+                self._log_value(key, class_metrics["PQ"])
+                if dataset_name is None:
+                    self.status_logging_dict[key] = class_metrics["PQ"]
+        return summary
+
+    def _compute_and_log_panoptic_metrics(
+        self, outputs_by_dl, dataset_names, prefix, multi
+    ):
+        """Compute COCO-style PQ after global sufficient-statistic reduction."""
+        combined = np.zeros((self.num_classes, 4), dtype=np.float64)
+        for dl_idx in sorted(outputs_by_dl.keys()):
+            stats = self._global_panoptic_stats(outputs_by_dl[dl_idx])
+            combined += stats
+            if multi:
+                self._record_panoptic_summary(
+                    stats,
+                    prefix=prefix,
+                    dataset_name=dataset_names[dl_idx],
+                )
+        self._record_panoptic_summary(combined, prefix=prefix, prog_bar=True)
 
     def on_validation_epoch_end(self):
         """Process validation epoch end -- reports per-dataset and combined metrics."""
@@ -710,7 +911,7 @@ class OneformerPlModule(TAOLightningModule):
         )
         self.validation_step_outputs.clear()
 
-        if not self.trainer.sanity_checking:
+        if not self.trainer.sanity_checking and self.trainer.is_global_zero:
             status_logging.get_status_logger().kpi = self.status_logging_dict
             status_logging.get_status_logger().write(
                 message="Eval metrics generated.",
@@ -736,11 +937,12 @@ class OneformerPlModule(TAOLightningModule):
         )
         self.test_step_outputs.clear()
 
-        status_logging.get_status_logger().kpi = self.status_logging_dict
-        status_logging.get_status_logger().write(
-            message="Test metrics generated.",
-            status_level=status_logging.Status.RUNNING
-        )
+        if self.trainer.is_global_zero:
+            status_logging.get_status_logger().kpi = self.status_logging_dict
+            status_logging.get_status_logger().write(
+                message="Test metrics generated.",
+                status_level=status_logging.Status.RUNNING
+            )
 
     def predict_step(self, batch, batch_idx):
         """Perform a prediction step."""
