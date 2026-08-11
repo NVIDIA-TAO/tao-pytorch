@@ -69,6 +69,12 @@ def run_experiment(experiment_config, key):
         model.pretrained_weights = pretrained_path
         model.restore_pretrained_weights()
 
+    # LoRA injection sits between the pretrained load and `fit` on purpose: after the load so
+    # `restore_pretrained_weights` only ever sees stock backbone keys, and before `fit` so
+    # Lightning resume checkpoints and any distributed wrapping see the final module tree.
+    # No-op unless model.lora.enable is set.
+    model.inject_lora_adapters()
+
     trainer = Trainer(**trainer_kwargs,
                       num_nodes=num_nodes,
                       strategy=_resolve_strategy(experiment_config),

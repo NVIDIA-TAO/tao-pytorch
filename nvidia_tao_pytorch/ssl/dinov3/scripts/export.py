@@ -18,6 +18,7 @@ from nvidia_tao_pytorch.core.tlt_logging import logging
 from nvidia_tao_pytorch.config.dinov3.default_config import ExperimentConfig
 from nvidia_tao_pytorch.ssl.dinov3.model.pl_model import DinoV3PlModel
 from nvidia_tao_pytorch.ssl.dinov3.utils.checkpoint_remap import (
+    merge_lora_state_dict,
     TAO_ONLY_KEYS,
     extract_backbone_state_dict,
     is_full_checkpoint,
@@ -38,6 +39,11 @@ def _restore_export_checkpoint(model, model_path):
         model_path (str): Export checkpoint path.
     """
     state_dict = model._load_pretrained_state_dict(model_path)
+    # Export builds a plain backbone with no adapters, so any lora_* keys would simply be
+    # dropped as unexpected and the ONNX would be the frozen base model rather than the
+    # adapted one. Fold them in first; no-op for full-fine-tune checkpoints. This also keeps
+    # the traced graph free of LoRA ops, i.e. stock DINOv3 topology.
+    state_dict = merge_lora_state_dict(state_dict)
     if not is_full_checkpoint(state_dict):
         model.restore_pretrained_weights(preloaded_state_dict=state_dict)
         return
