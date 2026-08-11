@@ -54,7 +54,8 @@ class VideoCLIPModelConfig:
                     "siglip2-so400m-patch16-384, siglip2-so400m-patch16-512; "
                     "OpenCLIP: ViT-L-14-SigLIP-CLIPA-224, ViT-L-14-SigLIP-CLIPA-336, "
                     "ViT-H-14-SigLIP-CLIPA-224; "
-                    "InternVideo2: internvideo2-clip-l14.",
+                    "InternVideo2: internvideo2-clip-l14 (the only supported "
+                    "InternVideo2 size).",
         display_name="Model Type",
     )
     adaptor_name: Optional[str] = STR_FIELD(

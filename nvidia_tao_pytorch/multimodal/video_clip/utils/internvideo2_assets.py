@@ -31,6 +31,19 @@ DEFAULT_INTERNVIDEO2CLIP_REVISION = (
     "449f7ea1d7d3b70b6b5630e70d238b44d3b7aaac"
 )
 
+# SCOPE: InternVideo2-CLIP support here is L14 only.
+#
+# The repo above also ships the S14 and B14 distillations (clip/{S14,B14}/... and
+# stage1/{S14,B14}/{S14,B14}_dist_1B_stage2/...), but they are deliberately not
+# offered: the filenames below and the architecture in
+# build_internvideo2_l14_config (patch 14, embed_dim 1024, depth 24, num_heads 16,
+# clip_embed_dim 768, align_dim 512) are L14-specific, and upstream publishes no
+# config for the distilled sizes -- InternVideo2/multi_modality/configs/model.py
+# leaves VisionEncoders empty and the vision class carries only 1B defaults
+# (embed_dim 1408, depth 40). Supporting another size therefore means deriving its
+# architecture from its checkpoint, adding its filenames, and pinning its own
+# revision. See also internvideo2clip_model_configs in utils/model_configs.py.
+
 # Known filenames inside the InternVideo2-CLIP HF repo / MobileCLIP release.
 VISION_FILENAME = "stage1/L14/L14_dist_1B_stage2/pytorch_model.bin"
 CLIP_HEAD_FILENAME = "clip/L14/pytorch_model.bin"

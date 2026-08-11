@@ -16,6 +16,9 @@
 
 """ CLIP supported model configs. """
 
+# InternVideo2-CLIP: L14 only. Unlike the siglip2/radio/openclip tables below,
+# this one is intentionally single-entry -- see utils/internvideo2_assets.py for
+# why the other distilled sizes in the same HF repo are not offered.
 internvideo2clip_model_configs = {
     "internvideo2-clip-l14": {
         "model_type": "internvideo2clip",
