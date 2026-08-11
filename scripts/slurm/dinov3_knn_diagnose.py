@@ -103,6 +103,36 @@ def main():
                     break
         return torch.cat(embs)[:args.n], torch.cat(lbls)[:args.n], info.num_classes
 
+    print("\n=== 0. input + token-index sanity ===")
+    # Two candidates left after teacher/labels/resolution were cleared: the input pipeline is
+    # feeding garbage, or the summary is being read from the wrong token. Distinguish them by
+    # (a) inspecting the actual pixels and (b) comparing CLS against mean-pooled patch tokens.
+    info0 = build_classification_loader(
+        "image_folder", f"{IMAGENET}/val", batch_size=16, num_workers=4, crop=args.crop,
+        mean=IMAGENET_MEAN, std=IMAGENET_STD, distributed=False, max_samples=16,
+        num_classes=1000,
+    )
+    batch0 = next(iter(info0.loader))
+    imgs0 = batch0["image"].to(device)
+    print(f"  input tensor: shape={tuple(imgs0.shape)} dtype={imgs0.dtype}")
+    print(f"    per-image mean spread: {imgs0.mean(dim=(1,2,3)).min():.3f} .. "
+          f"{imgs0.mean(dim=(1,2,3)).max():.3f}")
+    print(f"    per-image std  spread: {imgs0.std(dim=(1,2,3)).min():.3f} .. "
+          f"{imgs0.std(dim=(1,2,3)).max():.3f}")
+    print("    (images should differ from each other; a tight spread means identical inputs)")
+
+    with torch.no_grad():
+        out = model.teacher.backbone(imgs0)
+    cls = out["x_norm_clstoken"]
+    pat = out["x_norm_patchtokens"]
+    print(f"  x_norm_clstoken: {tuple(cls.shape)}   x_norm_patchtokens: {tuple(pat.shape)}")
+    for name, feat in (("CLS", cls if cls.dim() == 2 else cls[:, 0]),
+                       ("mean-patch", pat.mean(dim=1))):
+        n = torch.nn.functional.normalize(feat.float(), dim=1)
+        off = (n @ n.T).fill_diagonal_(0)
+        print(f"    {name:11s} pairwise cosine mean={off.mean():.4f} max={off.max():.4f}")
+    print("    (if mean-patch separates but CLS does not, the summary token index is wrong)")
+
     print("\n=== 1. embedding sanity (train split) ===")
     tr_e, tr_l, ncls = embed(f"{IMAGENET}/train", "train")
     print(f"  shape={tuple(tr_e.shape)} classes={ncls}")
