@@ -6,6 +6,9 @@
 
 import numpy as np
 import torch
+import torch.distributed as dist
+
+from nvidia_tao_pytorch.core.distributed.comm import is_dist_avail_and_initialized
 
 
 class MeanIoUMeter:
@@ -110,17 +113,47 @@ class MeanIoUMeter:
             total_area_label (np.ndarray): The ground truth histogram on
                 all classes.
         """
-        all_acc = total_area_intersect.sum() / total_area_label.sum()
-        iou = total_area_intersect / total_area_union
-        precision = total_area_intersect / total_area_pred_label
-        recall = total_area_intersect / total_area_label
-        f1 = 2 * recall * precision / (recall + precision)
+        total_area_intersect = np.asarray(total_area_intersect, dtype=np.float64)
+        total_area_union = np.asarray(total_area_union, dtype=np.float64)
+        total_area_pred_label = np.asarray(total_area_pred_label, dtype=np.float64)
+        total_area_label = np.asarray(total_area_label, dtype=np.float64)
+        if total_area_label.sum() == 0 and total_area_pred_label.sum() == 0:
+            raise ValueError("SegFormer metric statistics contain no evaluated pixels.")
 
-        all_acc = all_acc.astype(float)
-        iou = iou.astype(float)
-        precision = precision.astype(float)
-        recall = recall.astype(float)
-        f1 = f1.astype(float)
+        all_acc = float(
+            total_area_intersect.sum() / total_area_label.sum()
+            if total_area_label.sum() > 0
+            else 0.0
+        )
+        iou = np.divide(
+            total_area_intersect,
+            total_area_union,
+            out=np.full_like(total_area_union, np.nan),
+            where=total_area_union > 0,
+        )
+        precision = np.divide(
+            total_area_intersect,
+            total_area_pred_label,
+            out=np.full_like(total_area_pred_label, np.nan),
+            where=total_area_pred_label > 0,
+        )
+        recall = np.divide(
+            total_area_intersect,
+            total_area_label,
+            out=np.full_like(total_area_label, np.nan),
+            where=total_area_label > 0,
+        )
+        f1 = np.divide(
+            2 * recall * precision,
+            recall + precision,
+            out=np.full_like(recall, np.nan),
+            where=(recall + precision) > 0,
+        )
+
+        def _finite_mean(values):
+            """Return a stable mean when some classes are absent."""
+            finite = values[np.isfinite(values)]
+            return float(finite.mean()) if finite.size else 0.0
 
         cls_iou = {}
         cls_precision = {}
@@ -132,13 +165,16 @@ class MeanIoUMeter:
             cls_recall["recall_" + str(i)] = np.nan_to_num(recall[i])
             cls_f1["f1_" + str(i)] = np.nan_to_num(f1[i])
 
-        score_dict = {"acc": all_acc, "miou": np.nanmean(iou), "mf1": np.nanmean(f1)}
+        score_dict = {"acc": all_acc, "miou": _finite_mean(iou), "mf1": _finite_mean(f1)}
         score_dict.update(cls_iou)
         score_dict.update(cls_f1)
         score_dict.update(cls_precision)
         score_dict.update(cls_recall)
 
-        mean_score_dict = {"mprecision": np.nanmean(precision), "mrecall": np.nanmean(recall)}
+        mean_score_dict = {
+            "mprecision": _finite_mean(precision),
+            "mrecall": _finite_mean(recall),
+        }
         return score_dict, mean_score_dict
 
     def update_cm(self, pr: torch.Tensor, gt: torch.Tensor):
@@ -150,8 +186,48 @@ class MeanIoUMeter:
             )
             self.update(area_intersect, area_union, area_pred_label, area_label)
 
-    def get_scores(self):
-        """get scores from confusion matrix"""
+    def _globally_reduce_sufficient_statistics(self, device=None):
+        """Sum metric sufficient statistics across all distributed ranks."""
+        if not self.initialized:
+            # Empty ranks still participate in the collective and contribute
+            # zeros, preventing asymmetric DDP failures on empty splits.
+            statistics = np.zeros((4, self.n_class), dtype=np.float64)
+        else:
+            statistics = np.stack(
+                (
+                    self.area_intersect,
+                    self.area_union,
+                    self.area_pred_label,
+                    self.area_label,
+                )
+            )
+        if not is_dist_avail_and_initialized():
+            return tuple(statistics)
+
+        if device is None:
+            backend = str(dist.get_backend()).lower()
+            device = (
+                torch.device("cuda", torch.cuda.current_device())
+                if "nccl" in backend
+                else torch.device("cpu")
+            )
+        reduced = torch.as_tensor(
+            statistics,
+            dtype=torch.float64,
+            device=device,
+        )
+        dist.all_reduce(reduced, op=dist.ReduceOp.SUM)
+        return tuple(reduced.cpu().numpy())
+
+    def get_scores(self, device=None):
+        """Get globally aggregated scores from sufficient statistics."""
+        area_intersect, area_union, area_pred_label, area_label = (
+            self._globally_reduce_sufficient_statistics(device=device)
+        )
         return self.total_area_to_metrics(
-            self.area_intersect, self.area_union, self.area_pred_label, self.area_label, n_class=self.n_class
+            area_intersect,
+            area_union,
+            area_pred_label,
+            area_label,
+            n_class=self.n_class,
         )
