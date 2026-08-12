@@ -26,6 +26,13 @@ The rewrite is built on ``onnxscript.rewriter._ir_utils`` and ``_fusion_utils``,
 which are private and carry no API-stability guarantee, so an onnxscript bump
 can make it silently match nothing. These tests fail loudly when that happens
 instead of leaving it to surface as an fp16 accuracy collapse at deploy time.
+
+Newer exporters (torch 2.11 / onnxscript 0.6 and up) already fuse RMSNorm in
+their own ONNX optimization pass, leaving the helper nothing to match. That is
+fine -- the natively fused node carries the same ``axis=-1`` and
+``stash_type=FLOAT`` the helper produces. So these tests assert the END STATE of
+the graph rather than which component did the fusing; the loud failure is still
+there, because a graph nobody fused keeps its ``Pow``/``ReduceMean`` chain.
 """
 
 import onnx
@@ -90,15 +97,13 @@ def test_fuse_rms_normalization_rewrites_every_subgraph(tmp_path):
     n_layers = 3
     onnx_path = _export_decomposed(tmp_path, n_layers=n_layers)
 
-    before = _op_types(onnx_path)
-    assert before.get("RMSNormalization", 0) == 0, (
-        "torch exported a fused RMSNormalization on its own; the fusion "
-        "helper may no longer be needed"
-    )
+    # The exporter may already have fused some or all of them; the helper is
+    # only responsible for whatever is left over.
+    pre_fused = _op_types(onnx_path).get("RMSNormalization", 0)
 
     fused = _fuse_rms_normalization(onnx_path)
 
-    assert fused == n_layers
+    assert pre_fused + fused == n_layers
     after = _op_types(onnx_path)
     assert after.get("RMSNormalization", 0) == n_layers
     # The decomposition is gone, not merely shadowed by the fused node.
@@ -115,7 +120,8 @@ def test_fused_node_stashes_in_fp32(tmp_path):
     """
     pytest.importorskip("onnxscript")
     onnx_path = _export_decomposed(tmp_path, n_layers=1)
-    assert _fuse_rms_normalization(onnx_path) == 1
+    pre_fused = _op_types(onnx_path).get("RMSNormalization", 0)
+    assert pre_fused + _fuse_rms_normalization(onnx_path) == 1
 
     graph = onnx.load(onnx_path, load_external_data=False).graph
     node = next(n for n in graph.node if n.op_type == "RMSNormalization")
