@@ -100,6 +100,135 @@ def tao_to_timm(key):
     return key
 
 
+# ---------------------------------------------------------------------------------------
+# HuggingFace ``DINOv3ViTModel`` -> TAO
+#
+# The HF export carries the *same weights* as the timm release -- verified bit-exact:
+# ``cat([q_proj, k_proj, v_proj])`` equals timm's fused ``attn.qkv.weight`` with zero
+# difference, as do ``patch_embed`` and ``cls_token``. Only the serialization differs, in two
+# ways the timm remapper cannot express:
+#
+#   1. Different names throughout (``embeddings.*`` / ``layer.N.*`` rather than bare / ``blocks.N.*``).
+#      Under the timm rules exactly two keys coincide -- ``norm.weight`` / ``norm.bias`` -- which
+#      is why an HF checkpoint used to load 2 of 211 tensors and train from a near-random backbone.
+#   2. Attention stored as **separate** q/k/v projections rather than a fused ``qkv``. That is a
+#      tensor transform, not a rename, so it needs its own pass (cf. ``fuse_timm_swiglu_fc1``).
+#
+# Bonus: the HF export includes ``mask_token``, which the timm release omits (TAO otherwise
+# initializes it randomly for iBOT).
+# ---------------------------------------------------------------------------------------
+
+# Exact full-key renames, HF name -> TAO name.
+_EXACT_HF_TO_TAO = {
+    "embeddings.cls_token": "cls_token",
+    "embeddings.mask_token": "mask_token",
+    "embeddings.register_tokens": "register_tokens",
+    "embeddings.patch_embeddings.weight": "patch_embed.proj.weight",
+    "embeddings.patch_embeddings.bias": "patch_embed.proj.bias",
+}
+# Per-block suffix renames, HF suffix -> TAO suffix (applied after ``layer.N`` -> ``blocks.N``).
+_SUFFIX_HF_TO_TAO = {
+    ".attention.o_proj": ".attn.proj",
+    ".layer_scale1.lambda1": ".ls1.gamma",
+    ".layer_scale2.lambda1": ".ls2.gamma",
+    ".mlp.up_proj": ".mlp.fc1",
+    ".mlp.down_proj": ".mlp.fc2",
+}
+# HF attention biases that TAO/timm deliberately do not have. DINOv3 ships these as all-zero
+# (the config advertises query/value bias, but the tensors are zero), so dropping them is
+# lossless -- ``convert_hf_to_tao`` asserts that rather than assuming it.
+_HF_DROPPED_BIASES = (".attention.q_proj.bias", ".attention.k_proj.bias", ".attention.v_proj.bias")
+
+
+def is_hf_dinov3_state_dict(state_dict):
+    """Whether a state dict is a HuggingFace ``DINOv3ViTModel`` export.
+
+    Args:
+        state_dict (Mapping): Candidate state dict.
+
+    Returns:
+        bool: True for the HF layout (``embeddings.*`` / ``layer.N.*`` keys).
+    """
+    keys = list(state_dict)
+    return any(k.startswith("embeddings.") for k in keys) and any(
+        k.startswith("layer.") for k in keys
+    )
+
+
+def hf_to_tao(key):
+    """Translate a HuggingFace DINOv3 parameter name to the TAO ``ssl/dinov3`` name.
+
+    Does not handle the q/k/v fusion, which is not a rename; see :func:`convert_hf_to_tao`.
+
+    Args:
+        key (str): HF-side parameter name.
+
+    Returns:
+        str: TAO-side parameter name (unchanged if no rule applies).
+    """
+    if key in _EXACT_HF_TO_TAO:
+        return _EXACT_HF_TO_TAO[key]
+    if key.startswith("layer."):
+        key = "blocks." + key[len("layer."):]
+    for src, dst in _SUFFIX_HF_TO_TAO.items():
+        if src in key:
+            key = key.replace(src, dst)
+            break
+    return key
+
+
+def convert_hf_to_tao(hf_state_dict, strict_zero_bias=True):
+    """Convert a HuggingFace DINOv3 state dict into TAO ``ssl/dinov3`` naming and layout.
+
+    Renames every key, fuses the separate ``q_proj``/``k_proj``/``v_proj`` weights into the
+    single ``blocks.N.attn.qkv.weight`` that the TAO ViT expects, and drops the q/k/v biases
+    that the TAO/timm architecture does not carry.
+
+    Args:
+        hf_state_dict (Mapping): State dict in HuggingFace ``DINOv3ViTModel`` layout.
+        strict_zero_bias (bool): If True, assert the dropped q/k/v biases are all zero. DINOv3
+            ships them zero, so a nonzero value means the checkpoint genuinely needs a
+            bias-carrying attention and silently discarding it would corrupt the model.
+
+    Returns:
+        dict: State dict in TAO naming, loadable into ``DinoV3VisionTransformer``.
+
+    Raises:
+        ValueError: If ``strict_zero_bias`` and a dropped bias is nonzero, or if a block has an
+            incomplete q/k/v triple.
+    """
+    out = {}
+    block_ids = sorted(
+        {int(k.split(".")[1]) for k in hf_state_dict if k.startswith("layer.")}
+    )
+
+    for block in block_ids:
+        parts = []
+        for proj in ("q_proj", "k_proj", "v_proj"):
+            name = f"layer.{block}.attention.{proj}.weight"
+            if name not in hf_state_dict:
+                raise ValueError(
+                    f"HF checkpoint is missing {name}; cannot fuse block {block}'s attention."
+                )
+            parts.append(hf_state_dict[name])
+        out[f"blocks.{block}.attn.qkv.weight"] = torch.cat(parts, dim=0).contiguous()
+
+    for key, weight in hf_state_dict.items():
+        if ".attention.q_proj.weight" in key or ".attention.k_proj.weight" in key or \
+                ".attention.v_proj.weight" in key:
+            continue  # already fused above
+        if any(dropped in key for dropped in _HF_DROPPED_BIASES):
+            if strict_zero_bias and weight.abs().max().item() > 0:
+                raise ValueError(
+                    f"HF checkpoint has a nonzero {key} but the TAO/timm DINOv3 attention has no "
+                    "qkv bias. Dropping it would change the model; refusing to convert silently."
+                )
+            continue
+        out[hf_to_tao(key)] = weight.contiguous()
+
+    return out
+
+
 def fuse_timm_swiglu_fc1(timm_state_dict):
     """Fuse timm's split SwiGLU projections into the ``GluMlp`` fused ``fc1``.
 

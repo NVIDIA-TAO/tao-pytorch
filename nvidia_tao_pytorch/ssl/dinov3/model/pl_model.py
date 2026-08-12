@@ -32,7 +32,7 @@ from nvidia_tao_pytorch.core.distributed.comm import get_global_rank
 from nvidia_tao_pytorch.core.tlt_logging import logging
 from nvidia_tao_pytorch.ssl.nvdinov2.model.head import DinoHead
 from nvidia_tao_pytorch.ssl.nvdinov2.model.loss import DinoV2Loss
-from nvidia_tao_pytorch.ssl.nvdinov2.model.pl_model import DinoV2PlModel
+from nvidia_tao_pytorch.ssl.nvdinov2.model.pl_model import CustomModelCheckpoint, DinoV2PlModel
 from nvidia_tao_pytorch.ssl.dinov3.model.vit import DinoV3VisionTransformer, SwiGLUFusedFull
 from nvidia_tao_pytorch.ssl.dinov3.model.loss import GramLoss, ClsPreservationLoss
 from nvidia_tao_pytorch.ssl.dinov3.model.lora import (
@@ -43,7 +43,9 @@ from nvidia_tao_pytorch.ssl.dinov3.model.lora import (
 )
 from nvidia_tao_pytorch.ssl.dinov3.utils.checkpoint_remap import (
     TAO_ONLY_KEYS,
+    convert_hf_to_tao,
     fuse_timm_swiglu_fc1,
+    is_hf_dinov3_state_dict,
     merge_lora_state_dict,
     timm_to_tao,
 )
@@ -652,23 +654,35 @@ class DinoV3PlModel(DinoV2PlModel):
 
     @staticmethod
     def _remap_dinov3_state_dict(timm_state_dict, reference_state_dict):
-        """Translate timm DINOv3 ViT keys to ``DinoV3VisionTransformer`` keys.
+        """Translate a public DINOv3 checkpoint's keys to ``DinoV3VisionTransformer`` keys.
 
-        Renames the LayerScale gammas (``blocks.N.gamma_1/2`` -> ``blocks.N.ls1/ls2.gamma``)
-        and the register parameter (``reg_token`` -> ``register_tokens``); all other keys
-        (``cls_token``, ``patch_embed.proj.*``, ``blocks.N.{norm1,norm2,attn.qkv,attn.proj,
-        mlp.fc1,mlp.fc2}.*``, ``norm.*``) map by identity. timm carries no ``pos_embed`` (RoPE
-        replaces it) and no QKV bias. Only keys present in the reference state dict with a
-        matching shape are kept.
+        Accepts either public serialization of the same weights:
+
+        * **timm** (default): renames the LayerScale gammas (``blocks.N.gamma_1/2`` ->
+          ``blocks.N.ls1/ls2.gamma``) and the register parameter (``reg_token`` ->
+          ``register_tokens``); all other keys map by identity.
+        * **HuggingFace** ``DINOv3ViTModel``: detected by its ``embeddings.*`` / ``layer.N.*``
+          keys and converted up front, which also fuses the separate q/k/v projections into the
+          ``attn.qkv`` this ViT expects. Without that pass an HF file matches only ``norm.weight``
+          and ``norm.bias`` -- 2 of 211 tensors -- and training would start from an almost
+          entirely random backbone while still logging a successful load.
+
+        timm carries no ``pos_embed`` (RoPE replaces it) and no QKV bias. Only keys present in
+        the reference state dict with a matching shape are kept.
 
         Args:
-            timm_state_dict (dict): Source timm/Meta DINOv3 state dict.
+            timm_state_dict (dict): Source timm/Meta/HF DINOv3 state dict.
             reference_state_dict (dict): ``self.student.backbone.state_dict()`` (target keys).
 
         Returns:
             Tuple[dict, list]: ``(remapped, unmapped)`` where ``remapped`` is loadable into
             the backbone and ``unmapped`` lists source keys that had no shape-matching target.
         """
+        # HuggingFace layout: rename + fuse q/k/v before anything else, so the rest of this
+        # function sees ordinary timm-style keys.
+        if is_hf_dinov3_state_dict(timm_state_dict):
+            timm_state_dict = convert_hf_to_tao(timm_state_dict)
+
         # Source carries adapters but the destination backbone cannot hold them (inference,
         # export, or the start of a fresh run before injection): fold them into the base so the
         # weights loaded are the *adapted* model. Without this the adapter keys are simply
@@ -920,3 +934,64 @@ class DinoV3PlModel(DinoV2PlModel):
                 losses.append(preservation_cfg.cls_cosine_weight * cls_cosine)
 
         return losses
+
+    def configure_callbacks(self):
+        """Configure callbacks, honouring ``train.checkpoint_interval_unit``.
+
+        The inherited NVDINOv2 implementation wires the periodic checkpoint with
+        ``every_n_epochs=checkpoint_interval`` only -- it never reads
+        ``checkpoint_interval_unit``, unlike the core base class, which supports both. That is
+        harmless for NVDINOv2's own recipes, but it makes step-unit checkpointing silently
+        no-op: a spec asking for "every 1000 steps" becomes "every 1000 *epochs*", i.e. never.
+
+        On a time-capped scheduler that is not a cosmetic difference. Whenever a single epoch
+        takes longer than the per-job wall-clock limit -- routine for SSL pretraining on a large
+        corpus -- an epoch boundary is never reached inside one allocation. With epoch-only
+        checkpointing a requeued run then restarts from step 0 every time and never finishes,
+        and because the periodic callback is also what writes the full Lightning checkpoint that
+        resume consumes, there is nothing to resume *from* either. Step-unit checkpointing is
+        what makes a requeue/resume loop viable at all.
+
+        The periodic callback is rebuilt through its public constructor rather than by poking
+        Lightning's private ``_every_n_*`` attributes, so this does not depend on Lightning
+        internals.
+
+        Returns:
+            Sequence[Callback]: the inherited callbacks, with the periodic checkpoint
+            re-wired to step cadence when the spec asks for it.
+        """
+        callbacks = super().configure_callbacks()
+
+        unit = self.experiment_spec["train"].get("checkpoint_interval_unit", "epoch")
+        if unit != "step":
+            return callbacks
+
+        interval = self.experiment_spec["train"]["checkpoint_interval"]
+        results_dir = self.experiment_spec["results_dir"]
+
+        rebuilt = []
+        for callback in callbacks:
+            # The periodic checkpoint is the unmonitored, keep-everything one. The best-metric
+            # callback (when enabled) is monitored, and TAOExceptionCheckpoint is a different
+            # class, so neither is touched.
+            if (isinstance(callback, CustomModelCheckpoint) and
+                    callback.monitor is None and
+                    callback.save_top_k == -1):
+                rebuilt.append(CustomModelCheckpoint(
+                    every_n_train_steps=interval,
+                    every_n_epochs=None,
+                    dirpath=results_dir,
+                    save_on_train_epoch_end=False,
+                    monitor=None,
+                    save_top_k=-1,
+                    save_last="link",
+                    filename="model_{epoch:03d}_{step:05d}",
+                    enable_version_counter=False,
+                ))
+                logging.info(
+                    "DINOv3: checkpointing every %d steps (checkpoint_interval_unit='step').",
+                    interval,
+                )
+            else:
+                rebuilt.append(callback)
+        return rebuilt
