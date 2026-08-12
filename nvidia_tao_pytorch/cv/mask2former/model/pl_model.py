@@ -26,6 +26,13 @@ from nvidia_tao_pytorch.cv.mask2former.utils.lr_scheduler import WarmupPolyLR
 from nvidia_tao_pytorch.cv.mask2former.utils.matcher import HungarianMatcher
 from nvidia_tao_pytorch.cv.mask2former.utils.metrics import total_intersect_over_union
 from nvidia_tao_pytorch.cv.mask2former.utils.solver import maybe_add_gradient_clipping
+from nvidia_tao_pytorch.cv.mask2former.utils.task_metrics import (
+    create_instance_evaluator,
+    finalize_instance_evaluator,
+    normalize_task_mode,
+    semantic_metric_names,
+    validate_instance_category_contract,
+)
 from nvidia_tao_pytorch.cv.mask2former.utils.d2.structures import Instances
 from nvidia_tao_pytorch.cv.mask2former.utils.d2.visualizer import ColorMode, Visualizer
 from nvidia_tao_pytorch.cv.mask2former.utils.d2.catalog import MetadataCatalog
@@ -58,7 +65,7 @@ class Mask2formerPlModule(TAOLightningModule):
         self.n_bits = 8
         self.num_classes = self.model_config.sem_seg_head.num_classes
         self.num_queries = self.model_config.mask_former.num_object_queries
-        self.mode = self.model_config.mode.lower()
+        self.mode = normalize_task_mode(self.model_config.mode)
         self.test_topk_per_image = self.model_config.test_topk_per_image
         self.overlap_threshold = self.model_config.overlap_threshold
         self.object_mask_threshold = self.model_config.object_mask_threshold
@@ -66,6 +73,9 @@ class Mask2formerPlModule(TAOLightningModule):
         self._build_model()
         self._build_criterion()
         self.status_logging_dict = {}
+        self.val_coco_evaluator = None
+        self.test_coco_evaluator = None
+        self._instance_category_ids = {}
         if not self.model_config.export:
             metadata = self.get_metadata()
             self.metadata = MetadataCatalog.get("custom").set(
@@ -373,17 +383,16 @@ class Mask2formerPlModule(TAOLightningModule):
         )
 
     def on_validation_epoch_start(self) -> None:
-        """
-        Validation epoch start.
-        Reset coco evaluator for each epoch.
-        """
+        """Reset task-correct validation metric state for each epoch."""
         self.validation_outputs = []
+        self.val_coco_evaluator = None
+        if self.mode == "instance" and not self.trainer.sanity_checking:
+            self.val_coco_evaluator = self._create_instance_evaluator("val")
 
     def validation_step(self, batch, batch_idx):
         """Validation step."""
         inputs = batch['images']
         targets = batch['targets']
-        segms = batch['segms']
 
         batch_size = inputs.shape[0]
         if batch_size > 1:
@@ -394,97 +403,311 @@ class Mask2formerPlModule(TAOLightningModule):
         losses = self.criterion(outputs, targets)  # dict
         weight_dict = self.criterion.weight_dict
         val_loss = sum(losses[k] * weight_dict[k] for k in losses.keys() if k in weight_dict)
+        self.log(
+            "val_loss",
+            val_loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            sync_dist=True,
+            batch_size=batch_size,
+        )
 
-        mask_cls_results = outputs["pred_logits"]  # b, num_queries, nclasses+1
-        mask_pred_results = outputs["pred_masks"]  # b, num_queries, h//4, w//4
+        if self.mode == "instance":
+            if self.val_coco_evaluator is not None:
+                self.val_coco_evaluator.update(
+                    self._instance_predictions(outputs, batch, split="val")
+                )
+            return {'val_loss': val_loss}
 
-        pred_masks = self.batch_semantic_inference(mask_cls_results, mask_pred_results)  # nclasses, h//4, w//4
-
-        # For binary segmentation (num_classes=1), we need to threshold the single channel
-        # instead of using argmax, which always returns 0 for single-channel input
-        if self.num_classes == 1:
-            # pred_masks has shape (b, 1, h, w), threshold at 0.5 to get binary predictions
-            pred_semseg = (pred_masks[:, 0] > 0.5).long().cpu().numpy()
-        else:
-            pred_semseg = torch.argmax(pred_masks, axis=1).cpu().numpy()  # h//4, w//4
-
-        # For single class, ground truth labels are {0, 1}, predictions are {0, 1} after thresholding
-        # For multi-class, reduce_zero_label shifts ground truth to match 0-indexed predictions
-        reduce_zero = self.num_classes > 1
-
-        area_intersect, area_union, area_pred_label, area_label = \
-            total_intersect_over_union(pred_semseg,
-                                       segms.cpu().numpy(),
-                                       self.num_classes,
-                                       ignore_index=2 ** self.n_bits - 1,  # 0 for original
-                                       reduce_zero_label=reduce_zero)  # False for original
-        val_metrics = {
-            'val_loss': val_loss,
-            'area_intersect': area_intersect,
-            'area_union': area_union,
-            'area_pred_label': area_pred_label,
-            'area_label': area_label}
-        self.validation_outputs.append(val_metrics)
-        return val_metrics
-
-    def val_epoch_end(self):
-        """Common logic between validation/test epoch end"""
-        average_val_loss = 0.0
-        total_area_intersect, total_area_union = 0, 0
-        total_area_pred_label, total_area_label = 0, 0
-
-        for out in self.validation_outputs:
-            average_val_loss += out['val_loss'].item()
-            total_area_intersect += out['area_intersect']
-            total_area_union += out['area_union']
-            total_area_pred_label += out['area_pred_label']
-            total_area_label += out['area_label']
-
-        average_val_loss /= len(self.validation_outputs)
-        iou = total_area_intersect / total_area_union
-        miou = np.nanmean(iou)
-        all_acc = total_area_intersect.sum() / total_area_label.sum()
-        self.log("val_loss", average_val_loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
-        self.log("mIoU", miou, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
-        self.log("all_acc", all_acc, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
-
-        self.status_logging_dict = {}
-        self.status_logging_dict["val_loss"] = average_val_loss
-        self.status_logging_dict["mIoU"] = float(miou)
-        self.status_logging_dict["ACC_all"] = float(all_acc)
-
-        self.validation_outputs.clear()
+        metrics = self._semantic_batch_metrics(outputs, batch)
+        self.validation_outputs.append(metrics)
+        return {'val_loss': val_loss, **metrics}
 
     def on_validation_epoch_end(self):
-        """
-        Validation epoch end.
-        Compute mAP at the end of epoch.
-        """
-        self.val_epoch_end()
+        """Finalize and publish the validation metric for the configured task."""
+        if self.trainer.sanity_checking:
+            self.validation_outputs.clear()
+            self.val_coco_evaluator = None
+            return
 
-        if not self.trainer.sanity_checking:
-            status_logging.get_status_logger().kpi = self.status_logging_dict
-            status_logging.get_status_logger().write(
-                message="Eval metrics generated.",
-                status_level=status_logging.Status.RUNNING
+        if self.mode == "instance":
+            self.status_logging_dict = self._finalize_instance_metrics(
+                self.val_coco_evaluator,
+                split="val",
             )
+            self.val_coco_evaluator = None
+        else:
+            self.status_logging_dict = self._finalize_semantic_metrics(split="val")
+
+        val_loss = self._logged_metric_value("val_loss")
+        if val_loss is not None:
+            self.status_logging_dict["val_loss"] = val_loss
+        status_logging.get_status_logger().kpi = self.status_logging_dict
+        status_logging.get_status_logger().write(
+            message="Eval metrics generated.",
+            status_level=status_logging.Status.RUNNING
+        )
 
     def on_test_epoch_start(self):
-        """Test epoch start"""
-        self.on_validation_epoch_start()
+        """Reset task-correct standalone evaluation state."""
+        self.validation_outputs = []
+        self.test_coco_evaluator = None
+        if self.mode == "instance":
+            self.test_coco_evaluator = self._create_instance_evaluator("test")
+
+    def _test_eval_config(self):
+        """Return the config for the split used by standalone evaluation."""
+        test_cfg = self.cfg.dataset.test
+        has_test_annotations = any(
+            bool(getattr(test_cfg, field, ""))
+            for field in ("annot_file", "instance_json", "panoptic_json")
+        )
+        return test_cfg if has_test_annotations else self.cfg.dataset.val
 
     def test_step(self, batch, batch_idx):
-        """Test step"""
-        return self.validation_step(batch, batch_idx)
+        """Evaluate a standalone test batch using the configured task metric."""
+        inputs = batch['images']
+        if inputs.shape[0] > 1:
+            assert len(self._test_eval_config().target_size) > 0, \
+                "target_size must be set for batch evaluation."
+        outputs = self.model(inputs)
+        if self.mode == "instance":
+            self.test_coco_evaluator.update(
+                self._instance_predictions(outputs, batch, split="test")
+            )
+            return None
+
+        metrics = self._semantic_batch_metrics(outputs, batch)
+        self.validation_outputs.append(metrics)
+        return metrics
 
     def on_test_epoch_end(self):
-        """Test epoch end"""
-        self.val_epoch_end()
+        """Finalize and publish standalone task-correct metrics."""
+        if self.mode == "instance":
+            self.status_logging_dict = self._finalize_instance_metrics(
+                self.test_coco_evaluator,
+                split="test",
+                is_print=True,
+            )
+            self.test_coco_evaluator = None
+        else:
+            self.status_logging_dict = self._finalize_semantic_metrics(split="test")
+
         status_logging.get_status_logger().kpi = self.status_logging_dict
         status_logging.get_status_logger().write(
             message="Test metrics generated.",
             status_level=status_logging.Status.RUNNING
         )
+
+    def _dataset_for_split(self, split):
+        """Return the constructed validation/test dataset."""
+        dataset = getattr(self.trainer.datamodule, f"{split}_dataset", None)
+        if dataset is None:
+            raise RuntimeError(
+                f"Mask2Former {split} dataset is unavailable when metric "
+                "evaluation starts."
+            )
+        return dataset
+
+    def _create_instance_evaluator(self, split):
+        """Create a COCO mask evaluator and freeze category-index routing."""
+        dataset = self._dataset_for_split(split)
+        coco = getattr(dataset, "coco", None)
+        if coco is None:
+            raise ValueError(
+                "Mask2Former instance mode requires a COCO instance dataset "
+                f"for the {split} split."
+            )
+        category_ids = validate_instance_category_contract(coco, self.num_classes)
+        dataset_mapping = getattr(dataset, "contiguous_id_to_dataset_id", None)
+        expected_mapping = {
+            index: category_id for index, category_id in enumerate(category_ids)
+        }
+        if dataset_mapping != expected_mapping:
+            raise ValueError(
+                "Mask2Former dataset/model category mapping is missing or "
+                "inconsistent with the COCO annotation order."
+            )
+        self._instance_category_ids[split] = category_ids
+        return create_instance_evaluator(coco, self.num_classes)
+
+    def _instance_predictions(self, outputs, batch, split):
+        """Convert model masks to original-image COCO segmentation results."""
+        batch_info = batch.get("info")
+        if batch_info is None or len(batch_info) != batch['images'].shape[0]:
+            raise ValueError(
+                "Mask2Former instance evaluation requires per-image geometry "
+                "metadata from COCODataset."
+            )
+        category_ids = self._instance_category_ids.get(split)
+        if category_ids is None:
+            raise RuntimeError(
+                f"Mask2Former instance category mapping for {split} was not initialized."
+            )
+
+        mask_cls_results = outputs["pred_logits"]
+        mask_pred_results = F.interpolate(
+            outputs["pred_masks"],
+            size=batch['images'].shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        )
+        category_lookup = torch.as_tensor(
+            category_ids,
+            dtype=torch.long,
+            device=mask_cls_results.device,
+        )
+
+        predictions = {}
+        padded_height, padded_width = batch['images'].shape[-2:]
+        for mask_cls, mask_pred, info in zip(
+                mask_cls_results, mask_pred_results, batch_info):
+            resized_height, resized_width = info["resized_size"]
+            padding_height, padding_width = info["padding"]
+            if (
+                resized_height + padding_height != padded_height or
+                resized_width + padding_width != padded_width
+            ):
+                raise ValueError(
+                    "Mask2Former evaluation geometry metadata does not match "
+                    "the padded input tensor."
+                )
+            mask_pred = mask_pred[:, :resized_height, :resized_width]
+            mask_pred = F.interpolate(
+                mask_pred.unsqueeze(0),
+                size=tuple(info["original_size"]),
+                mode="bilinear",
+                align_corners=False,
+            )[0]
+            result = self.instance_inference(mask_cls, mask_pred)
+            labels = category_lookup[result.pred_classes]
+            predictions[int(info["image_id"])] = {
+                "masks": result.pred_masks,
+                "scores": result.scores,
+                "labels": labels,
+            }
+        return predictions
+
+    def _semantic_batch_metrics(self, outputs, batch):
+        """Compute one batch of semantic metrics for semantic/diagnostic use."""
+        pred_masks = self.batch_semantic_inference(
+            outputs["pred_logits"],
+            outputs["pred_masks"],
+        )
+        if self.num_classes == 1:
+            pred_semseg = (pred_masks[:, 0] > 0.5).long().cpu().numpy()
+        else:
+            pred_semseg = torch.argmax(pred_masks, axis=1).cpu().numpy()
+
+        area_intersect, area_union, area_pred_label, area_label = \
+            total_intersect_over_union(
+                pred_semseg,
+                batch['segms'].cpu().numpy(),
+                self.num_classes,
+                ignore_index=2 ** self.n_bits - 1,
+                reduce_zero_label=self.num_classes > 1,
+            )
+        return {
+            'area_intersect': area_intersect,
+            'area_union': area_union,
+            'area_pred_label': area_pred_label,
+            'area_label': area_label,
+        }
+
+    def _finalize_semantic_metrics(self, split):
+        """Globally aggregate semantic metrics and apply task-correct names."""
+        # UnrepeatedDistributedSampler can leave an individual rank without
+        # batches.  That rank must still enter the collective below with zero
+        # sufficient statistics; raising here would strand the other ranks in
+        # all_reduce during distributed validation/test.
+        aggregated = np.zeros((4, self.num_classes), dtype=np.float64)
+        for index, key in enumerate(
+            (
+                "area_intersect",
+                "area_union",
+                "area_pred_label",
+                "area_label",
+            )
+        ):
+            values = [np.asarray(item[key]) for item in self.validation_outputs]
+            if values:
+                aggregated[index] = np.sum(values, axis=0)
+        aggregate_tensor = torch.as_tensor(
+            aggregated,
+            dtype=torch.float64,
+            device=self.device,
+        )
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.all_reduce(
+                aggregate_tensor,
+                op=torch.distributed.ReduceOp.SUM,
+            )
+        (
+            total_area_intersect,
+            total_area_union,
+            _,
+            total_area_label,
+        ) = aggregate_tensor.cpu().numpy()
+
+        with np.errstate(divide='ignore', invalid='ignore'):
+            iou = total_area_intersect / total_area_union
+            miou = float(np.nanmean(iou))
+            all_acc = float(
+                total_area_intersect.sum() / total_area_label.sum()
+            )
+        if not np.isfinite(miou) or not np.isfinite(all_acc):
+            raise RuntimeError(
+                f"Mask2Former {split} semantic evaluation produced non-finite metrics."
+            )
+
+        miou_name, accuracy_name = semantic_metric_names(self.mode, split)
+        self.log(miou_name, miou, on_step=False, on_epoch=True,
+                 prog_bar=True, sync_dist=False)
+        self.log(accuracy_name, all_acc, on_step=False, on_epoch=True,
+                 prog_bar=True, sync_dist=False)
+        self.validation_outputs.clear()
+        status_accuracy_name = (
+            "ACC_all" if self.mode == "semantic" else accuracy_name
+        )
+        return {
+            miou_name: miou,
+            status_accuracy_name: all_acc,
+        }
+
+    def _finalize_instance_metrics(self, evaluator, split, is_print=False):
+        """Globally aggregate and publish COCO mask AP for instance mode."""
+        if evaluator is None:
+            raise RuntimeError(
+                f"Mask2Former {split} COCO segmentation evaluator is unavailable."
+            )
+        metrics = finalize_instance_evaluator(
+            evaluator,
+            split=split,
+            is_print=is_print,
+        )
+        for name, value in metrics.items():
+            self.log(
+                name,
+                value,
+                on_step=False,
+                on_epoch=True,
+                prog_bar=True,
+                sync_dist=True,
+            )
+        if split == "val":
+            self.log("current_epoch", self.current_epoch, sync_dist=True)
+        return {name: float(value) for name, value in metrics.items()}
+
+    def _logged_metric_value(self, name):
+        """Return one finite logged scalar as a Python float when available."""
+        value = self.trainer.logged_metrics.get(name)
+        if value is None:
+            return None
+        if hasattr(value, "item"):
+            value = value.item()
+        value = float(value)
+        return value if np.isfinite(value) else None
 
     def predict_step(self, batch, batch_idx):
         """Predict step. Inference."""

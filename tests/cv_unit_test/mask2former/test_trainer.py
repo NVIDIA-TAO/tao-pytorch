@@ -131,6 +131,8 @@ def _eval_spec():
     experiment_config.dataset.label_map = labelmap_file
     experiment_config.dataset.val.type = 'ade'
     experiment_config.dataset.val.annot_file = jsonl_path
+    experiment_config.dataset.test.type = 'ade'
+    experiment_config.dataset.test.annot_file = jsonl_path
 
     yield experiment_config
 
