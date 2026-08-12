@@ -77,6 +77,12 @@ setuptools.setup(
         # package at runtime; the catch-all patterns above are not recursive.
         'nvidia_tao_pytorch.multimodal.video_clip.model.backbones.internvideo2.backbones.internvideo2.mobileclip': [
             "configs/*.json"
+        ],
+        # experiment_specs/ is a plain data directory, not a package, so
+        # find_packages() skips it and the non-recursive catch-all above never
+        # reaches its YAML. Ship the reference specs explicitly.
+        'nvidia_tao_pytorch.multimodal.video_clip': [
+            "experiment_specs/*.yaml"
         ]
     },
     include_package_data=True,
