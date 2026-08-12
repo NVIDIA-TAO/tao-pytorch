@@ -58,7 +58,12 @@ class RoPEMemoryEfficientAttention(MemoryEfficientAttention):
             # the shared SDPA-based fallback (base MemoryEfficientAttention._fallback_attention) so
             # both SSL families get the same numerically-safe, fused compute; RoPE has already been
             # applied to q/k above. See bug 6460915.
-            x = self._fallback_attention(q, k, v)
+            #
+            # attn_bias is forwarded: the block concatenates its crop list into one sequence,
+            # so without the block-diagonal mask every image attends to every other image in
+            # the batch, which silently corrupts features wherever this fallback is the only
+            # available path.
+            x = self._fallback_attention(q, k, v, attn_bias)
 
         x = x.reshape(B, N, C)
         x = self.proj(x)
