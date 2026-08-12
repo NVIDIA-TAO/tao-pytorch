@@ -61,8 +61,8 @@ class RoPEMemoryEfficientAttention(MemoryEfficientAttention):
             #
             # attn_bias is forwarded: the block concatenates its crop list into one sequence,
             # so without the block-diagonal mask every image attends to every other image in
-            # the batch. That silently destroyed features on Hopper, where this path is the
-            # only one available (bug 6459926 forces xformers off).
+            # the batch, which silently corrupts features wherever this fallback is the only
+            # available path.
             x = self._fallback_attention(q, k, v, attn_bias)
 
         x = x.reshape(B, N, C)

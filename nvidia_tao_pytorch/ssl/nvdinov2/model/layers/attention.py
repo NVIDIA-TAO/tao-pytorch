@@ -27,20 +27,17 @@ class MemoryEfficientAttention(Attention):
         GPUs, where ``use_custom_attention`` is force-disabled for both SSL families. See bug 6460915
         and the MR !652 SDPA review.
 
-        ``attn_bias`` MUST be honoured. The SSL blocks concatenate their crop list into a
-        single sequence via ``get_attn_bias_and_cat`` -- so one "batch" row holds every image's
-        tokens end to end -- and the block-diagonal mask is the only thing preventing image i's
+        ``attn_bias`` must be honoured. The SSL blocks concatenate their crop list into a
+        single sequence via ``get_attn_bias_and_cat``, so one "batch" row holds every image's
+        tokens end to end, and the block-diagonal mask is the only thing preventing image i's
         tokens from attending to image j's. Dropping it silently blends the whole batch
-        together: features stop depending on their own image, and the damage grows with batch
-        size. Measured on H100 against timm's reference DINOv3, CLS cosine was 1.000 at batch 1,
-        0.658 at 2, 0.368 at 4 and 0.193 at 8, and ImageNet k-NN fell from 82.4% to 4.0%.
+        together, and the damage grows with batch size.
 
-        The mask is applied by **splitting**, not by materializing. A dense
+        The mask is applied by splitting rather than materializing. A dense
         ``[1, heads, N, N]`` mask is what xformers' structured ``BlockDiagonalMask`` exists to
-        avoid: for DINOv3 training (2 global crops at 512 px + 4 local at 112 px, batch 16) the
-        concatenated sequence is ~36k tokens, so the dense mask would be ~55 GiB and OOMs
-        immediately. Splitting back into per-crop blocks and attending within each is
-        mathematically identical and allocates nothing extra.
+        avoid -- at DINOv3's multi-crop sequence lengths it is tens of GiB and OOMs. Splitting
+        back into per-crop blocks and attending within each is mathematically identical, and
+        allocates nothing extra.
 
         Args:
             q, k, v: ``[B, N, num_heads, head_dim]`` (xformers layout, post QK-norm).
