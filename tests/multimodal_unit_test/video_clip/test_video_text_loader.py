@@ -28,14 +28,17 @@ from PIL import Image
 
 from nvidia_tao_pytorch.multimodal.video_clip.dataloader import (
     pl_video_clip_data_module,
+    video_decode,
     video_text_loader,
 )
 from nvidia_tao_pytorch.multimodal.video_clip.dataloader.pl_video_clip_data_module import (
     VideoCLIPDataModule,
 )
+from nvidia_tao_pytorch.multimodal.video_clip.dataloader.video_decode import (
+    _load_with_ffmpeg,
+)
 from nvidia_tao_pytorch.multimodal.video_clip.dataloader.video_text_loader import (
     VideoTextDataset,
-    _load_with_ffmpeg,
     get_video_text_dataloader,
     load_video_frames,
     load_video_text_entries,
@@ -258,13 +261,13 @@ class TestVideoTextDataset:
             }
 
         monkeypatch.setattr(
-            video_text_loader, "_pyav_decode_indices", fake_decode
+            video_decode, "_pyav_decode_indices", fake_decode
         )
         monkeypatch.setattr(
-            video_text_loader, "_pyav_stream_rate", lambda stream: 30.0
+            video_decode, "_pyav_stream_rate", lambda stream: 30.0
         )
         monkeypatch.setattr(
-            video_text_loader, "_pyav_stream_length", lambda stream, rate: 2
+            video_decode, "_pyav_stream_length", lambda stream, rate: 2
         )
 
         class FakeStream:
@@ -283,7 +286,7 @@ class TestVideoTextDataset:
             sys.modules, "av", SimpleNamespace(open=lambda path: FakeContainer())
         )
 
-        frames = video_text_loader._load_with_pyav(
+        frames = video_decode._load_with_pyav(
             "/tmp/fake.mp4",
             num_frames=2,
             start_time_sec=None,
@@ -309,13 +312,13 @@ class TestVideoTextDataset:
             }
 
         monkeypatch.setattr(
-            video_text_loader, "_pyav_decode_indices", fake_decode
+            video_decode, "_pyav_decode_indices", fake_decode
         )
         monkeypatch.setattr(
-            video_text_loader, "_pyav_stream_rate", lambda stream: 30.0
+            video_decode, "_pyav_stream_rate", lambda stream: 30.0
         )
         monkeypatch.setattr(
-            video_text_loader, "_pyav_stream_length", lambda stream, rate: 2
+            video_decode, "_pyav_stream_length", lambda stream, rate: 2
         )
 
         class FakeStream:
@@ -334,7 +337,7 @@ class TestVideoTextDataset:
             sys.modules, "av", SimpleNamespace(open=lambda path: FakeContainer())
         )
 
-        frames = video_text_loader._load_with_pyav(
+        frames = video_decode._load_with_pyav(
             "/tmp/fake.mp4",
             num_frames=4,
             start_time_sec=None,
@@ -386,7 +389,7 @@ class TestVideoTextDataset:
             return Result()
 
         monkeypatch.setattr(
-            video_text_loader,
+            video_decode,
             "_probe_video_with_ffmpeg",
             lambda video_path: (8, 1.0, 2, 2),
         )
