@@ -321,7 +321,10 @@ def launch(args, unknown_args, subtasks, network=None):
                 log_target.write(last_progress_bar_line + '\n')
                 log_target.flush()
             if proc.returncode == 0:
+                logging.info("Command completed successfully with return code 0")
                 process_passed = True
+            else:
+                logging.info(f"Command completed with return code {proc.returncode}")
 
     except (KeyboardInterrupt, SystemExit):
         logging.exception("Command was interrupted")
@@ -337,7 +340,7 @@ def launch(args, unknown_args, subtasks, network=None):
             "Schema validation error"
         ])
 
-        logging.exception(e)
+        logging.exception("Command encountered an exception")
         process_passed = False
 
     end = time()

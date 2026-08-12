@@ -3,10 +3,17 @@
 
 """Unit tests for RADIO adapter components."""
 
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
 import pytest
 import torch
 import torch.nn as nn
+
+from nvidia_tao_pytorch.multimodal.clip.model.logit_calibration import (
+    DEFAULT_MAX_LOGIT_SCALE,
+    register_logit_checkpoint_guard,
+)
 
 
 class MockRADIOModel(nn.Module):
@@ -64,6 +71,85 @@ class MockTextModel(nn.Module):
         return torch.randn(x.shape[0], self.embed_dim)
 
 
+class MockOpenCLIPTextModel(nn.Module):
+    """Production-faithful RADIO OpenCLIP text model with calibration."""
+
+    def __init__(self, has_bias=True, with_norm=True):
+        super().__init__()
+        self.transformer = nn.Linear(2, 2, bias=False)
+        if with_norm:
+            self.ln_final = nn.LayerNorm(2)
+        self.logit_scale = nn.Parameter(torch.tensor([3.75]))
+        if has_bias:
+            self.logit_bias = nn.Parameter(torch.tensor([-4.5]))
+
+
+class MockClipAdaptor(nn.Module):
+    """RADIO clip adaptor retaining its native OpenCLIP model."""
+
+    def __init__(self, has_bias=True, with_norm=True):
+        super().__init__()
+        self.oc_model = MockOpenCLIPTextModel(
+            has_bias=has_bias,
+            with_norm=with_norm,
+        )
+        self.tokenizer = lambda texts: torch.zeros(
+            len(texts), 2, dtype=torch.long
+        )
+
+
+class MockSigLIPAdaptor(nn.Module):
+    """RADIO SigLIP2 adaptor retaining only the text tower."""
+
+    def __init__(self):
+        super().__init__()
+        self.text_model = nn.Linear(2, 2, bias=False)
+        self.tokenizer = MagicMock()
+        self.tokenizer._proc = MagicMock()
+
+
+class MockLoadedRADIO(nn.Module):
+    """Minimal loaded RADIO model with registered adaptors."""
+
+    def __init__(self, name, adaptor):
+        super().__init__()
+        self.model = nn.Linear(2, 2, bias=False)
+        self.adaptors = nn.ModuleDict({name: adaptor})
+        self.make_preprocessor_external = MagicMock()
+
+
+def _build_radio(name='clip', adaptor=None, **kwargs):
+    """Build CRADIO around a production-shaped adaptor mock."""
+    from nvidia_tao_pytorch.multimodal.clip.model.adapters.radio import CRADIO
+
+    if adaptor is None:
+        adaptor = MockClipAdaptor()
+    radio = MockLoadedRADIO(name, adaptor)
+    with patch('torch.hub.load', return_value=radio):
+        model = CRADIO(
+            model_version='c-radio_v3-h',
+            adaptor_name=name,
+            **kwargs,
+        )
+    return model, radio, adaptor
+
+
+def _train_config():
+    """Return a small optimizer configuration."""
+    return SimpleNamespace(
+        optim=SimpleNamespace(
+            optimizer_type='adamw',
+            vision_lr=1e-3,
+            text_lr=2e-3,
+            weight_decay=0.01,
+            betas=[0.9, 0.999],
+            eps=1e-8,
+            warmup_steps=0,
+            scheduler='constant',
+        )
+    )
+
+
 @pytest.mark.multimodal_unit
 class TestRADIOAdapterMocked:
     """Test RADIO adapter mock components."""
@@ -78,27 +164,120 @@ class TestRADIOAdapterMocked:
         assert mock_radio.embed_dim == 1280
 
     def test_make_preprocessor_external_called(self):
-        """Test that CRADIO.__init__ calls make_preprocessor_external() to
-        avoid double-normalizing images (external transforms + internal
-        input_conditioner)."""
-        from unittest.mock import patch, MagicMock
+        """CRADIO externalizes preprocessing exactly once."""
+        _, radio, _ = _build_radio(loss_type='clip')
 
-        mock_radio = MockRADIOModel()
-        mock_radio.make_preprocessor_external = MagicMock()
+        radio.make_preprocessor_external.assert_called_once()
 
-        mock_adaptor = MagicMock()
-        mock_adaptor.tokenizer = MagicMock()
-        mock_adaptor.parameters.return_value = []
-        mock_radio.adaptors = {'clip': mock_adaptor}
+    def test_clip_reuses_one_native_pair_in_state_and_optimizer(self):
+        """RADIO OpenCLIP calibration is canonical and optimized once."""
+        from nvidia_tao_pytorch.multimodal.clip.utils.utils import (
+            build_optimizer,
+        )
 
-        with patch('torch.hub.load', return_value=mock_radio):
-            from nvidia_tao_pytorch.multimodal.clip.model.adapters.radio import CRADIO
-            model = CRADIO(
-                model_version='c-radio_v3-h',
-                adaptor_name='clip',
-            )
+        model, _, adaptor = _build_radio(loss_type='clip')
+        source = adaptor.oc_model
+        state = model.state_dict()
+        optimizer = build_optimizer(model, _train_config())
+        optimizer_params = [
+            param for group in optimizer.param_groups
+            for param in group['params']
+        ]
 
-        mock_radio.make_preprocessor_external.assert_called_once()
+        assert model.get_logit_scale_parameter() is source.logit_scale
+        assert model.get_logit_bias_parameter() is source.logit_bias
+        assert source.logit_scale.shape == torch.Size([])
+        assert source.logit_bias.shape == torch.Size([])
+        assert [key for key in state if key.endswith('logit_scale')] == [
+            'radio_model.adaptors.clip.oc_model.logit_scale'
+        ]
+        assert [key for key in state if key.endswith('logit_bias')] == [
+            'radio_model.adaptors.clip.oc_model.logit_bias'
+        ]
+        assert not any(key.startswith('adaptor.') for key in state)
+        assert sum(param is source.logit_scale for param in optimizer_params) == 1
+        assert sum(param is source.logit_bias for param in optimizer_params) == 1
+        register_logit_checkpoint_guard(model)
+        result = model.load_state_dict(state, strict=True)
+        assert not result.missing_keys
+        assert not result.unexpected_keys
+
+    @pytest.mark.parametrize('loss_type', ['clip', 'siglip'])
+    def test_clip_preserves_native_bias_absence(self, loss_type):
+        """RADIO preserves a native OpenCLIP model without logit bias."""
+        from nvidia_tao_pytorch.multimodal.clip.utils.utils import (
+            build_optimizer,
+        )
+
+        adaptor = MockClipAdaptor(has_bias=False)
+        model, _, _ = _build_radio(
+            adaptor=adaptor,
+            loss_type=loss_type,
+        )
+        source = adaptor.oc_model
+        state = model.state_dict()
+        optimizer = build_optimizer(model, _train_config())
+        optimizer_params = [
+            param for group in optimizer.param_groups
+            for param in group['params']
+        ]
+
+        assert model.get_logit_scale_parameter() is source.logit_scale
+        assert model.get_logit_bias_parameter() is None
+        assert not any(key.endswith('logit_bias') for key in state)
+        assert sum(
+            param is source.logit_scale for param in optimizer_params
+        ) == 1
+
+    def test_clip_calibration_stays_trainable_when_text_is_frozen(self):
+        """Freezing RADIO text excludes its native calibration parameters."""
+        model, _, adaptor = _build_radio(
+            loss_type='clip', freeze_text_encoder=True
+        )
+        source = adaptor.oc_model
+
+        assert source.logit_scale.requires_grad
+        assert source.logit_bias.requires_grad
+        assert not source.transformer.weight.requires_grad
+        text_params = dict(model.text_named_parameters()).values()
+        assert all(param is not source.logit_scale for param in text_params)
+        assert all(param is not source.logit_bias for param in text_params)
+
+    def test_siglip2_adaptor_uses_one_local_fallback_pair(self):
+        """RADIO SigLIP2 text-only adaptors use adapter-owned fallback."""
+        model, _, _ = _build_radio(
+            name='siglip2',
+            adaptor=MockSigLIPAdaptor(),
+            loss_type='siglip',
+        )
+        state = model.state_dict()
+
+        assert [key for key in state if key.endswith('logit_scale')] == [
+            'logit_scale'
+        ]
+        assert [key for key in state if key.endswith('logit_bias')] == [
+            'logit_bias'
+        ]
+        assert model.get_logit_scale_parameter().item() == pytest.approx(2.3026)
+        assert model.get_logit_bias_parameter().item() == pytest.approx(-10.0)
+
+    def test_local_override_does_not_raise_fallback_ceiling(self):
+        """RADIO local calibration keeps the historical safety cap."""
+        model, _, _ = _build_radio(
+            name='siglip2',
+            adaptor=MockSigLIPAdaptor(),
+            loss_type='siglip',
+            logit_scale_init=8.0,
+        )
+
+        assert model.get_logit_scale_parameter().item() == pytest.approx(8.0)
+        assert model.logit_scale_max == pytest.approx(
+            DEFAULT_MAX_LOGIT_SCALE
+        )
+        model.clamp_logit_scale_()
+        assert model.get_logit_scale_parameter().item() == pytest.approx(
+            DEFAULT_MAX_LOGIT_SCALE
+        )
 
     def test_radio_model_forward(self):
         """Test mock RADIO model forward."""

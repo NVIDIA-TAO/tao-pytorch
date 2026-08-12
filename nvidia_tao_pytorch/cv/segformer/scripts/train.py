@@ -13,6 +13,7 @@ from nvidia_tao_pytorch.core.tlt_logging import obfuscate_logs
 from nvidia_tao_pytorch.config.segformer.default_config import ExperimentConfig
 from nvidia_tao_pytorch.cv.segformer.dataloader.pl_segformer_data_module import SFDataModule
 from nvidia_tao_pytorch.cv.segformer.model.segformer_pl_model import SegFormerPlModel
+from nvidia_tao_pytorch.cv.segformer.utils.checkpoint import initialize_pretrained_weights
 
 
 def run_experiment(experiment_config, key):
@@ -38,14 +39,9 @@ def run_experiment(experiment_config, key):
 
     dm = SFDataModule(experiment_config.dataset.segment)
 
+    model = SegFormerPlModel(experiment_config)
     if pretrained_path:
-        model = SegFormerPlModel.load_from_checkpoint(
-            pretrained_path,
-            map_location="cpu",
-            experiment_spec=experiment_config
-        )
-    else:
-        model = SegFormerPlModel(experiment_config)
+        initialize_pretrained_weights(model, pretrained_path)
 
     strategy = 'auto'
     if len(trainer_kwargs['devices']) > 1:

@@ -27,6 +27,7 @@ import torch.nn as nn
 
 from nvidia_tao_pytorch.core.lightning.tao_lightning_module import TAOLightningModule
 import nvidia_tao_pytorch.core.loggers.api_logging as status_logging
+from nvidia_tao_pytorch.core.distributed.comm import all_gather
 from nvidia_tao_pytorch.cv.optical_inspection.model.build_nn_model import AOIMetrics
 from nvidia_tao_pytorch.cv.visual_changenet.classification.models.changenet import build_model
 from nvidia_tao_pytorch.cv.visual_changenet.classification.losses import ContrastiveLoss
@@ -225,6 +226,11 @@ class ChangeNetPlModel(TAOLightningModule):
             status_level=status_logging.Status.RUNNING
         )
 
+    def on_validation_epoch_start(self):
+        """Reset FAR buffers before every validation epoch."""
+        self._val_far_scores = []
+        self._val_far_labels = []
+
     def validation_step(self, batch, batch_idx):
         """Validation step."""
         img, _, label = batch
@@ -232,9 +238,45 @@ class ChangeNetPlModel(TAOLightningModule):
         _ = self._forward_pass(batch)
         loss, siam_score = self._backward_G()
         self.val_metrics.update(siam_score, label)
+        # Accumulate raw scores/labels for the epoch-level FAR@100%recall metric.
+        self._val_far_scores.append(siam_score.detach().reshape(-1).float().cpu())
+        self._val_far_labels.append(label.detach().reshape(-1).cpu())
         self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True, batch_size=batch_size)
 
         return loss
+
+    def _compute_val_far(self):
+        """FAR at 100% recall over the accumulated validation scores.
+
+        Convention (matches AOIMetrics): score > threshold => predicted FAIL;
+        label 1 = FAIL (defect), 0 = PASS. With the strict `>` rule, the
+        lowest FAR achieving recall==1.0 is obtained at the largest candidate
+        threshold below min(defect scores):
+            val_far = #(pass_scores >= min(defect_scores)) / n_pass
+        Returns FAR percentage in [0, 100]. A validation split without both
+        classes receives the explicit worst-case sentinel 100.0 so monitored
+        checkpoints always see a metric.
+        """
+        local_scores = (
+            torch.cat(self._val_far_scores)
+            if self._val_far_scores else torch.empty(0, dtype=torch.float32)
+        )
+        local_labels = (
+            torch.cat(self._val_far_labels)
+            if self._val_far_labels else torch.empty(0, dtype=torch.long)
+        )
+        # FAR@100% recall is min/max-sensitive, so average-per-rank FAR is
+        # incorrect. Gather variable-length CPU tensors and compute once from
+        # the global validation set on every rank.
+        scores = torch.cat(all_gather(local_scores), dim=0)
+        labels = torch.cat(all_gather(local_labels), dim=0)
+        defect = scores[labels == 1]
+        passed = scores[labels == 0]
+        if defect.numel() == 0 or passed.numel() == 0:
+            return 100.0
+        min_defect = defect.min()
+        far = (passed >= min_defect).float().mean().item() * 100.0
+        return far
 
     def on_validation_epoch_end(self):
         """Validation epoch end.
@@ -244,11 +286,18 @@ class ChangeNetPlModel(TAOLightningModule):
 
         val_accuracy = self.val_metrics.compute()['total_accuracy'].item()
         val_fpr = self.val_metrics.compute()['false_alarm'].item()
+        val_far = self._compute_val_far()
+        self._val_far_scores, self._val_far_labels = [], []
+        # Already computed from the global gathered validation set; another
+        # sync_dist reduction would average a statistic that must not be averaged.
+        self.log("val_far", val_far, on_step=False, on_epoch=True,
+                 prog_bar=True, sync_dist=False)
         if not self.trainer.sanity_checking:
             self.status_logging_dict = {}
             self.status_logging_dict["val_loss"] = average_val_loss
             self.status_logging_dict["val_acc"] = val_accuracy
             self.status_logging_dict["val_fpr"] = val_fpr
+            self.status_logging_dict["val_far"] = val_far
             status_logging.get_status_logger().kpi = self.status_logging_dict
             status_logging.get_status_logger().write(
                 message="Eval metrics generated.",
@@ -258,6 +307,7 @@ class ChangeNetPlModel(TAOLightningModule):
             "val_acc": val_accuracy,
             "val_fpr": val_fpr
         }
+        validation_logging_dict["val_far"] = val_far
         self.visualize_metrics(validation_logging_dict)
         self.val_metrics.reset()
         pl.utilities.memory.garbage_collection_cuda()

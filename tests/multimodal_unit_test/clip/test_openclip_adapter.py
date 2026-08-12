@@ -173,14 +173,13 @@ class TestOpenCLIPAdapter:
 
         result = adapter(images, text)
 
-        # Forward returns (image_features, text_features, logit_scale, logit_bias)
+        # A biasless native model returns only its canonical calibration.
         assert isinstance(result, tuple)
-        assert len(result) == 4
-        image_features, text_features, logit_scale, logit_bias = result
+        assert len(result) == 3
+        image_features, text_features, logit_scale = result
         assert image_features.shape == (4, 512)
         assert text_features.shape == (4, 512)
         assert logit_scale.ndim == 0  # scalar
-        assert logit_bias.ndim == 0  # scalar
 
     def test_freeze_vision_encoder(self, mock_backbone):
         """Test freezing vision encoder."""
@@ -241,15 +240,14 @@ class TestOpenCLIPAdapter:
         assert any('token_embedding' in n for n in names)
 
     def test_other_named_parameters(self, mock_backbone):
-        """Test other_named_parameters (logit_scale, logit_bias)."""
+        """Test the canonical calibration parameter iterator."""
         adapter = OpenCLIP(mock_backbone)
 
         params = list(adapter.other_named_parameters())
 
-        assert len(params) == 2
+        assert len(params) == 1
         names = [n for n, _ in params]
-        assert 'logit_scale' in names
-        assert 'logit_bias' in names
+        assert names == ['logit_scale']
 
     def test_set_grad_checkpointing(self, mock_backbone):
         """Test set_grad_checkpointing method."""

@@ -5,6 +5,7 @@
 
 import math
 
+import numpy as np
 import pytest
 import torch
 import torch.nn as nn
@@ -218,6 +219,41 @@ class TestComputeLR:
         # At end, LR should be ~0 (cosine at pi)
         lr = compute_lr(999, base_lr, warmup_steps, max_steps, scheduler='cosine')
         assert lr < base_lr * 0.01
+
+    @pytest.mark.parametrize(
+        "step,scheduler",
+        [
+            pytest.param(0, 'cosine', id='warmup'),
+            pytest.param(500, 'constant', id='constant'),
+            pytest.param(500, 'linear', id='linear'),
+            pytest.param(500, 'cosine', id='cosine'),
+        ],
+    )
+    def test_scheduler_checkpoint_is_weights_only_safe(
+        self, tmp_path, step, scheduler
+    ):
+        """Test all LR scheduler paths use checkpoint-safe primitives."""
+        lr = compute_lr(step, np.float64(1e-4), 100, 1000, scheduler=scheduler)
+
+        assert type(lr) is float
+
+        parameter = nn.Parameter(torch.tensor(1.0))
+        optimizer = torch.optim.AdamW([parameter], lr=1e-4)
+        optimizer.param_groups[0]['lr'] = lr
+        checkpoint_path = tmp_path / 'cosine_lr.ckpt'
+        torch.save(
+            {'optimizer_states': [optimizer.state_dict()]},
+            checkpoint_path,
+        )
+
+        checkpoint = torch.load(
+            checkpoint_path,
+            map_location='cpu',
+            weights_only=True,
+        )
+
+        restored_lr = checkpoint['optimizer_states'][0]['param_groups'][0]['lr']
+        assert type(restored_lr) is float
 
     def test_zero_warmup(self):
         """Test behavior with zero warmup steps."""

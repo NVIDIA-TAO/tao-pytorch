@@ -179,10 +179,11 @@ class OneFormerDatasetConfig:
             "panoptic": 0.01
         },
         description=(
-            "Validation task probabilities used by the unified validation "
-            "dataset; retained for backward-compatible specs"
-        ),
-        display_name="validation task probabilities"
+           "Training-only task probabilities retained for backward "
+           "compatibility. Validation and test task selection uses "
+           "evaluate.task; this field is ignored for evaluation."
+       ),
+       display_name="task probabilities"
     )
     task_seq_len: int = INT_FIELD(
         value=77,
