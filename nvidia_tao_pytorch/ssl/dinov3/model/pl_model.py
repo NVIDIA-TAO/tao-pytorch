@@ -32,7 +32,7 @@ from nvidia_tao_pytorch.core.distributed.comm import get_global_rank
 from nvidia_tao_pytorch.core.tlt_logging import logging
 from nvidia_tao_pytorch.ssl.nvdinov2.model.head import DinoHead
 from nvidia_tao_pytorch.ssl.nvdinov2.model.loss import DinoV2Loss
-from nvidia_tao_pytorch.ssl.nvdinov2.model.pl_model import DinoV2PlModel
+from nvidia_tao_pytorch.ssl.nvdinov2.model.pl_model import CustomModelCheckpoint, DinoV2PlModel
 from nvidia_tao_pytorch.ssl.dinov3.model.vit import DinoV3VisionTransformer, SwiGLUFusedFull
 from nvidia_tao_pytorch.ssl.dinov3.model.loss import GramLoss, ClsPreservationLoss
 from nvidia_tao_pytorch.ssl.dinov3.model.lora import (
@@ -920,3 +920,64 @@ class DinoV3PlModel(DinoV2PlModel):
                 losses.append(preservation_cfg.cls_cosine_weight * cls_cosine)
 
         return losses
+
+    def configure_callbacks(self):
+        """Configure callbacks, honouring ``train.checkpoint_interval_unit``.
+
+        The inherited NVDINOv2 implementation wires the periodic checkpoint with
+        ``every_n_epochs=checkpoint_interval`` only -- it never reads
+        ``checkpoint_interval_unit``, unlike the core base class, which supports both. That is
+        harmless for NVDINOv2's own recipes, but it makes step-unit checkpointing silently
+        no-op: a spec asking for "every 1000 steps" becomes "every 1000 *epochs*", i.e. never.
+
+        On a time-capped scheduler that is not a cosmetic difference. Whenever a single epoch
+        takes longer than the per-job wall-clock limit -- routine for SSL pretraining on a large
+        corpus -- an epoch boundary is never reached inside one allocation. With epoch-only
+        checkpointing a requeued run then restarts from step 0 every time and never finishes,
+        and because the periodic callback is also what writes the full Lightning checkpoint that
+        resume consumes, there is nothing to resume *from* either. Step-unit checkpointing is
+        what makes a requeue/resume loop viable at all.
+
+        The periodic callback is rebuilt through its public constructor rather than by poking
+        Lightning's private ``_every_n_*`` attributes, so this does not depend on Lightning
+        internals.
+
+        Returns:
+            Sequence[Callback]: the inherited callbacks, with the periodic checkpoint
+            re-wired to step cadence when the spec asks for it.
+        """
+        callbacks = super().configure_callbacks()
+
+        unit = self.experiment_spec["train"].get("checkpoint_interval_unit", "epoch")
+        if unit != "step":
+            return callbacks
+
+        interval = self.experiment_spec["train"]["checkpoint_interval"]
+        results_dir = self.experiment_spec["results_dir"]
+
+        rebuilt = []
+        for callback in callbacks:
+            # The periodic checkpoint is the unmonitored, keep-everything one. The best-metric
+            # callback (when enabled) is monitored, and TAOExceptionCheckpoint is a different
+            # class, so neither is touched.
+            if (isinstance(callback, CustomModelCheckpoint) and
+                    callback.monitor is None and
+                    callback.save_top_k == -1):
+                rebuilt.append(CustomModelCheckpoint(
+                    every_n_train_steps=interval,
+                    every_n_epochs=None,
+                    dirpath=results_dir,
+                    save_on_train_epoch_end=False,
+                    monitor=None,
+                    save_top_k=-1,
+                    save_last="link",
+                    filename="model_{epoch:03d}_{step:05d}",
+                    enable_version_counter=False,
+                ))
+                logging.info(
+                    "DINOv3: checkpointing every %d steps (checkpoint_interval_unit='step').",
+                    interval,
+                )
+            else:
+                rebuilt.append(callback)
+        return rebuilt
