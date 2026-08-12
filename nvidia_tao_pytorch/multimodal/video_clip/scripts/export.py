@@ -17,7 +17,6 @@
 """Export CLIP model to ONNX."""
 
 import copy
-import math
 import os
 from typing import Optional, Tuple
 
@@ -25,9 +24,7 @@ import numpy as np
 import onnx
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from omegaconf import OmegaConf
-from torch.onnx import symbolic_helper
 from torch.export import Dim
 
 from nvidia_tao_pytorch.core.cookbooks.tlt_pytorch_cookbook import (
@@ -47,160 +44,6 @@ from nvidia_tao_pytorch.multimodal.video_clip.model.tokenizers import save_token
 from nvidia_tao_pytorch.multimodal.video_clip.utils.utils import (
     register_checkpoint_safe_globals,
 )
-
-
-# Register custom ONNX symbolic for anti-aliased bilinear upsample, which
-# PyTorch uses internally (e.g. in HuggingFace SigLIP2 NaFlex) but has no
-# built-in ONNX exporter mapping.  We map it to the standard ONNX Resize
-# op with mode=linear, dropping the anti-alias flag (negligible at inference).
-def _onnx_upsample_bilinear2d_aa(g, inp, output_size, align_corners, *args):
-    """ONNX symbolic for aten::_upsample_bilinear2d_aa.
-
-    Maps anti-aliased bilinear upsample to standard ONNX Resize op.
-    The anti-alias flag is implicit in the op name and is dropped for ONNX
-    (negligible impact at inference).
-
-    Accepts *args for remaining scale parameters since the JIT graph may
-    pass them in varying forms depending on the PyTorch version.
-    """
-    align_corners_i = symbolic_helper._maybe_get_const(align_corners, "b")
-    coord_mode = "align_corners" if align_corners_i else "asymmetric"
-    empty_tensor = g.op(
-        "Constant", value_t=torch.tensor([], dtype=torch.float32)
-    )
-    return g.op(
-        "Resize", inp, empty_tensor, empty_tensor, output_size,
-        mode_s="linear",
-        coordinate_transformation_mode_s=coord_mode,
-    )
-
-
-torch.onnx.register_custom_op_symbolic(
-    "aten::_upsample_bilinear2d_aa", _onnx_upsample_bilinear2d_aa, 17
-)
-
-
-class ExportFriendlyMHA(nn.Module):
-    """Drop-in replacement for nn.MultiheadAttention with ONNX-friendly ops.
-
-    PyTorch's nn.MultiheadAttention uses a fused _native_multi_head_attention
-    kernel that has no ONNX symbolic.  This module performs the identical
-    computation using standard linear, reshape, softmax, and matmul ops that
-    the ONNX exporter fully supports.
-
-    Use ``_replace_mha_for_export`` to swap all nn.MultiheadAttention modules
-    in a model before calling ``torch.onnx.export``.
-    """
-
-    def __init__(self, mha: nn.MultiheadAttention):
-        """Initialize from existing nn.MultiheadAttention, sharing weights."""
-        super().__init__()
-        self.embed_dim = mha.embed_dim
-        self.num_heads = mha.num_heads
-        self.head_dim = mha.embed_dim // mha.num_heads
-        self.batch_first = mha.batch_first
-
-        # Share weight tensors (no copy)
-        self.in_proj_weight = mha.in_proj_weight
-        self.in_proj_bias = mha.in_proj_bias
-        self.out_proj = mha.out_proj
-
-    def forward(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        key_padding_mask: Optional[torch.Tensor] = None,
-        need_weights: bool = False,
-        attn_mask: Optional[torch.Tensor] = None,
-        average_attn_weights: bool = True,
-        is_causal: bool = False,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """Forward pass using decomposed multi-head attention ops.
-
-        Handles both self-attention (query == key == value) and cross/pooler
-        attention (query differs from key/value) by detecting sequence length
-        mismatch and using separate projections when needed.
-        """
-        if self.batch_first:
-            query = query.transpose(0, 1)
-            key = key.transpose(0, 1)
-            value = value.transpose(0, 1)
-
-        seq_len, batch_size, _ = query.shape
-        k_len = key.shape[0]
-
-        # Detect if this is self-attention or cross/pooler attention
-        is_self_attention = (seq_len == k_len)
-
-        if is_self_attention:
-            # Self-attention: single projection for Q, K, V from query
-            qkv = F.linear(  # pylint: disable=not-callable
-                query, self.in_proj_weight, self.in_proj_bias
-            )
-            q, k, v = qkv.chunk(3, dim=-1)
-        else:
-            # Cross/pooler attention: separate projections for Q vs K/V
-            # Split the combined in_proj_weight into Q, K, V components
-            q_proj_weight, k_proj_weight, v_proj_weight = self.in_proj_weight.chunk(3, dim=0)
-            if self.in_proj_bias is not None:
-                q_bias, k_bias, v_bias = self.in_proj_bias.chunk(3, dim=0)
-            else:
-                q_bias, k_bias, v_bias = None, None, None
-
-            q = F.linear(query, q_proj_weight, q_bias)  # pylint: disable=not-callable
-            k = F.linear(key, k_proj_weight, k_bias)  # pylint: disable=not-callable
-            v = F.linear(value, v_proj_weight, v_bias)  # pylint: disable=not-callable
-
-        # Reshape for multi-head: (S, B, D) -> (S, B, H, Dh) -> (B, H, S, Dh)
-        q = q.reshape(seq_len, batch_size, self.num_heads, self.head_dim)
-        q = q.permute(1, 2, 0, 3)
-        k = k.reshape(k_len, batch_size, self.num_heads, self.head_dim)
-        k = k.permute(1, 2, 0, 3)
-        v = v.reshape(k_len, batch_size, self.num_heads, self.head_dim)
-        v = v.permute(1, 2, 0, 3)
-
-        # Scaled dot-product attention
-        scale = math.sqrt(self.head_dim)
-        attn_weights = torch.matmul(q, k.transpose(-2, -1)) / scale
-
-        if attn_mask is not None:
-            attn_weights = attn_weights + attn_mask
-
-        attn_weights = F.softmax(attn_weights, dim=-1)
-
-        attn_output = torch.matmul(attn_weights, v)
-
-        # (B, H, S, Dh) -> (S, B, D)
-        attn_output = attn_output.permute(2, 0, 1, 3).reshape(
-            seq_len, batch_size, self.embed_dim
-        )
-
-        # Output projection
-        attn_output = self.out_proj(attn_output)
-
-        if self.batch_first:
-            attn_output = attn_output.transpose(0, 1)
-
-        return attn_output, None
-
-
-def _replace_mha_for_export(model: nn.Module) -> None:
-    """Replace all nn.MultiheadAttention modules with ExportFriendlyMHA.
-
-    Walks the module tree and swaps each nn.MultiheadAttention with an
-    ExportFriendlyMHA that shares the same weights but uses only
-    ONNX-exportable ops.
-
-    Parameters
-    ----------
-    model : nn.Module
-        Model to prepare for ONNX export (modified in-place).
-    """
-    for _, module in model.named_modules():
-        for attr_name, child in list(module.named_children()):
-            if isinstance(child, nn.MultiheadAttention):
-                setattr(module, attr_name, ExportFriendlyMHA(child))
 
 
 # Valid encoder types for export (aligned with CLIPExportConfig.encoder_type)
@@ -491,11 +334,6 @@ def _verify_onnx_parity(
     by checkpoint: tracing, constant-folding, the >2GB external-data round-trip,
     dtype, and onnxruntime op semantics. Both sides run on CPU so the fp32
     comparison is apples-to-apples (no spurious GPU-vs-CPU drift).
-
-    The numerical correctness of the ``nn.MultiheadAttention`` ->
-    ``ExportFriendlyMHA`` swap (:func:`_replace_mha_for_export`) is fixed code,
-    independent of the checkpoint, and is covered separately by a unit test
-    (``test_export_mha_swap``) rather than re-validated on every export.
 
     Mode is controlled by the ``VIDEO_CLIP_EXPORT_PARITY`` environment variable:
     ``strict`` (default) raises on mismatch, ``warn`` logs and continues,
@@ -1152,12 +990,6 @@ def run_export(experiment_config: ExperimentConfig) -> None:
     if any(isinstance(m, LoRALinear) for m in pl_model.modules()):
         merged = merge_lora(pl_model)
         logging.info(f"Merged {merged} LoRA modules into base weights for export.")
-
-    # Replace nn.MultiheadAttention with export-friendly decomposed version.
-    # PyTorch's fused _native_multi_head_attention has no ONNX symbolic, so
-    # we swap in an equivalent module that uses standard ops the exporter
-    # understands (linear, reshape, softmax, matmul).
-    _replace_mha_for_export(pl_model)
 
     # Export based on encoder_type
     if encoder_type == 'combined':
