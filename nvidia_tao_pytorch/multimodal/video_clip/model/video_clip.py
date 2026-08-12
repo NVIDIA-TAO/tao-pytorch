@@ -89,6 +89,24 @@ def build_model(experiment_config,
     if init_logit_bias is None:
         init_logit_bias = -10.0 if loss_type == 'siglip' else 0.0
 
+    # The branches below still carry the image-only families, but nothing can
+    # feed them: the video dataloader emits [B, T, C, H, W] and only
+    # adapters/internvideo2clip.py accepts 5D input, so C-RADIO / SigLIP2 /
+    # OpenCLIP (and the open_clip catch-all) die on the first forward pass with
+    # a shape error that reads like a data bug. Reject them here instead. They
+    # stay in place for the follow-up that adds frame-wise encoding + temporal
+    # pooling.
+    if model_type not in internvideo2clip_model_configs:
+        raise ValueError(
+            f"model.type '{model_type}' is not supported by the video_clip "
+            "task. The video dataloader emits [B, T, C, H, W]; only the "
+            "InternVideo2-CLIP adapter consumes 5D input, while the C-RADIO / "
+            "SigLIP2 / OpenCLIP adapters are image-only ([B, C, H, W]) and fail "
+            "on the first forward pass. Supported model.type values: "
+            f"{sorted(internvideo2clip_model_configs)}. Use the `clip` task for "
+            "image models."
+        )
+
     if model_type in internvideo2clip_model_configs:
         model, preprocess_train, preprocess_val, tokenizer = (
             build_internvideo2clip_model(

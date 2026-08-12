@@ -47,15 +47,11 @@ class VideoCLIPModelConfig:
     type: str = STR_FIELD(
         value="internvideo2-clip-l14",
         default_value="internvideo2-clip-l14",
-        description="CLIP model type. "
-                    "C-RADIO: c-radio_v3-h, c-radio_v3-l, c-radio_v3-b, c-radio_v3-g; "
-                    "SigLIP2: siglip2-so400m-patch16-naflex (NaFlex), siglip2-so400m-patch14-224, "
-                    "siglip2-so400m-patch14-384, siglip2-so400m-patch16-256, "
-                    "siglip2-so400m-patch16-384, siglip2-so400m-patch16-512; "
-                    "OpenCLIP: ViT-L-14-SigLIP-CLIPA-224, ViT-L-14-SigLIP-CLIPA-336, "
-                    "ViT-H-14-SigLIP-CLIPA-224; "
-                    "InternVideo2: internvideo2-clip-l14 (the only supported "
-                    "InternVideo2 size).",
+        description="CLIP model type. Only internvideo2-clip-l14 is supported: "
+                    "the video dataloader emits [B, T, C, H, W] and the "
+                    "InternVideo2-CLIP adapter is the only one that consumes 5D "
+                    "input. Image-only CLIP families (C-RADIO, SigLIP2, OpenCLIP) "
+                    "belong to the `clip` task.",
         display_name="Model Type",
     )
     adaptor_name: Optional[str] = STR_FIELD(
