@@ -104,21 +104,54 @@ def _pyav_seek_to_index(container, stream, rate, index):
     container.seek(target, stream=stream, backward=True, any_frame=False)
 
 
-def _pyav_decode_indices_intra(container, stream, rate, frame_indices):
-    """Decode wanted indices on an intra-only stream, seeking to each.
+def _pyav_decode_seek_each(container, stream, rate, wanted):
+    """Decode ``wanted`` on an intra-only stream, seeking to every index.
 
     Every frame of an intra-only codec (MJPEG) is independently decodable, so a
     seek lands exactly where we want and no forward decoding is wasted. Scanning
     instead measured 2.57x slower than decord on the MJPEG/AVI clips.
     """
     decoded = {}
-    for index in sorted({int(i) for i in frame_indices}):
+    for index in sorted(wanted):
         _pyav_seek_to_index(container, stream, rate, index)
         for frame in container.decode(stream):
             got = _pyav_frame_index(frame, stream, rate)
             if got is None or got >= index:
                 decoded[index] = frame.to_rgb().to_image()
                 break
+    return decoded
+
+
+def _pyav_decode_walk(container, stream, rate, wanted, seek_to):
+    """Decode ``wanted`` by walking the stream forward from ``seek_to``.
+
+    A ``rate`` of None indexes frames by decode order rather than by timestamp,
+    which is the only trustworthy reading when the container exposes no pts;
+    ``seek_to`` must then be 0. Returns None when timestamps were asked for but
+    turned out to be unusable, so the caller can retry by decode order.
+    """
+    last = max(wanted)
+    decoded = {}
+    if seek_to > 0:
+        try:
+            _pyav_seek_to_index(container, stream, rate, seek_to)
+        except Exception as exc:  # pylint: disable=broad-except
+            logging.debug("pyav seek to frame %d failed: %s", seek_to, exc)
+            container.seek(0, stream=stream, backward=True, any_frame=False)
+    else:
+        container.seek(0, stream=stream, backward=True, any_frame=False)
+
+    for counter, frame in enumerate(container.decode(stream)):
+        if rate is None:
+            index = counter
+        else:
+            index = _pyav_frame_index(frame, stream, rate)
+            if index is None:
+                return None
+        if index in wanted:
+            decoded[index] = frame.to_rgb().to_image()
+        if index >= last:
+            break
     return decoded
 
 
@@ -130,62 +163,23 @@ def _pyav_decode_indices(container, stream, rate, frame_indices):
     ffmpeg-CLI fallback's cost. Falls back to a sequential count when the
     container exposes no usable timestamps.
     """
-    if (rate and stream.time_base is not None and
-            getattr(stream.codec_context.codec, "intra_only", False)):
+    wanted = {int(index) for index in frame_indices}
+    timed = bool(rate) and stream.time_base is not None
+
+    if timed and getattr(stream.codec_context.codec, "intra_only", False):
         try:
-            decoded = _pyav_decode_indices_intra(
-                container, stream, rate, frame_indices
-            )
-            if len(decoded) == len({int(i) for i in frame_indices}):
+            decoded = _pyav_decode_seek_each(container, stream, rate, wanted)
+            if len(decoded) == len(wanted):
                 return decoded
-        except Exception:  # pylint: disable=broad-except
-            pass  # fall through to the generic path
+        except Exception as exc:  # pylint: disable=broad-except
+            logging.debug("pyav per-frame seek failed, walking instead: %s", exc)
 
-    wanted = {int(index) for index in frame_indices}
-    first = min(wanted)
-    last = max(wanted)
-    decoded = {}
+    if timed:
+        decoded = _pyav_decode_walk(container, stream, rate, wanted, min(wanted))
+        if decoded is not None:
+            return decoded
 
-    seek_ok = False
-    if rate and stream.time_base is not None and first > 0:
-        origin = stream.start_time or 0
-        target = origin + int(first / rate / float(stream.time_base))
-        try:
-            container.seek(target, stream=stream, backward=True, any_frame=False)
-            seek_ok = True
-        except Exception:  # pylint: disable=broad-except
-            container.seek(0, stream=stream, backward=True, any_frame=False)
-
-    counter = -1
-    for frame in container.decode(stream):
-        counter += 1
-        index = _pyav_frame_index(frame, stream, rate)
-        if index is None:
-            # No usable pts: only a scan from the start can be trusted.
-            if seek_ok:
-                return _pyav_decode_indices_by_scan(
-                    container, stream, frame_indices
-                )
-            index = counter
-        if index in wanted:
-            decoded[index] = frame.to_rgb().to_image()
-        if index >= last:
-            break
-    return decoded
-
-
-def _pyav_decode_indices_by_scan(container, stream, frame_indices):
-    """Decode wanted indices by counting frames from the start of the stream."""
-    wanted = {int(index) for index in frame_indices}
-    last = max(wanted)
-    decoded = {}
-    container.seek(0, stream=stream, backward=True, any_frame=False)
-    for counter, frame in enumerate(container.decode(stream)):
-        if counter in wanted:
-            decoded[counter] = frame.to_rgb().to_image()
-        if counter >= last:
-            break
-    return decoded
+    return _pyav_decode_walk(container, stream, None, wanted, 0)
 
 
 def _load_with_pyav(video_path, num_frames, start_time_sec, end_time_sec,
@@ -194,8 +188,9 @@ def _load_with_pyav(video_path, num_frames, start_time_sec, end_time_sec,
 
     PyAV is built against the image's restricted FFmpeg (see docker/Dockerfile),
     so H.264 resolves to h264_cuvid/NVDEC and no bundled software codec ships.
-    The frame range, ordering and duplicate padding match the decord backend
-    this replaces.
+    The frame count, ordering and duplicate padding match the decord backend
+    this replaces; the range is resolved by the same :func:`_clip_frame_range`
+    the ffmpeg and OpenCV backends use.
     """
     import av
 
@@ -206,21 +201,14 @@ def _load_with_pyav(video_path, num_frames, start_time_sec, end_time_sec,
         actual_frames = _pyav_stream_length(stream, rate)
         if actual_frames <= 0:
             raise ValueError(f"Could not determine frame count for {video_path}")
-        start = 0
-        end = actual_frames
-        if start_frame is not None and end_frame is not None:
-            start = max(0, min(int(start_frame), actual_frames - 1))
-            end = min(int(end_frame), actual_frames)
-        elif start_time_sec is not None and end_time_sec is not None:
-            start = max(
-                0,
-                min(int(round(float(start_time_sec) * rate)), actual_frames - 1),
-            )
-            end = min(int(round(float(end_time_sec) * rate)), actual_frames)
-        if end <= start:
-            raise ValueError(
-                f"Invalid video range for {video_path}: [{start}, {end})"
-            )
+        start, end = _clip_frame_range(
+            actual_frames,
+            rate,
+            start_time_sec,
+            end_time_sec,
+            start_frame,
+            end_frame,
+        )
         frame_indices = _linspace_indices(end - start, num_frames) + start
         decoded = _pyav_decode_indices(container, stream, rate, frame_indices)
 
@@ -234,7 +222,8 @@ def _load_with_pyav(video_path, num_frames, start_time_sec, end_time_sec,
             # Timestamp rounding can miss an exact hit; take the nearest frame
             # that was decoded rather than dropping a sample.
             index = _nearest_index(available, index)
-        frames.append(decoded[index].convert("RGB"))
+        # to_rgb().to_image() already yields mode "RGB"; convert() would copy.
+        frames.append(decoded[index])
     return frames
 
 
@@ -421,62 +410,44 @@ def _load_with_opencv(video_path, num_frames, start_time_sec, end_time_sec,
         cap.release()
 
 
+_DECODE_BACKENDS = (
+    ("pyav", _load_with_pyav),
+    ("ffmpeg-cli", _load_with_ffmpeg),
+    ("opencv", _load_with_opencv),
+)
+
+
 def load_video_frames(video_path, num_frames, start_time_sec=None,
                       end_time_sec=None, start_frame=None, end_frame=None):
     """Load a fixed number of PIL RGB frames from a video clip."""
-    pyav_error = None
-    try:
-        frames = _load_with_pyav(
-            video_path,
-            num_frames,
-            start_time_sec,
-            end_time_sec,
-            start_frame,
-            end_frame,
-        )
-        _log_decode_backend("pyav")
+    errors = []
+    for name, backend in _DECODE_BACKENDS:
+        try:
+            frames = backend(
+                video_path,
+                num_frames,
+                start_time_sec,
+                end_time_sec,
+                start_frame,
+                end_frame,
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            errors.append(exc)
+            logging.debug("%s decode failed for %s: %s", name, video_path, exc)
+            continue
+        _log_decode_backend(name)
         return frames
-    except Exception as exc:
-        pyav_error = exc
-        logging.debug("pyav decode failed for %s: %s", video_path, exc)
 
-    ffmpeg_error = None
-    try:
-        frames = _load_with_ffmpeg(
-            video_path,
-            num_frames,
-            start_time_sec,
-            end_time_sec,
-            start_frame,
-            end_frame,
-        )
-        _log_decode_backend("ffmpeg-cli")
-        return frames
-    except Exception as exc:
-        ffmpeg_error = exc
-        logging.debug("ffmpeg decode failed for %s: %s", video_path, exc)
-
-    try:
-        frames = _load_with_opencv(
-            video_path,
-            num_frames,
-            start_time_sec,
-            end_time_sec,
-            start_frame,
-            end_frame,
-        )
-        _log_decode_backend("opencv")
-        return frames
-    except ImportError as exc:
+    # errors[-1] is always the OpenCV failure: it is last in the table.
+    if isinstance(errors[-1], ImportError):
         raise ImportError(
             "Video decoding requires PyAV, ffmpeg/ffprobe, or OpenCV in "
             "the TAO environment."
-        ) from pyav_error or ffmpeg_error or exc
-    except Exception as exc:
-        raise RuntimeError(
-            "All video decoding backends failed. PyAV is the supported "
-            "decoder in the TAO image; the container ffmpeg is codec-disabled "
-            "so the CLI fallback cannot pipe raw frames and OpenCV is built "
-            "WITH_FFMPEG=OFF. Check that the clip's container and codec are in "
-            "the image's allow-list (see docker/Dockerfile)."
-        ) from pyav_error or ffmpeg_error or exc
+        ) from errors[0]
+    raise RuntimeError(
+        "All video decoding backends failed. PyAV is the supported "
+        "decoder in the TAO image; the container ffmpeg is codec-disabled "
+        "so the CLI fallback cannot pipe raw frames and OpenCV is built "
+        "WITH_FFMPEG=OFF. Check that the clip's container and codec are in "
+        "the image's allow-list (see docker/Dockerfile)."
+    ) from errors[0]

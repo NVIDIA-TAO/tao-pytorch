@@ -105,6 +105,46 @@ def _vadr1_records():
     }]
 
 
+@pytest.fixture
+def fake_pyav(monkeypatch):
+    """Stub out ``av`` and record the frame indices _load_with_pyav asks for.
+
+    Yields the list of index lists handed to ``_pyav_decode_indices``, so a test
+    can assert which frames the sampler selected without decoding anything.
+    """
+    requested = []
+
+    def fake_decode(container, stream, rate, frame_indices):
+        del container, stream, rate
+        requested.append([int(index) for index in frame_indices])
+        return {
+            int(index): Image.new("RGB", (4, 4))
+            for index in frame_indices
+        }
+
+    class FakeStream:
+        thread_type = "AUTO"
+
+    class FakeContainer:
+        streams = SimpleNamespace(video=[FakeStream()])
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+    monkeypatch.setattr(video_decode, "_pyav_decode_indices", fake_decode)
+    monkeypatch.setattr(video_decode, "_pyav_stream_rate", lambda stream: 30.0)
+    monkeypatch.setattr(
+        video_decode, "_pyav_stream_length", lambda stream, rate: 2
+    )
+    monkeypatch.setitem(
+        sys.modules, "av", SimpleNamespace(open=lambda path: FakeContainer())
+    )
+    return requested
+
+
 @pytest.mark.multimodal_unit
 class TestVideoTextEntries:
     """Test metadata normalization."""
@@ -248,107 +288,34 @@ class TestVideoTextDataset:
         assert idx == 7
         assert row_position == 0
 
-    def test_pyav_requests_the_linspace_frame_indices(self, monkeypatch):
+    @pytest.mark.parametrize(
+        "num_frames, start_frame, end_frame, expected",
+        [
+            # Exactly the sampled indices, in order.
+            (2, 0, 2, [0, 1]),
+            # _linspace_indices pads with the final index on a short clip.
+            (4, 0, 2, [0, 1, 1, 1]),
+            # An inverted range clamps to a single frame via _clip_frame_range
+            # instead of raising, matching the ffmpeg and OpenCV backends.
+            (2, 5, 1, [1, 1]),
+        ],
+    )
+    def test_pyav_requests_the_linspace_frame_indices(
+        self, fake_pyav, num_frames, start_frame, end_frame, expected
+    ):
         """PyAV backend should decode exactly the sampled indices, in order."""
-        requested = []
-
-        def fake_decode(container, stream, rate, frame_indices):
-            del container, stream, rate
-            requested.append([int(index) for index in frame_indices])
-            return {
-                int(index): Image.new("RGB", (4, 4))
-                for index in frame_indices
-            }
-
-        monkeypatch.setattr(
-            video_decode, "_pyav_decode_indices", fake_decode
-        )
-        monkeypatch.setattr(
-            video_decode, "_pyav_stream_rate", lambda stream: 30.0
-        )
-        monkeypatch.setattr(
-            video_decode, "_pyav_stream_length", lambda stream, rate: 2
-        )
-
-        class FakeStream:
-            thread_type = "AUTO"
-
-        class FakeContainer:
-            streams = SimpleNamespace(video=[FakeStream()])
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *exc_info):
-                return False
-
-        monkeypatch.setitem(
-            sys.modules, "av", SimpleNamespace(open=lambda path: FakeContainer())
-        )
-
         frames = video_decode._load_with_pyav(
             "/tmp/fake.mp4",
-            num_frames=2,
+            num_frames=num_frames,
             start_time_sec=None,
             end_time_sec=None,
-            start_frame=0,
-            end_frame=2,
+            start_frame=start_frame,
+            end_frame=end_frame,
         )
 
-        assert requested == [[0, 1]]
-        assert len(frames) == 2
+        assert fake_pyav == [expected]
+        assert len(frames) == num_frames
         assert all(isinstance(frame, Image.Image) for frame in frames)
-
-    def test_pyav_repeats_indices_for_short_clips(self, monkeypatch):
-        """A clip shorter than num_frames pads with the last index, in order."""
-        requested = []
-
-        def fake_decode(container, stream, rate, frame_indices):
-            del container, stream, rate
-            requested.append([int(index) for index in frame_indices])
-            return {
-                int(index): Image.new("RGB", (4, 4))
-                for index in frame_indices
-            }
-
-        monkeypatch.setattr(
-            video_decode, "_pyav_decode_indices", fake_decode
-        )
-        monkeypatch.setattr(
-            video_decode, "_pyav_stream_rate", lambda stream: 30.0
-        )
-        monkeypatch.setattr(
-            video_decode, "_pyav_stream_length", lambda stream, rate: 2
-        )
-
-        class FakeStream:
-            thread_type = "AUTO"
-
-        class FakeContainer:
-            streams = SimpleNamespace(video=[FakeStream()])
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *exc_info):
-                return False
-
-        monkeypatch.setitem(
-            sys.modules, "av", SimpleNamespace(open=lambda path: FakeContainer())
-        )
-
-        frames = video_decode._load_with_pyav(
-            "/tmp/fake.mp4",
-            num_frames=4,
-            start_time_sec=None,
-            end_time_sec=None,
-            start_frame=0,
-            end_frame=2,
-        )
-
-        # _linspace_indices pads with the final index when the clip is short.
-        assert requested == [[0, 1, 1, 1]]
-        assert len(frames) == 4
 
     def test_opencv_frame_loader_decodes_video_clip(self, tmp_path):
         """OpenCV fallback should decode real video files in the TAO venv."""
