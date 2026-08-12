@@ -21,6 +21,10 @@ TAO_CORE_DIR="${TAO_CORE_DIR:-$REPO_DIR/tao-core}"
 SPEC_DIR="$REPO_DIR/nvidia_tao_pytorch/ssl/dinov3/experiment_specs"
 SPEC_NAME=train_dinov3_vitb_lora.yaml
 RESULT_DIR="${RESULT_DIR:-$LUSTRE_USER/outputs/dinov3_lora/smoke}"
+# ARM selects the loss-weight overrides, exactly as dinov3_lora_vitb.sbatch does. Default D
+# (spec defaults) preserves the original behaviour of this script; ARM=A is the full-FT arm,
+# whose code path -- LoRA disabled entirely -- no smoke has ever exercised.
+ARM="${ARM:-D}"
 DATA_DIR="${DATA_DIR:-$PROJ/users/nnagrajrao/dinov3_test_subsample/foxconn_wds_1k}"
 PRETRAINED="${PRETRAINED:-$PROJ/hf_cache/hub/models--timm--vit_base_patch16_dinov3.lvd1689m/snapshots/c6a5fb7d12bbd3cf3b0079253141c3332aaed7da}"
 CONTAINER="${CONTAINER:-/lustre/fsw/portfolios/edgeai/users/yuw/docker/tao_evfm_2603.sqsh}"
@@ -31,6 +35,16 @@ CKPT_INTERVAL="${CKPT_INTERVAL:-100}"
 PARTITION="${PARTITION:-interactive}"
 TIME_LIMIT="${TIME_LIMIT:-02:00:00}"
 HOST_HOME="${HOME}"
+
+case "${ARM}" in
+    A)  ARM_OVERRIDES="model.lora.enable=false model.gram.enable=false model.gram.w_gram=0.0 model.preservation.enable=false" ;;
+    B)  ARM_OVERRIDES="model.lora.enable=true model.gram.enable=false model.gram.w_gram=0.0 model.preservation.enable=false" ;;
+    C)  ARM_OVERRIDES="model.lora.enable=true model.gram.enable=true model.gram.w_gram=1.0 model.preservation.enable=false" ;;
+    D)  ARM_OVERRIDES="" ;;
+    E)  ARM_OVERRIDES="model.lora.enable=true model.gram.enable=true model.gram.w_gram=2.0 model.preservation.enable=true model.preservation.cls_mse_weight=0.10 model.preservation.cls_cosine_weight=0.10" ;;
+    *)  echo "Unknown ARM '${ARM}'. Expected one of: A B C D E." >&2; exit 2 ;;
+esac
+TRAIN_OVERRIDES="${ARM_OVERRIDES} ${TRAIN_OVERRIDES:-}"
 
 mkdir -p "$RESULT_DIR" "$TMP_ROOT" "$REPO_DIR/logs/slurm"
 
@@ -48,6 +62,8 @@ echo "date UTC  : $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "repo      : $REPO_DIR ($(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null))"
 echo "data      : $DATA_DIR ($(ls "$DATA_DIR" 2>/dev/null | grep -c '\.jpg$') jpg)"
 echo "results   : $RESULT_DIR"
+echo "arm       : $ARM"
+echo "overrides : ${TRAIN_OVERRIDES:-none}"
 echo "gpus      : $GPUS   epochs: $EPOCHS"
 echo "=============================================="
 
@@ -89,7 +105,8 @@ srun --partition="$PARTITION" --account=edgeai_tao-ptm_image-foundation-model-cl
             train.num_nodes=1 train.num_gpus=$GPUS \\
             train.num_epochs=$EPOCHS \\
             train.checkpoint_interval=$CKPT_INTERVAL train.checkpoint_interval_unit=step \\
-            train.pretrained_model_path='$PRETRAINED'
+            train.pretrained_model_path='$PRETRAINED' \\
+            ${TRAIN_OVERRIDES}
     " 2>&1 | tee "$RESULT_DIR/smoke_train.log"
 TRAIN_RC=${PIPESTATUS[0]}
 echo "train exit=$TRAIN_RC"
@@ -126,6 +143,14 @@ echo "--- all checkpoints ---"
 ls -lh "$RESULT_DIR"/train/*.pth "$RESULT_DIR"/*.pth 2>/dev/null | head -12
 
 echo
+if [ "$ARM" = "A" ]; then
+    echo "########## STEP 3: G2 audit SKIPPED for arm A ##########"
+    echo "The audit asserts LoRA invariants -- adapter keys present, base weights bit-identical."
+    echo "Arm A trains the whole backbone by design, so those assertions are not just expected"
+    echo "to fail, they would be wrong to pass. Full-FT correctness is covered by the loss"
+    echo "trajectory above and by the drift probe below, which needs no LoRA."
+    AUDIT_RC=0
+else
 echo "########## STEP 3: G2 audit (keys, rank, frozen base) ##########"
 srun --partition="$PARTITION" --account=edgeai_tao-ptm_image-foundation-model-clip \
     --job-name=dinov3_lora_audit_TAO-2492 \
@@ -145,6 +170,7 @@ srun --partition="$PARTITION" --account=edgeai_tao-ptm_image-foundation-model-cl
     " 2>&1 | tee "$RESULT_DIR/smoke_audit.log"
 AUDIT_RC=${PIPESTATUS[0]}
 echo "audit exit=$AUDIT_RC"
+fi
 
 echo
 echo "########## STEP 4: drift probe (revised G4.5) ##########"
