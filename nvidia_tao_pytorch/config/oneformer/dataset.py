@@ -179,11 +179,11 @@ class OneFormerDatasetConfig:
             "panoptic": 0.01
         },
         description=(
-           "Training-only task probabilities retained for backward "
-           "compatibility. Validation and test task selection uses "
-           "evaluate.task; this field is ignored for evaluation."
-       ),
-       display_name="task probabilities"
+            "Training-only task probabilities retained for backward "
+            "compatibility. Validation and test task selection uses "
+            "evaluate.task; this field is ignored for evaluation."
+        ),
+        display_name="task probabilities"
     )
     task_seq_len: int = INT_FIELD(
         value=77,
