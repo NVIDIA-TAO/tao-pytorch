@@ -1,14 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 addict==2.4.0
 anyconfig==0.15.1
 astroid==3.3.11  # held at 3.3.x to match pylint 3.3.x; pylint 4.x requires isort>=5 which conflicts with nvidia-eff's isort<5
 beartype==0.22.9
 braceexpand
-# video decoder: fast in-process frame sampling for video_clip (loader preferred backend).
+# video decoder: in-process frame sampling for video_clip (loader preferred backend).
 # Required, not optional: the codec-disabled base ffmpeg (TAO-2183 / FF-4) ships no pipe
 # protocol, no rawvideo muxer and no select filter, and OpenCV is built WITH_FFMPEG=OFF, so
-# decord is the only working mp4 decoder in the image. Its manylinux wheel bundles its own
-# libav* and libx264 under decord.libs/, which the OpenCV leak check does not scan.
-decord==0.6.0
+# PyAV is the only working decoder in the image.
+#
+# This wheel is deliberately NOT what ships: the Dockerfile reinstalls av with
+# --no-binary=av so it links against the image's restricted system FFmpeg instead of
+# bundling its own libav*/libx264 under av.libs/ (the defect that decord.libs/ had, and
+# which the OpenCV leak check does not scan). Consequence: H.264 decode is NVDEC-only
+# (h264_cuvid), so decoding H.264 requires a GPU and NVIDIA_DRIVER_CAPABILITIES=...,video.
+av==17.1.0
 einops
 # sam3 is installed --no-deps from its own Dockerfile layer: its setup.py
 # pins numpy<2, which conflicts with the 26.03 base (numpy 2.x) and

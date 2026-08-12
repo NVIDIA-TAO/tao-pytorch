@@ -245,36 +245,45 @@ class TestVideoTextDataset:
         assert idx == 7
         assert row_position == 0
 
-    def test_decord_suppresses_recoverable_ffmpeg_errors(self, monkeypatch):
-        """Decord should retain fatal diagnostics while hiding benign errors."""
-        calls = []
+    def test_pyav_requests_the_linspace_frame_indices(self, monkeypatch):
+        """PyAV backend should decode exactly the sampled indices, in order."""
+        requested = []
 
-        class FakeBatch:
-            def asnumpy(self):
-                return np.zeros((2, 4, 4, 3), dtype=np.uint8)
+        def fake_decode(container, stream, rate, frame_indices):
+            del container, stream, rate
+            requested.append([int(index) for index in frame_indices])
+            return {
+                int(index): Image.new("RGB", (4, 4))
+                for index in frame_indices
+            }
 
-        class FakeReader:
-            def __init__(self, video_path):
-                calls.append(("VideoReader", video_path))
-
-            def __len__(self):
-                return 2
-
-            def get_batch(self, frame_indices):
-                calls.append(("get_batch", frame_indices.tolist()))
-                return FakeBatch()
-
-        fake_logging = SimpleNamespace(
-            FATAL=8,
-            set_level=lambda level: calls.append(("set_level", level)),
+        monkeypatch.setattr(
+            video_text_loader, "_pyav_decode_indices", fake_decode
         )
-        fake_decord = SimpleNamespace(
-            logging=fake_logging,
-            VideoReader=FakeReader,
+        monkeypatch.setattr(
+            video_text_loader, "_pyav_stream_rate", lambda stream: 30.0
         )
-        monkeypatch.setitem(sys.modules, "decord", fake_decord)
+        monkeypatch.setattr(
+            video_text_loader, "_pyav_stream_length", lambda stream, rate: 2
+        )
 
-        frames = video_text_loader._load_with_decord(
+        class FakeStream:
+            thread_type = "AUTO"
+
+        class FakeContainer:
+            streams = SimpleNamespace(video=[FakeStream()])
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc_info):
+                return False
+
+        monkeypatch.setitem(
+            sys.modules, "av", SimpleNamespace(open=lambda path: FakeContainer())
+        )
+
+        frames = video_text_loader._load_with_pyav(
             "/tmp/fake.mp4",
             num_frames=2,
             start_time_sec=None,
@@ -283,13 +292,60 @@ class TestVideoTextDataset:
             end_frame=2,
         )
 
-        assert calls == [
-            ("set_level", fake_logging.FATAL),
-            ("VideoReader", "/tmp/fake.mp4"),
-            ("get_batch", [0, 1]),
-        ]
+        assert requested == [[0, 1]]
         assert len(frames) == 2
         assert all(isinstance(frame, Image.Image) for frame in frames)
+
+    def test_pyav_repeats_indices_for_short_clips(self, monkeypatch):
+        """A clip shorter than num_frames pads with the last index, in order."""
+        requested = []
+
+        def fake_decode(container, stream, rate, frame_indices):
+            del container, stream, rate
+            requested.append([int(index) for index in frame_indices])
+            return {
+                int(index): Image.new("RGB", (4, 4))
+                for index in frame_indices
+            }
+
+        monkeypatch.setattr(
+            video_text_loader, "_pyav_decode_indices", fake_decode
+        )
+        monkeypatch.setattr(
+            video_text_loader, "_pyav_stream_rate", lambda stream: 30.0
+        )
+        monkeypatch.setattr(
+            video_text_loader, "_pyav_stream_length", lambda stream, rate: 2
+        )
+
+        class FakeStream:
+            thread_type = "AUTO"
+
+        class FakeContainer:
+            streams = SimpleNamespace(video=[FakeStream()])
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc_info):
+                return False
+
+        monkeypatch.setitem(
+            sys.modules, "av", SimpleNamespace(open=lambda path: FakeContainer())
+        )
+
+        frames = video_text_loader._load_with_pyav(
+            "/tmp/fake.mp4",
+            num_frames=4,
+            start_time_sec=None,
+            end_time_sec=None,
+            start_frame=0,
+            end_frame=2,
+        )
+
+        # _linspace_indices pads with the final index when the clip is short.
+        assert requested == [[0, 1, 1, 1]]
+        assert len(frames) == 4
 
     def test_opencv_frame_loader_decodes_video_clip(self, tmp_path):
         """OpenCV fallback should decode real video files in the TAO venv."""
