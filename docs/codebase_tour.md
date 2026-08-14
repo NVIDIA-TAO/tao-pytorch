@@ -6,6 +6,33 @@ directory is for, how the Python package is organized into modules, and where
 the sharp edges are. For the runtime and data-flow view, read
 [Architecture](architecture.md) next.
 
+## Where This Repository Fits
+
+TAO PyTorch is the training backend of the TAO ecosystem: it fine-tunes,
+evaluates, exports, quantizes, and distills the supported model families. It
+ships to users as one container, `nvcr.io/nvidia/tao/tao-toolkit:<version>-pyt`,
+alongside the sibling backends built from tao-deploy (TensorRT inference on the
+ONNX models exported here) and tao-dataservices (dataset preparation).
+
+The product surface is the set of per-model console commands this package
+installs (29 in total) with their subtasks (`train`, `evaluate`, `inference`,
+`export`, and family-specific extras). As of TAO 7.0, users reach these
+commands through a coding agent with the `tao-skills` plugin and the TAO
+Execution SDK, which dispatch jobs to a compute backend running this
+container; the commands can also be run directly inside it. The **TAO
+Launcher** (`tao model <network> <verb>`) and **FTMS** (REST API plus
+`nvidia-tao-client`) were removed in TAO 7.0; in-repo remnants such as the
+FTMS field metadata in `config/utils/types.py` and `JOB_ID`-gated log teeing
+are legacy integration surfaces. The `tao_pt` shell function used throughout
+these documents is the **development-only** container launcher
+(`scripts/envsetup.sh` over `runner/tao_pt.py`), unrelated to the removed TAO
+Launcher.
+
+In these documents, a *model family* is one network with its own console
+command and package; a *subtask* is one operation of a family (one module in
+its `scripts/` package); and a *specification* is the YAML experiment file
+passed with `-e`.
+
 ![TAO PyTorch module map](assets/module_map.svg)
 
 ## Repository Layout
