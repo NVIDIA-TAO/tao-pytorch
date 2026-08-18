@@ -107,7 +107,8 @@ class SFDataModule(pl.LightningDataModule):
                     img_size=self.img_size,
                     label_transform=self.label_transform,
                     to_tensor=True,
-                    color_map=self.color_map
+                    color_map=self.color_map,
+                    load_mask=False,  # inference split is unlabeled (no masks/<split> dir)
                 )
             else:
                 raise NotImplementedError(
@@ -132,7 +133,8 @@ class SFDataModule(pl.LightningDataModule):
                     img_size=self.img_size,
                     label_transform=self.label_transform,
                     to_tensor=True,
-                    color_map=self.color_map
+                    color_map=self.color_map,
+                    load_mask=False,  # calibration data is image-only (unlabeled)
                 )
             else:
                 raise ValueError(

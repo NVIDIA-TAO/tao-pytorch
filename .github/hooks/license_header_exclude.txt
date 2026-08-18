@@ -1,0 +1,67 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Paths exempt from the SPDX license header check
+# (.github/hooks/check_license_header.py). One repo-relative path per
+# line; '#' starts a comment.
+#
+# Every file here already carries a valid license header in the older
+# full-text form rather than the SPDX form, so it is left as-is. This
+# list is not a general opt-out: new files must use the SPDX header.
+
+docker/install_jfrog.sh
+nvidia_tao_pytorch/cv/classification_pyt/utils/utils_vis.py
+nvidia_tao_pytorch/cv/optical_inspection/dataloader/utils.py
+nvidia_tao_pytorch/cv/segformer/utils/loss.py
+nvidia_tao_pytorch/cv/segformer/utils/metric_tool.py
+nvidia_tao_pytorch/cv/segformer/utils/utils_vis.py
+nvidia_tao_pytorch/cv/visual_changenet/classification/models/changenet.py
+nvidia_tao_pytorch/cv/visual_changenet/classification/models/cn_pl_model.py
+nvidia_tao_pytorch/cv/visual_changenet/segmentation/dataloader/cn_dataset.py
+nvidia_tao_pytorch/cv/visual_changenet/segmentation/dataloader/data_utils_cn.py
+nvidia_tao_pytorch/cv/visual_changenet/segmentation/dataloader/pl_changenet_data_module.py
+nvidia_tao_pytorch/cv/visual_changenet/segmentation/models/changenet_utils.py
+nvidia_tao_pytorch/cv/visual_changenet/segmentation/models/changenet.py
+nvidia_tao_pytorch/cv/visual_changenet/segmentation/models/cn_pl_model.py
+nvidia_tao_pytorch/cv/visual_changenet/segmentation/utils/losses.py
+nvidia_tao_pytorch/cv/visual_changenet/segmentation/utils/metric_tool.py
+nvidia_tao_pytorch/cv/visual_changenet/segmentation/utils/utils_vis.py
+nvidia_tao_pytorch/multimodal/clip/dataloader/sampler.py
+nvidia_tao_pytorch/multimodal/clip/loss/masked_siglip_loss.py
+nvidia_tao_pytorch/multimodal/clip/loss/metadata_mask.py
+nvidia_tao_pytorch/multimodal/clip/model/evaluation/pas.py
+nvidia_tao_pytorch/multimodal/clip/utils/attribute_metadata.py
+nvidia_tao_pytorch/multimodal/radio/utils/utils_vis.py
+nvidia_tao_pytorch/pointcloud/pointpillars/tools/__init__.py
+nvidia_tao_pytorch/pointcloud/pointpillars/tools/eval_utils/__init__.py
+nvidia_tao_pytorch/pointcloud/pointpillars/tools/eval_utils/eval_utils.py
+nvidia_tao_pytorch/pointcloud/pointpillars/tools/export/__init__.py
+nvidia_tao_pytorch/pointcloud/pointpillars/tools/export/data.py
+nvidia_tao_pytorch/pointcloud/pointpillars/tools/export/decorators.py
+nvidia_tao_pytorch/pointcloud/pointpillars/tools/export/simplifier_onnx.py
+nvidia_tao_pytorch/pointcloud/pointpillars/tools/scripts/dataset_convert_kitti.py
+nvidia_tao_pytorch/pointcloud/pointpillars/tools/scripts/dist_test.sh
+nvidia_tao_pytorch/pointcloud/pointpillars/tools/scripts/dist_train.sh
+nvidia_tao_pytorch/pointcloud/pointpillars/tools/scripts/drop_class.py
+nvidia_tao_pytorch/pointcloud/pointpillars/tools/scripts/filter_labels.py
+nvidia_tao_pytorch/pointcloud/pointpillars/tools/scripts/gen_lidar_labels.py
+nvidia_tao_pytorch/pointcloud/pointpillars/tools/scripts/gen_lidar_points.py
+nvidia_tao_pytorch/pointcloud/pointpillars/tools/scripts/get_pc_ranges.py
+nvidia_tao_pytorch/pointcloud/pointpillars/tools/scripts/kitti_split.py
+nvidia_tao_pytorch/pointcloud/pointpillars/tools/scripts/slurm_test_mgpu.sh
+nvidia_tao_pytorch/pointcloud/pointpillars/tools/scripts/slurm_test_single.sh
+nvidia_tao_pytorch/pointcloud/pointpillars/tools/scripts/slurm_train.sh
+nvidia_tao_pytorch/pointcloud/pointpillars/tools/train_utils/__init__.py
+nvidia_tao_pytorch/pointcloud/pointpillars/tools/train_utils/optimization/__init__.py
+nvidia_tao_pytorch/pointcloud/pointpillars/tools/train_utils/optimization/fastai_optim.py
+nvidia_tao_pytorch/pointcloud/pointpillars/tools/train_utils/optimization/learning_schedules_fastai.py
+nvidia_tao_pytorch/pointcloud/pointpillars/tools/train_utils/train_utils.py
+nvidia_tao_pytorch/pointcloud/pointpillars/tools/visual_utils/__init__.py
+nvidia_tao_pytorch/pointcloud/pointpillars/tools/visual_utils/visualize_utils.py
+tests/core/test_initialize_experiments.py
+tests/cv_unit_test/grounding_dino/test_deterministic_label_order.py
+tests/multimodal_unit_test/clip/test_masked_siglip_loss.py
+tests/multimodal_unit_test/clip/test_metadata_mask.py
+tests/multimodal_unit_test/clip/test_pas_eval.py
+tests/multimodal_unit_test/clip/test_pl_clip_model_validation.py
+tests/multimodal_unit_test/clip/test_siglip_loss_dist_impl.py

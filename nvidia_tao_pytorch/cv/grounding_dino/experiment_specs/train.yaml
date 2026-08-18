@@ -26,6 +26,7 @@ dataset:
   workers: 16
   max_labels: 80
   dataset_type: serialized  # To reduce the system memory usage
+  # deterministic_label_order: true  # canonicalize ODVG caption/label order for run-to-run reproducibility (default: true)
 model:
   # pretrained_backbone_path: ???  # uncomment if pretraining
   # text_encoder_type: bert-base-uncased  # set to path if you don't want to download HF checkpoint. uncomment if pretraining

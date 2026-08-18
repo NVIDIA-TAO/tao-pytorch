@@ -16,6 +16,67 @@ import timm
 
 from nvidia_tao_pytorch.cv.backbone_v2 import BACKBONE_REGISTRY
 from nvidia_tao_pytorch.cv.backbone_v2.backbone_base import BackboneBase
+from nvidia_tao_pytorch.core.utils.ptm_utils import load_pretrained_weights
+
+
+_CONVERSION_HINT = (
+    "Run `dinov3 convert -e <dinov3_spec.yaml> "
+    "convert.checkpoint=<ssl_checkpoint> "
+    "convert.output_path=<converted_backbone.safetensors>` first."
+)
+
+
+def validate_dinov3_checkpoint(state_dict, allow_partial=False):
+    """Validate that a DINOv3 state dict uses the downstream timm layout.
+
+    TAO DINOv3 SSL checkpoints use a different key layout and must pass through
+    the existing `dinov3 convert` task before a downstream task consumes them.
+    Hugging Face `timm/*dinov3*` checkpoints and converted TAO checkpoints
+    both use the accepted timm layout.
+
+    Args:
+        state_dict (Mapping): DINOv3 state dict to validate.
+        allow_partial (bool): Permit incomplete timm-format state dicts while
+            retaining raw SSL checkpoint rejection.
+
+    Raises:
+        ValueError: If the state dict is empty, is a raw TAO SSL checkpoint, or
+            does not contain the required timm DINOv3 backbone keys.
+    """
+    if not state_dict and not allow_partial:
+        raise ValueError(f"DINOv3 checkpoint is empty. {_CONVERSION_HINT}")
+
+    keys = []
+    for key in state_dict:
+        normalized = key
+        for prefix in ("vit.", "inner."):
+            if normalized.startswith(prefix):
+                normalized = normalized[len(prefix):]
+                break
+        keys.append(normalized)
+
+    raw_ssl_markers = ("mask_token", "register_tokens")
+    is_raw_ssl = (
+        any(key in raw_ssl_markers for key in keys) or
+        any(key.endswith((".ls1.gamma", ".ls2.gamma")) for key in keys) or
+        any(key.startswith(("teacher.", "student.")) for key in keys)
+    )
+    if is_raw_ssl:
+        raise ValueError(
+            "Raw TAO DINOv3 SSL checkpoints are not accepted by downstream "
+            f"task backbones. {_CONVERSION_HINT}"
+        )
+
+    required_keys = ("cls_token", "patch_embed.proj.weight")
+    if allow_partial:
+        return
+    if not all(key in keys for key in required_keys) or not any(
+        key.startswith("blocks.0.") for key in keys
+    ):
+        raise ValueError(
+            "DINOv3 checkpoint is not a compatible timm-format backbone. "
+            f"{_CONVERSION_HINT}"
+        )
 
 
 class DINOV3Wrapper(BackboneBase):
@@ -100,6 +161,31 @@ class DINOV3Wrapper(BackboneBase):
         """
         return self.head
 
+    def load_state_dict(self, state_dict, **kwargs):
+        """Copy parameters and buffers from state_dict into this module and its descendants.
+
+        The wrapped timm model lives under `self.inner`, so the wrapper's parameters are named
+        `inner.*`. A timm DINOv3 checkpoint (or an SSL->timm converted backbone) uses bare keys
+        (`blocks.*`, `cls_token`, `patch_embed.*`, `norm.*`, ...); route those to the
+        wrapped model by prefixing `inner.`.
+
+        Note: the prefixing is all-or-nothing. It only triggers when *no* key is already
+        `inner.`/`head.`-prefixed, i.e. it expects a uniformly-bare timm state dict (the
+        convert/timm load paths). A mixed dict (some keys bare, some already `inner.`-prefixed)
+        skips prefixing and will fail the strict load below; that case is not supported.
+
+        Args:
+            state_dict (dict): a dict containing parameters and persistent buffers.
+            **kwargs: Additional arguments passed to `nn.Module.load_state_dict`.
+        """
+        validate_dinov3_checkpoint(
+            state_dict,
+            allow_partial=not kwargs.get("strict", True),
+        )
+        if state_dict and not any(k.startswith(("inner.", "head.")) for k in state_dict):
+            state_dict = {f"inner.{k}": v for k, v in state_dict.items()}
+        return super().load_state_dict(state_dict, **kwargs)
+
     def reset_classifier(self, num_classes, global_pool=""):
         """Reset the classification head with a new number of classes.
 
@@ -156,24 +242,35 @@ class DINOV3Wrapper(BackboneBase):
                 return self.head(cls_token)
 
 
-_DEFAULT_BASE_PATH = '/lustre/fs11/portfolios/edgeai/projects/edgeai_tao-ptm_image-foundation-model-clip/users/yuw/experiments/dinov3'
-_CHECKPOINT_MAP = {
-    'dinov3_vit7b16': 'dinov3_vit7b16_pretrain_lvd1689m-a955f4ea.pth',
-    'dinov3_vith16plus': 'dinov3_vith16plus_pretrain_lvd1689m-7c1da9a5.pth',
-    'dinov3_vitl16': 'dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth',
-    'dinov3_vitb16': 'dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth',
-}
+def create_dinov3_model(dino_v3_model: str, pretrained: bool = False, **kwargs):
+    """Create a timm DINOv3 model with actionable pretrained-weight errors."""
+    try:
+        return timm.create_model(dino_v3_model, pretrained=pretrained, **kwargs)
+    except Exception as exc:
+        if not pretrained:
+            raise
+        raise RuntimeError(
+            "Unable to load pretrained DINOv3 weights from timm/Hugging Face. "
+            "Ensure HF_TOKEN grants access to the gated model, or set "
+            "model.backbone.pretrained_backbone_path to a local converted TAO "
+            f"checkpoint. {_CONVERSION_HINT}"
+        ) from exc
 
 
-def _load_dino_v3(dino_v3_model: str, pretrained_backbone_path: Optional[str] = None):
+def _load_dino_v3(
+    dino_v3_model: str,
+    pretrained_backbone_path: Optional[str] = None,
+    pretrained: bool = False,
+):
     """Load the DINOv3 model.
 
     Args:
         dino_v3_model (str): The timm model name.
         pretrained_backbone_path (str, optional): Path to a local DINOv3
-            checkpoint file (``.pth``). When set, weights are loaded from disk
-            via timm's ``checkpoint_path`` mechanism; otherwise the pretrained
-            weights are downloaded from the timm/HF hub.
+            checkpoint file. When set, weights are validated and loaded from
+            disk; otherwise `pretrained` controls whether timm/HF weights are
+            downloaded.
+        pretrained (bool): Fetch timm/HF weights when no local path is set.
     """
     # option1: use torch.hub
     # model = torch.hub.load(
@@ -195,13 +292,15 @@ def _load_dino_v3(dino_v3_model: str, pretrained_backbone_path: Optional[str] = 
     # model = AutoModel.from_pretrained(ckpt_path)
     # option3: use timm
     if pretrained_backbone_path:
-        model = timm.create_model(
-            dino_v3_model,
-            pretrained=False,
-            checkpoint_path=pretrained_backbone_path,
+        state_dict = load_pretrained_weights(
+            pretrained_backbone_path,
+            weights_only=True,
         )
+        validate_dinov3_checkpoint(state_dict)
+        model = create_dinov3_model(dino_v3_model, pretrained=False)
+        model.load_state_dict(state_dict, strict=True)
     else:
-        model = timm.create_model(dino_v3_model, pretrained=True)
+        model = create_dinov3_model(dino_v3_model, pretrained=pretrained)
     return model
 
 
@@ -211,10 +310,11 @@ def dinov3_vit7b16(pretrained_backbone_path: Optional[str] = None, **kwargs):
 
     Args:
         pretrained_backbone_path (str, optional): Local DINOv3 checkpoint path.
-            When ``None``, weights are downloaded from the timm/HF hub.
+            Pass ``pretrained=True`` to download timm/HF weights when unset.
         **kwargs: Forwarded to :class:`DINOV3Wrapper`.
     """
-    model = _load_dino_v3("vit_7b_patch16_dinov3.lvd1689m", pretrained_backbone_path=pretrained_backbone_path)
+    pretrained = kwargs.pop("pretrained", False)
+    model = _load_dino_v3("vit_7b_patch16_dinov3.lvd1689m", pretrained_backbone_path, pretrained)
     model = DINOV3Wrapper(model, **kwargs)
     return model
 
@@ -225,10 +325,41 @@ def dinov3_vitl16(pretrained_backbone_path: Optional[str] = None, **kwargs):
 
     Args:
         pretrained_backbone_path (str, optional): Local DINOv3 checkpoint path.
-            When ``None``, weights are downloaded from the timm/HF hub.
+            Pass ``pretrained=True`` to download timm/HF weights when unset.
         **kwargs: Forwarded to :class:`DINOV3Wrapper`.
     """
-    model = _load_dino_v3("vit_large_patch16_dinov3.lvd1689m", pretrained_backbone_path=pretrained_backbone_path)
+    pretrained = kwargs.pop("pretrained", False)
+    model = _load_dino_v3("vit_large_patch16_dinov3.lvd1689m", pretrained_backbone_path, pretrained)
+    model = DINOV3Wrapper(model, **kwargs)
+    return model
+
+
+@BACKBONE_REGISTRY.register()
+def dinov3_vits16(pretrained_backbone_path: Optional[str] = None, **kwargs):
+    """Load the DINOv3 model with S parameters.
+
+    Args:
+        pretrained_backbone_path (str, optional): Local DINOv3 checkpoint path.
+            Pass ``pretrained=True`` to download timm/HF weights when unset.
+        **kwargs: Forwarded to :class:`DINOV3Wrapper`.
+    """
+    pretrained = kwargs.pop("pretrained", False)
+    model = _load_dino_v3("vit_small_patch16_dinov3.lvd1689m", pretrained_backbone_path, pretrained)
+    model = DINOV3Wrapper(model, **kwargs)
+    return model
+
+
+@BACKBONE_REGISTRY.register()
+def dinov3_vits16plus(pretrained_backbone_path: Optional[str] = None, **kwargs):
+    """Load the DINOv3 model with S+ parameters (SwiGLU FFN).
+
+    Args:
+        pretrained_backbone_path (str, optional): Local DINOv3 checkpoint path.
+            Pass ``pretrained=True`` to download timm/HF weights when unset.
+        **kwargs: Forwarded to :class:`DINOV3Wrapper`.
+    """
+    pretrained = kwargs.pop("pretrained", False)
+    model = _load_dino_v3("vit_small_plus_patch16_dinov3.lvd1689m", pretrained_backbone_path, pretrained)
     model = DINOV3Wrapper(model, **kwargs)
     return model
 
@@ -239,10 +370,11 @@ def dinov3_vitb16(pretrained_backbone_path: Optional[str] = None, **kwargs):
 
     Args:
         pretrained_backbone_path (str, optional): Local DINOv3 checkpoint path.
-            When ``None``, weights are downloaded from the timm/HF hub.
+            Pass ``pretrained=True`` to download timm/HF weights when unset.
         **kwargs: Forwarded to :class:`DINOV3Wrapper`.
     """
-    model = _load_dino_v3("vit_base_patch16_dinov3.lvd1689m", pretrained_backbone_path=pretrained_backbone_path)
+    pretrained = kwargs.pop("pretrained", False)
+    model = _load_dino_v3("vit_base_patch16_dinov3.lvd1689m", pretrained_backbone_path, pretrained)
     model = DINOV3Wrapper(model, **kwargs)
     return model
 
@@ -253,9 +385,10 @@ def dinov3_vith16plus(pretrained_backbone_path: Optional[str] = None, **kwargs):
 
     Args:
         pretrained_backbone_path (str, optional): Local DINOv3 checkpoint path.
-            When ``None``, weights are downloaded from the timm/HF hub.
+            Pass ``pretrained=True`` to download timm/HF weights when unset.
         **kwargs: Forwarded to :class:`DINOV3Wrapper`.
     """
-    model = _load_dino_v3("vit_huge_plus_patch16_dinov3.lvd1689m", pretrained_backbone_path=pretrained_backbone_path)
+    pretrained = kwargs.pop("pretrained", False)
+    model = _load_dino_v3("vit_huge_plus_patch16_dinov3.lvd1689m", pretrained_backbone_path, pretrained)
     model = DINOV3Wrapper(model, **kwargs)
     return model

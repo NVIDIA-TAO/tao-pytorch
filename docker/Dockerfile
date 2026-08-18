@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 ARG PYTORCH_BASE_IMAGE=nvcr.io/nvidia/pytorch:26.03-py3
 FROM ${PYTORCH_BASE_IMAGE}
 
@@ -60,6 +62,7 @@ cd "ffmpeg-${FFMPEG_VERSION}"
   --enable-protocol=file \
   --enable-muxer=webm --enable-muxer=image2 \
   --enable-demuxer=mov --enable-demuxer=matroska --enable-demuxer=image2 \
+  --enable-demuxer=avi \
   --enable-parser=h264 --enable-parser=vp8 --enable-parser=vp9 \
   --enable-bsf=h264_mp4toannexb --enable-bsf=vp9_superframe \
   --enable-filter=fps --enable-filter=scale --enable-filter=format \
@@ -95,6 +98,9 @@ ffmpeg -hide_banner -muxers   2>/dev/null | awk '{print $2}' | grep -Fx webm   >
 ffmpeg -hide_banner -muxers   2>/dev/null | awk '{print $2}' | grep -Fx image2 >/dev/null || { echo "ERROR: muxer image2 missing" >&2; exit 1; }
 ffmpeg -hide_banner -demuxers 2>/dev/null | awk '{print $2}' | grep -E '(^|,)matroska(,|$)' >/dev/null || { echo "ERROR: demuxer matroska,webm missing" >&2; exit 1; }
 ffmpeg -hide_banner -demuxers 2>/dev/null | awk '{print $2}' | grep -E '(^|,)mov(,|$)'      >/dev/null || { echo "ERROR: demuxer mov missing" >&2; exit 1; }
+# AVI is a container format, not a codec: no libx264/libx265/AAC exposure. Required because
+# a third of the KPI video corpus is .avi (MJPEG); without it av.open() raises InvalidDataError.
+ffmpeg -hide_banner -demuxers 2>/dev/null | awk '{print $2}' | grep -Fx avi                >/dev/null || { echo "ERROR: demuxer avi missing" >&2; exit 1; }
 ffmpeg -hide_banner -protocols 2>/dev/null | awk '{print $1}' | grep -Fx file             >/dev/null || { echo "ERROR: protocol file missing" >&2; exit 1; }
 ffmpeg -hide_banner -bsfs      2>/dev/null | awk '{print $1}' | grep -Fx h264_mp4toannexb  >/dev/null || { echo "ERROR: bsf h264_mp4toannexb missing" >&2; exit 1; }
 # vp9_superframe is required to mux libvpx-vp9 output into WebM/Matroska (the FF-1 path).
@@ -111,6 +117,39 @@ COPY docker/requirements-pip.txt requirements-pip.txt
 RUN pip install --upgrade pip \
   && pip install --no-build-isolation -r requirements-pip.txt \
   && rm requirements-pip.txt
+
+# Rebuild PyAV against the approved system FFmpeg so no PyPI wheel can bring a
+# bundled av.libs/ copy of libx264/libx265. The requirements pin installs the
+# wheel; this replaces it with a source build linked against /usr/local, which
+# inherits the codec allow-list asserted above. Since h264_cuvid is then the only
+# registered H.264 decoder, generic h264 resolves to NVDEC with no extra library.
+RUN <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+export LD_LIBRARY_PATH="/usr/local/lib:${LD_LIBRARY_PATH:-}"
+
+pip uninstall -y av decord || true
+pip install --no-cache-dir --force-reinstall --no-deps --no-binary=av "av==17.1.0"
+
+site_packages="$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+bad_libs="$(find "${site_packages}" \
+  \( -path '*/av.libs/*' -o -path '*/decord.libs/*' \
+     -o -name 'libx264*.so*' -o -name 'libx265*.so*' -o -name 'libopenh264*.so*' \) -print)"
+if [ -n "${bad_libs}" ]; then
+  echo "ERROR: forbidden bundled video codec libraries remain in ${site_packages}:" >&2
+  echo "${bad_libs}" >&2
+  exit 1
+fi
+
+python - <<'PY_NO_DECORD'
+import importlib.util
+if importlib.util.find_spec("decord") is not None:
+    raise SystemExit("Decord is installed; this image decodes video through PyAV")
+import av
+print("PyAV", av.__version__, "linked against the restricted system FFmpeg")
+PY_NO_DECORD
+EOF
 
 
 # Set platform-specific library path using uname

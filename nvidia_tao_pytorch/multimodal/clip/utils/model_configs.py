@@ -212,6 +212,8 @@ map_clip_model_cfg = {
 
 # SigLIP2 model configurations (standalone, not via RADIO).
 # Uses Google's SigLIP2 vision + text encoders from HuggingFace.
+# None explicitly means that runtime preserves the pretrained source-owned
+# calibration unless the user supplies a configuration override.
 siglip2_model_configs = {
     # NaFlex (dynamic resolution)
     "siglip2-so400m-patch16-naflex": {
@@ -221,8 +223,8 @@ siglip2_model_configs = {
         "image_size": 384,
         "patch_size": 16,
         "embed_dim": 1152,
-        "init_logit_scale": 2.3026,
-        "init_logit_bias": -10.0,
+        "init_logit_scale": None,
+        "init_logit_bias": None,
     },
     # Fixed resolution patch14 variants
     "siglip2-so400m-patch14-224": {
@@ -232,8 +234,8 @@ siglip2_model_configs = {
         "image_size": 224,
         "patch_size": 14,
         "embed_dim": 1152,
-        "init_logit_scale": 2.3026,
-        "init_logit_bias": -10.0,
+        "init_logit_scale": None,
+        "init_logit_bias": None,
     },
     "siglip2-so400m-patch14-384": {
         "model_type": "siglip2",
@@ -242,8 +244,8 @@ siglip2_model_configs = {
         "image_size": 384,
         "patch_size": 14,
         "embed_dim": 1152,
-        "init_logit_scale": 2.3026,
-        "init_logit_bias": -10.0,
+        "init_logit_scale": None,
+        "init_logit_bias": None,
     },
     # Fixed resolution patch16 variants
     "siglip2-so400m-patch16-256": {
@@ -253,8 +255,8 @@ siglip2_model_configs = {
         "image_size": 256,
         "patch_size": 16,
         "embed_dim": 1152,
-        "init_logit_scale": 2.3026,
-        "init_logit_bias": -10.0,
+        "init_logit_scale": None,
+        "init_logit_bias": None,
     },
     "siglip2-so400m-patch16-384": {
         "model_type": "siglip2",
@@ -263,8 +265,8 @@ siglip2_model_configs = {
         "image_size": 384,
         "patch_size": 16,
         "embed_dim": 1152,
-        "init_logit_scale": 2.3026,
-        "init_logit_bias": -10.0,
+        "init_logit_scale": None,
+        "init_logit_bias": None,
     },
     "siglip2-so400m-patch16-512": {
         "model_type": "siglip2",
@@ -273,17 +275,17 @@ siglip2_model_configs = {
         "image_size": 512,
         "patch_size": 16,
         "embed_dim": 1152,
-        "init_logit_scale": 2.3026,
-        "init_logit_bias": -10.0,
+        "init_logit_scale": None,
+        "init_logit_bias": None,
     },
 }
 
 # RADIO model configurations (loaded via torch.hub from NVlabs/RADIO)
 # User-facing adaptor names: 'siglip' (default) or 'clip' (DFN CLIP).
 # 'siglip' auto-resolves to the correct internal name per model version.
-# Recommended settings per adaptor:
-#   'siglip': loss_type=siglip, init_logit_scale=2.3026, init_logit_bias=-10.0
-#   'clip':   loss_type=clip,   init_logit_scale=2.6592, init_logit_bias=0.0
+# The entries below are fallback metadata for the default SigLIP2 text-only
+# adaptors. The 'clip' adaptor preserves native OpenCLIP calibration when its
+# configuration overrides are None.
 radio_model_configs = {
     "c-radio_v3-h": {
         "model_type": "radio",
@@ -327,64 +329,65 @@ radio_model_configs = {
     },
 }
 
-# OpenCLIP model configurations (using backbone_v2)
-# These models use the backbone_v2/open_clip.py implementation
+# OpenCLIP model configurations (using backbone_v2).
+# These models use the backbone_v2/open_clip.py implementation. None means
+# runtime preserves native calibration unless the user supplies an override.
 openclip_model_configs = {
     "ViT-L-14-SigLIP-CLIPA-224": {
         "model_type": "openclip",
         "description": "ViT-L/14 with SigLIP CLIPA training, 224x224 images",
         "image_size": 224,
         "embed_dim": 768,
-        "init_logit_scale": 2.3026,  # np.log(10) for SigLIP
-        "init_logit_bias": -10.0,
+        "init_logit_scale": None,
+        "init_logit_bias": None,
     },
     "ViT-L-14-SigLIP-CLIPA-336": {
         "model_type": "openclip",
         "description": "ViT-L/14 with SigLIP CLIPA training, 336x336 images",
         "image_size": 336,
         "embed_dim": 768,
-        "init_logit_scale": 2.3026,
-        "init_logit_bias": -10.0,
+        "init_logit_scale": None,
+        "init_logit_bias": None,
     },
     "ViT-H-14-SigLIP-CLIPA-224": {
         "model_type": "openclip",
         "description": "ViT-H/14 with SigLIP CLIPA training, 224x224 images",
         "image_size": 224,
         "embed_dim": 1024,
-        "init_logit_scale": 2.3026,
-        "init_logit_bias": -10.0,
+        "init_logit_scale": None,
+        "init_logit_bias": None,
     },
     "ViT-H-14-SigLIP-CLIPA-336": {
         "model_type": "openclip",
         "description": "ViT-H/14 with SigLIP CLIPA training, 336x336 images",
         "image_size": 336,
         "embed_dim": 1024,
-        "init_logit_scale": 2.3026,
-        "init_logit_bias": -10.0,
+        "init_logit_scale": None,
+        "init_logit_bias": None,
     },
     "ViT-H-14-SigLIP-CLIPA-574": {
         "model_type": "openclip",
         "description": "ViT-H/14 with SigLIP CLIPA training, 574x574 images",
         "image_size": 574,
         "embed_dim": 1024,
-        "init_logit_scale": 2.3026,
-        "init_logit_bias": -10.0,
+        "init_logit_scale": None,
+        "init_logit_bias": None,
     },
     "ViT-L-14-SigLIP-CLIPA-84": {
         "model_type": "openclip",
         "description": "ViT-L/14 SigLIP CLIPA, 84x84 (low-res)",
         "image_size": 84,
         "embed_dim": 768,
-        "init_logit_scale": 2.3026,
-        "init_logit_bias": -10.0,
+        "init_logit_scale": None,
+        "init_logit_bias": None,
     },
     "ViT-H-14-SigLIP-CLIPA-84": {
         "model_type": "openclip",
         "description": "ViT-H/14 SigLIP CLIPA, 84x84 (low-res)",
         "image_size": 84,
         "embed_dim": 1024,
-        "init_logit_scale": 2.3026,
-        "init_logit_bias": -10.0,
+        "init_logit_scale": None,
+        "init_logit_bias": None,
     },
 }
 

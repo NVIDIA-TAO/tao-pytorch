@@ -1,10 +1,73 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+default_install_hook_types:
+- pre-commit
+- commit-msg
 repos:
-  - repo: local
-    hooks:
-      - id: update-readme-supported-commands
-        name: Update README supported commands
-        description: Regenerate the supported-commands table in README.md from setup.py entrypoints.
-        entry: python3 tools/update_readme_supported_commands.py
-        language: system
-        pass_filenames: false
-        files: ^(setup\.py|tools/update_readme_supported_commands\.py|nvidia_tao_pytorch/.+/scripts/.+\.py|README\.md)$
+- repo: https://github.com/trufflesecurity/trufflehog
+  rev: v3.96.0
+  hooks:
+  - id: trufflehog
+    name: TruffleHog secret scan
+    description: No credential may be committed.
+    entry: trufflehog filesystem --results=verified,unknown --fail --no-update --exclude-detectors=lob
+    language: golang
+    pass_filenames: true
+    stages:
+    - pre-commit
+- repo: local
+  hooks:
+  - id: dependency-guard
+    name: dependency change guard
+    description: Dependency changes are routed to the TAO Infra team.
+    entry: python .github/hooks/check_dependency_change.py
+    language: python
+    files: '(?i)(^|/)(requirements[^/]*\.(txt|in)|constraints[^/]*\.txt|pyproject\.toml|setup\.py|setup\.cfg|Pipfile|Pipfile\.lock|poetry\.lock|uv\.lock|environment[^/]*\.ya?ml|conda[^/]*\.ya?ml|package\.json|package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb|go\.mod|go\.sum|Cargo\.toml|Cargo\.lock|Gemfile|Gemfile\.lock|pom\.xml|build\.gradle(\.kts)?|settings\.gradle(\.kts)?|gradle\.lockfile|composer\.json|composer\.lock|Package\.swift|Package\.resolved|Podfile|Podfile\.lock|Cartfile|conanfile\.(txt|py)|vcpkg\.json|packages\.config|paket\.dependencies|Chart\.ya?ml|Chart\.lock|Dockerfile|Dockerfile\.[^/]+|[^/]+\.Dockerfile|[^/]+\.csproj|\.gitmodules)$'
+    stages:
+    - pre-commit
+  - id: license-header
+    name: license header
+    description: Every source file must carry an SPDX license header.
+    entry: python .github/hooks/check_license_header.py
+    language: python
+    files: \.(py|sh)$
+    stages:
+    - pre-commit
+  - id: pylint
+    name: pylint
+    description: Static analysis, configured by .pylintrc.
+    entry: pylint --rcfile .pylintrc
+    language: system
+    types:
+    - python
+    files: ^(nvidia_tao_pytorch/)
+    stages:
+    - pre-commit
+  - id: pydocstyle
+    name: pydocstyle
+    description: Docstring conventions.
+    entry: pydocstyle --ignore=D4,D107,D200,D203,D205,D210,D212,D213,D301,D400,D401
+    language: system
+    types:
+    - python
+    files: ^(nvidia_tao_pytorch/)
+    stages:
+    - pre-commit
+  - id: flake8
+    name: flake8
+    description: Style and lint checks.
+    entry: flake8 --ignore=E24,W504,E501,C400,C403,C408,C409,C414,C413,C416,C417,C419
+    language: system
+    types:
+    - python
+    files: ^(nvidia_tao_pytorch/)
+    stages:
+    - pre-commit
+  - id: dco-signoff
+    name: DCO sign-off check
+    description: Every commit must carry a Developer Certificate of Origin sign-off.
+    entry: python .github/hooks/check_dco_signoff.py
+    language: python
+    stages:
+    - commit-msg

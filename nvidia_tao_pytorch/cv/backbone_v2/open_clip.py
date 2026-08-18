@@ -297,7 +297,52 @@ class OpenCLIP(BackboneBase):
         else:
             raise NotImplementedError(f"Unsupported model type {model_name} for dynamic image size.")
         self.num_features = self.model.visual.output_dim
+        # Summary (pooled) dim is always the projected joint-embedding dim. Tracked separately so
+        # that when ``spatial_raw`` is enabled (below), the spatial head can size to the raw
+        # transformer width while the summary head stays at the projected dim.
+        self.num_summary_features = self.model.visual.output_dim
+        # When True, ``forward(return_features=True)`` returns spatial tokens at the raw transformer
+        # width (skipping the width->joint projection). Required by FeatSharp, whose upsampler was
+        # trained on the raw (e.g. 1280-dim) DFN-CLIP features; see ``enable_spatial_raw``.
+        self.spatial_raw = False
         self.head = nn.Linear(self.model.visual.output_dim, num_classes) if num_classes > 0 else nn.Identity()
+
+    @property
+    def patch_size(self):
+        """ViT patch size (int) of the visual backbone.
+
+        Exposed for adaptors (e.g. FeatSharp) that need the patch size to reconstruct the spatial
+        grid. By default returns the scalar patch size derived from the visual transformer's
+        ``patch_size`` (a tuple like ``(14, 14)`` for ViT-H-14); subclasses may override it by
+        assigning ``self.patch_size = ...`` (e.g. the segformer OpenCLIP adapter).
+        """
+        override = getattr(self, "_patch_size", None)
+        if override is not None:
+            return override
+        ps = self.model.visual.patch_size
+        return ps[0] if isinstance(ps, (list, tuple)) else ps
+
+    @patch_size.setter
+    def patch_size(self, value):
+        """Allow subclasses/callers to set an explicit patch size (stored in a backing field)."""
+        self._patch_size = value
+
+    def enable_spatial_raw(self):
+        """Emit raw (un-projected) transformer-width spatial tokens from ``forward(return_features)``.
+
+        FeatSharp's DFN-CLIP upsampler was trained on the raw transformer-width features (1280 for
+        ViT-H), not the projected joint-embedding dim (1024). Enabling this skips the spatial
+        ``tokens @ visual.proj`` projection so FeatSharp sees the dimensionality it expects, and
+        resizes ``num_features`` (the per-patch/spatial dim the loss uses) to the transformer width.
+        The pooled summary is unaffected and stays at ``num_summary_features`` (the projected dim).
+        No-op when the visual backbone has no projection (tokens are already at transformer width).
+        """
+        proj = getattr(self.model.visual, "proj", None)
+        if proj is None:
+            return
+        self.spatial_raw = True
+        # proj maps [transformer_width -> output_dim]; its first dim is the raw spatial width.
+        self.num_features = proj.shape[0]
 
     def _register_nvclip_configs(self):
         """Register NVCLIP model configurations.
@@ -407,9 +452,18 @@ class OpenCLIP(BackboneBase):
             x = self.patch_dropout(x)
             x = self.ln_pre(x)
 
-            x = x.permute(1, 0, 2)  # NLD -> LND
-            x = self.transformer(x)
-            x = x.permute(1, 0, 2)  # LND -> NLD
+            # Respect the transformer's sequence-dim convention. Newer open_clip builds set
+            # Transformer.batch_first=True and expect NLD directly; the old unconditional
+            # NLD->LND / LND->NLD permutes collapsed attention to a length-1 sequence at
+            # batch_size=1 (no token mixing) -- corrupting the CLIP teacher target. Older builds
+            # (batch_first=False) still expect LND, so keep the permutes for them (no regression
+            # for any build a consumer swaps in via config).
+            if getattr(self.transformer, "batch_first", False):
+                x = self.transformer(x)
+            else:
+                x = x.permute(1, 0, 2)  # NLD -> LND
+                x = self.transformer(x)
+                x = x.permute(1, 0, 2)  # LND -> NLD
             if self.attn_pool is not None:
                 if self.attn_pool_contrastive is not None:
                     # This is untested, WIP pooling that should match paper
@@ -583,7 +637,7 @@ class OpenCLIP(BackboneBase):
         """
         raise NotImplementedError("forward_feature_pyramid is not implemented.")
 
-    def forward(self, x):
+    def forward(self, x, return_features: bool = False, return_logits: bool = False):
         """Forward pass through the visual encoder.
 
         This method performs the complete forward pass through the OpenCLIP model,
@@ -591,11 +645,54 @@ class OpenCLIP(BackboneBase):
 
         Args:
             x (torch.Tensor): Input images of shape (B, C, H, W).
+            return_features (bool): If True, return ``(summary, spatial_features)``
+                for RADIO "combo"-mode distillation, where ``spatial_features`` is
+                ``[B, D, H, W]``. Only implemented for the native
+                ``OpenCLIPVisionTransformer`` visual backbone (e.g.
+                ``clip_h_14_378_dfn5b``); raises ``NotImplementedError`` for the
+                ``TimmModel``-backed NV-CLIP variants for now.
+            return_logits (bool): If True (and return_features is False), return
+                the pooled summary embedding instead of classifier logits.
 
         Returns:
             torch.Tensor: Classification logits of shape (B, num_classes) if
-                num_classes > 0, otherwise features of shape (B, D).
+                num_classes > 0, otherwise features of shape (B, D). Or a
+                ``(summary, features)`` tuple when ``return_features=True``.
         """
+        if return_features:
+            if not isinstance(self.model.visual, OpenCLIPVisionTransformer):
+                raise NotImplementedError(
+                    "return_features=True is only implemented for the native "
+                    "OpenCLIPVisionTransformer visual backbone, not TimmModel-backed "
+                    "NV-CLIP variants."
+                )
+            # interpolated_forward() returns (pooled, tokens) only when output_tokens
+            # is set; toggle it locally rather than at construction time, since
+            # encode_image() (used by every other forward path on this class) also
+            # calls self.model.visual(x) and expects a single tensor back.
+            prev_output_tokens = self.model.visual.output_tokens
+            self.model.visual.output_tokens = True
+            try:
+                pooled, tokens = self.model.visual(x)
+            finally:
+                self.model.visual.output_tokens = prev_output_tokens
+            if self.model.visual.proj is not None and not self.spatial_raw:
+                # interpolated_forward() projects `pooled` through self.proj
+                # (transformer width -> joint embedding dim, e.g. 1280 -> 1024 for
+                # ViT-H) but leaves `tokens` in the un-projected transformer width.
+                # self.num_features / self.output_dim (used by _get_model_dimensions
+                # to size teacher_dim) reflect the *projected* dim, so spatial
+                # features must be projected too or downstream whitening/projection
+                # code sees inconsistent per-teacher dimensionality.
+                # When spatial_raw is set (FeatSharp), we intentionally KEEP the raw
+                # transformer-width tokens and num_features is resized to match.
+                tokens = tokens @ self.model.visual.proj
+            patch_size = self.model.visual.patch_size[0]
+            grid_h, grid_w = x.shape[2] // patch_size, x.shape[3] // patch_size
+            features = tokens.reshape(x.shape[0], grid_h, grid_w, -1).permute(0, 3, 1, 2).contiguous()
+            return pooled, features
+        if return_logits:
+            return self.model.encode_image(x, normalize=False)
         x = self.model.encode_image(x, normalize=False)
         x = self.head(x)
         return x
@@ -723,3 +820,36 @@ def vit_h_14_siglip_clipa_224(**kwargs):
         requires more computational resources.
     """
     return OpenCLIP(model_name="ViT-H-14-SigLIP-CLIPA-224", **kwargs)
+
+
+@BACKBONE_REGISTRY.register()
+def clip_h_14_378_dfn5b(pretrained_backbone_path=None, **kwargs):
+    """Create the standard (non-NVCLIP) OpenCLIP ViT-H-14-378-quickgelu/dfn5b model.
+
+    This is evfm's original CLIP teacher (evfm/teacher_configs/open_clip_res378.yaml:
+    ``model: ViT-H-14-378-quickgelu, pretrained: dfn5b``) -- a public open_clip
+    model/pretrained-tag pair, not one of the custom NV-CLIP SigLIP-CLIPA
+    architectures registered by ``_register_nvclip_configs``. ``open_clip.create_model``
+    resolves ``"ViT-H-14-378-quickgelu"``/``"dfn5b"`` from its own upstream model zoo
+    (downloading via ``open_clip``'s own HF integration), so no extra config
+    registration is needed for this one, and no local checkpoint path is used.
+
+    Args:
+        pretrained_backbone_path: Unused -- accepted and discarded because
+            ``model_builder.py`` always passes this kwarg generically to every
+            backbone factory; matches the pattern used by ``siglip2_g_384``/
+            ``dinov3_vit7b16`` so it doesn't leak into ``open_clip.create_model``'s
+            kwargs (which would raise a TypeError on an unrecognized argument).
+        **kwargs: Additional arguments passed to OpenCLIP constructor.
+            Common arguments include:
+            - num_classes (int): Number of output classes. Default: `0`
+            - in_chans (int): Number of input channels. Default: `3`
+            - activation_checkpoint (bool): Enable activation checkpointing. Default: `False`
+            - freeze_at (list): Layers to freeze. Default: `None`
+            - freeze_norm (bool): Freeze normalization layers. Default: `False`
+
+    Returns:
+        OpenCLIP: Configured ViT-H-14-378-quickgelu/dfn5b model.
+    """
+    kwargs.setdefault("pretrained", "dfn5b")
+    return OpenCLIP(model_name="ViT-H-14-378-quickgelu", **kwargs)

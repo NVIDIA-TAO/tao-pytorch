@@ -1,0 +1,53 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+*                       @NVIDIA-TAO/TAO_Developers
+
+.github/                @NVIDIA-TAO/TAO-Maintainers
+.gitlab/                @NVIDIA-TAO/TAO-Maintainers
+.circleci/              @NVIDIA-TAO/TAO-Maintainers
+.gitlab-ci.yml          @NVIDIA-TAO/TAO-Maintainers
+.travis.yml             @NVIDIA-TAO/TAO-Maintainers
+azure-pipelines.yml     @NVIDIA-TAO/TAO-Maintainers
+Jenkinsfile             @NVIDIA-TAO/TAO-Maintainers
+Jenkinsfile.*           @NVIDIA-TAO/TAO-Maintainers
+.pre-commit-config.yaml @NVIDIA-TAO/TAO-Maintainers
+tox.ini                 @NVIDIA-TAO/TAO-Maintainers
+noxfile.py              @NVIDIA-TAO/TAO-Maintainers
+codecov.yml             @NVIDIA-TAO/TAO-Maintainers
+.codecov.yml            @NVIDIA-TAO/TAO-Maintainers
+Makefile                @NVIDIA-TAO/TAO-Maintainers
+
+uv.lock                 @NVIDIA-TAO/TAO_OSRB_Approvers
+poetry.lock             @NVIDIA-TAO/TAO_OSRB_Approvers
+Pipfile.lock            @NVIDIA-TAO/TAO_OSRB_Approvers
+package-lock.json       @NVIDIA-TAO/TAO_OSRB_Approvers
+yarn.lock               @NVIDIA-TAO/TAO_OSRB_Approvers
+pnpm-lock.yaml          @NVIDIA-TAO/TAO_OSRB_Approvers
+Cargo.lock              @NVIDIA-TAO/TAO_OSRB_Approvers
+go.sum                  @NVIDIA-TAO/TAO_OSRB_Approvers
+Gemfile.lock            @NVIDIA-TAO/TAO_OSRB_Approvers
+
+pyproject.toml          @NVIDIA-TAO/TAO_OSRB_Approvers
+setup.py                @NVIDIA-TAO/TAO_OSRB_Approvers
+setup.cfg               @NVIDIA-TAO/TAO_OSRB_Approvers
+requirements*.txt       @NVIDIA-TAO/TAO_OSRB_Approvers
+constraints*.txt        @NVIDIA-TAO/TAO_OSRB_Approvers
+Pipfile                 @NVIDIA-TAO/TAO_OSRB_Approvers
+package.json            @NVIDIA-TAO/TAO_OSRB_Approvers
+Cargo.toml              @NVIDIA-TAO/TAO_OSRB_Approvers
+go.mod                  @NVIDIA-TAO/TAO_OSRB_Approvers
+Gemfile                 @NVIDIA-TAO/TAO_OSRB_Approvers
+environment.yml         @NVIDIA-TAO/TAO_OSRB_Approvers
+environment.yaml        @NVIDIA-TAO/TAO_OSRB_Approvers
+
+Dockerfile              @NVIDIA-TAO/TAO_OSRB_Approvers
+Dockerfile.*            @NVIDIA-TAO/TAO_OSRB_Approvers
+*.Dockerfile            @NVIDIA-TAO/TAO_OSRB_Approvers
+
+third_party/            @NVIDIA-TAO/TAO_OSRB_Approvers
+LICENSE                 @NVIDIA-TAO/TAO_OSRB_Approvers
+LICENSE.*               @NVIDIA-TAO/TAO_OSRB_Approvers
+LICENSE-3rd-party.txt   @NVIDIA-TAO/TAO_OSRB_Approvers
+THIRD_PARTY_NOTICES.md  @NVIDIA-TAO/TAO_OSRB_Approvers
+NOTICE                  @NVIDIA-TAO/TAO_OSRB_Approvers

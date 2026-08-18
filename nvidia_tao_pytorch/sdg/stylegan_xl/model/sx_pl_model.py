@@ -245,6 +245,11 @@ class StyleganPlModel(TAOLightningModule):
         super().__init__(experiment_spec)
 
         self.checkpoint_filename = 'styleganxl_model'
+        # Best-checkpoint default: monitor FID (logged as "fid_score" in
+        # on_validation_epoch_end). Lower FID is better. This module's configure_callbacks
+        # calls super(), so it already gets the best-checkpoint plumbing.
+        self.monitor_metric = "fid_score"
+        self.monitor_mode = "min"
         self.dm = dm
         self.cudnn_benchmark = True
 
@@ -479,11 +484,12 @@ class StyleganPlModel(TAOLightningModule):
         self.log('fid_score', fid_score, prog_bar=True)
         # Custom logging with x-axis equal to self.cur_nimg
         self.logger.experiment.add_scalar("fid_score by samples", fid_score, self.cur_nimg // 1000)
+        # Keep status.json limited to numeric optimizable KPIs.  Progress
+        # counters such as seen_images and epoch are internal training state,
+        # not metrics consumed by the AutoML/TAO API monitor.
         # Log to status.json
         self.status_logging_dict = {}
         self.status_logging_dict["fid50k_full"] = float(fid_score)
-        self.status_logging_dict["seen_images"] = int(self.cur_nimg)
-        self.status_logging_dict["epoch"] = int(self.trainer.current_epoch)
         status_logging.get_status_logger().kpi = self.status_logging_dict
         status_logging.get_status_logger().write(
             message="Validation metrics generated.",

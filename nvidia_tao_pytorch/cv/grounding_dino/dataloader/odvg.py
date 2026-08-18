@@ -17,13 +17,15 @@ from torchvision.datasets.vision import VisionDataset
 from nvidia_tao_pytorch.core.tlt_logging import logging
 
 
-def build_odvg(data_sources, transforms, max_labels=50):
+def build_odvg(data_sources, transforms, max_labels=50, deterministic_label_order=True):
     """Load dataset
 
     Args:
         data_sources (str): list of different data sources.
         transforms (dict): augmentations to apply.
         max_labels (int): max number of labels to sample.
+        deterministic_label_order (bool): canonicalize caption/label order with sorted()
+            so it is reproducible across process launches (independent of PYTHONHASHSEED).
     """
     if type(data_sources).__name__ == "DictConfig":
         data_sources = [data_sources]
@@ -35,7 +37,8 @@ def build_odvg(data_sources, transforms, max_labels=50):
         label_map = data_source.label_map if "label_map" in data_source else None
         dataset_list.append(ODVGDataset(image_dir, json_file, label_map,
                                         max_labels=max_labels,
-                                        transforms=transforms))
+                                        transforms=transforms,
+                                        deterministic_label_order=deterministic_label_order))
 
         if len(dataset_list) > 1:
             train_dataset = ConcatDataset(dataset_list)
@@ -56,6 +59,7 @@ class ODVGDataset(VisionDataset):
         transform: Optional[Callable] = None,
         target_transform: Optional[Callable] = None,
         transforms: Optional[Callable] = None,
+        deterministic_label_order: bool = True,
     ) -> None:
         """Initialize ODVG dataset.
         Args:
@@ -73,6 +77,7 @@ class ODVGDataset(VisionDataset):
         self.root = root
         self.dataset_mode = "OD" if label_map_anno else "VG"
         self.max_labels = max_labels
+        self.deterministic_label_order = deterministic_label_order
         if self.dataset_mode == "OD":
             self.load_label_map(label_map_anno)
         self._load_metas(anno)
@@ -117,10 +122,11 @@ class ODVGDataset(VisionDataset):
             # neg bbox labels
             neg_labels = self.label_index.difference(pos_labels)
 
-            vg_labels = list(pos_labels)
+            vg_labels = sorted(pos_labels) if self.deterministic_label_order else list(pos_labels)
             num_to_add = min(len(neg_labels), self.max_labels - len(pos_labels))
             if num_to_add > 0:
-                vg_labels.extend(random.sample(neg_labels, num_to_add))
+                neg_pool = sorted(neg_labels) if self.deterministic_label_order else tuple(neg_labels)
+                vg_labels.extend(random.sample(neg_pool, num_to_add))
 
             # shuffle
             for i in range(len(vg_labels) - 1, 0, -1):
@@ -143,7 +149,7 @@ class ODVGDataset(VisionDataset):
             c = list(zip(boxes, caption_list))
             random.shuffle(c)
             boxes[:], caption_list[:] = zip(*c)
-            uni_caption_list = list(set(caption_list))
+            uni_caption_list = sorted(set(caption_list)) if self.deterministic_label_order else list(set(caption_list))
             label_map = {}
             for idx in range(len(uni_caption_list)):
                 label_map[uni_caption_list[idx]] = idx

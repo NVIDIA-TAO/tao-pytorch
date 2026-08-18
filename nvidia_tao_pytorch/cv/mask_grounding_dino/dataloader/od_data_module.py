@@ -24,7 +24,7 @@ from nvidia_tao_pytorch.cv.mask_grounding_dino.dataloader.coco import CocoDetect
 from nvidia_tao_pytorch.cv.mask_grounding_dino.dataloader.rescoco import RESPredictDataset
 
 
-def build_odvg(data_sources, transforms, max_labels=50, has_mask=True):
+def build_odvg(data_sources, transforms, max_labels=50, has_mask=True, deterministic_label_order=True):
     """Load dataset
 
     Args:
@@ -32,6 +32,8 @@ def build_odvg(data_sources, transforms, max_labels=50, has_mask=True):
         transforms (dict): augmentations to apply.
         max_labels (int): Maximum number of labels.
         has_mask (bool): Whether masks are present.
+        deterministic_label_order (bool): canonicalize caption/label order with sorted()
+            so it is reproducible across process launches (independent of PYTHONHASHSEED).
     """
     if type(data_sources).__name__ == "DictConfig":
         data_sources = [data_sources]
@@ -49,6 +51,7 @@ def build_odvg(data_sources, transforms, max_labels=50, has_mask=True):
                 max_labels=max_labels,
                 transforms=transforms,
                 has_mask=has_mask,
+                deterministic_label_order=deterministic_label_order,
             )
         )
     if len(dataset_list) > 1:
@@ -85,6 +88,7 @@ class ODVGDataModule(pl.LightningDataModule):
         self.batch_size = dataset_config["batch_size"]
         self.num_workers = dataset_config["workers"]
         self.max_labels = dataset_config["max_labels"]   # [test dataset] 0 for VG Dataset, N = num_classes for original mask grounding DINO
+        self.deterministic_label_order = dataset_config["deterministic_label_order"]
         self.pin_memory = dataset_config["pin_memory"]
         self.subtask_config = subtask_config
         # Placeholder for calibration dataset
@@ -117,7 +121,8 @@ class ODVGDataModule(pl.LightningDataModule):
                     None,
                     max_labels=self.max_labels,
                     transforms=val_transform,
-                    has_mask=has_mask
+                    has_mask=has_mask,
+                    deterministic_label_order=self.deterministic_label_order
                 )
             else:
                 assert False, "Invalid data type"
@@ -144,7 +149,8 @@ class ODVGDataModule(pl.LightningDataModule):
                     None,
                     max_labels=self.max_labels,
                     transforms=test_transforms,
-                    has_mask=has_mask
+                    has_mask=has_mask,
+                    deterministic_label_order=self.deterministic_label_order
                 )
             else:
                 assert False, "Invalid data type"
@@ -203,9 +209,11 @@ class ODVGDataModule(pl.LightningDataModule):
             # We need to instantitate this inside train_dataloader
             # instead of setup when the multiprocessing has already been spawned.
             local_broadcast_process_authkey()
-            self.train_dataset = build_shm_dataset(train_data_sources, train_transform, max_labels=self.max_labels)
+            self.train_dataset = build_shm_dataset(train_data_sources, train_transform, max_labels=self.max_labels,
+                                                   deterministic_label_order=self.deterministic_label_order)
         else:
-            self.train_dataset = build_odvg(train_data_sources, train_transform, max_labels=self.max_labels)
+            self.train_dataset = build_odvg(train_data_sources, train_transform, max_labels=self.max_labels,
+                                            deterministic_label_order=self.deterministic_label_order)
 
         if is_dist_avail_and_initialized():
             self.train_sampler = torch.utils.data.distributed.DistributedSampler(self.train_dataset, shuffle=True)

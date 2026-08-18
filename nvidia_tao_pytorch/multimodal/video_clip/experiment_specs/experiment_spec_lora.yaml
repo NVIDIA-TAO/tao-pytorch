@@ -1,0 +1,170 @@
+results_dir: ???
+encryption_key: nvidia_tao
+
+# InternVideo2-CLIP L14 LoRA fine-tuning example.
+#
+# Same base as experiment_spec.yaml, with parameter-efficient fine-tuning (LoRA)
+# enabled on the vision tower and geometry-preserving regularization enabled.
+# This freezes the full backbone and trains only the injected LoRA adapters
+# (plus logit scale/bias); at export, merge_lora folds the adapters back into the
+# base weights so the exported ONNX has zero LoRA overhead.
+#
+# Fill the dataset metadata, the MobileCLIP text_encoder path, and warmup_steps
+# for your dataset/global batch size before running.
+
+model:
+  type: internvideo2-clip-l14
+  image_size: 224
+  num_frames: 8
+  canonicalize_text: false
+  # The freeze flags below are moot under LoRA -- inject_lora freezes the entire
+  # backbone regardless -- but kept for clarity.
+  freeze_vision_encoder: true
+  freeze_text_encoder: true
+  init_logit_scale: 4.605170185988092
+  init_logit_bias: 0.0
+  internvideo2clip_hf_id: OpenGVLab/InternVideo2_distillation_models
+  text_encoder: ???        # MobileCLIP local .pt path OR HF id (file: mobileclip_blt.pt)
+  vision_encoder: null
+  clip_head: null
+  pretrained_ckpt: null
+  use_flash_attn: false
+  use_fused_rmsnorm: false
+  use_fused_mlp: false
+
+dataset:
+  seed: 42
+  pin_memory: true
+  train:
+    type: video_text
+    video_text: &vt
+      metadata: ???
+      data_root: null
+      split: train
+      path_prefix_mapping: {}
+      caption_fields: [caption]
+      caption_mode: first   # first | random | all | one_per_field
+      idx_mode: sample_id
+      idx_field: null
+      anomaly_only: false
+      num_frames: ${model.num_frames}
+    batch_size: 4
+    num_workers: 12
+  val:
+    type: video_text
+    video_text:
+      <<: *vt
+      split: test
+    batch_size: 4
+    num_workers: 12
+  inference:
+    type: video_text
+    video_text:
+      <<: *vt
+      split: test
+    batch_size: 4
+    num_workers: 12
+  metrics:
+    mode: retrieval
+    exclude_categories: [Normal, Abnormal]
+  augmentation:
+    scale: [1.0, 1.0]
+    color_jitter: []
+    grayscale: 0.0
+
+train:
+  num_epochs: 3
+  checkpoint_interval: 1
+  checkpoint_interval_unit: epoch
+  resume_training_checkpoint_path: null
+  grad_checkpointing: false
+  grad_clip_norm: null
+  precision: bf16
+  pretrained_model_path: null
+  loss_type: internvideo2_vtc
+  seed: 42
+  num_nodes: 1
+  num_gpus: 4
+  gpu_ids: [0, 1, 2, 3]
+  distributed_strategy: ddp
+  validation_interval: 1
+  val_check_interval: null
+  optim:
+    optimizer_type: adamw
+    # LoRA typically trains stably at a higher LR than full fine-tuning.
+    vision_lr: 0.001
+    text_lr: 0.001
+    betas: [0.9, 0.98]
+    eps: 1e-06
+    weight_decay: 0.2
+    warmup_steps: ???
+    scheduler: cosine
+
+# LoRA on the vision tower's last 3 blocks. Enable text below to also adapt the
+# MobileCLIP text tower. Regularization adds frozen-teacher preservation losses
+# (recommended for domain adaptation that must retain zero-shot generality).
+peft:
+  enabled: true
+  method: lora
+  vision:
+    enabled: true
+    target_modules: [qkv, proj]
+    num_last_blocks: 3
+    rank: 8
+    alpha: 16
+    dropout: 0.05
+  text:
+    enabled: false
+    target_modules: [qkv_proj, out_proj]
+    num_last_blocks: 3
+    rank: 8
+    alpha: 16
+    dropout: 0.05
+
+regularization:
+  enabled: true
+  embedding_mse_weight: 0.05
+  cosine_weight: 0.05
+  similarity_weight: 0.10
+
+evaluate:
+  checkpoint: ???
+  batch_size: 4
+  num_workers: 12
+  num_gpus: 4
+  gpu_ids: [0, 1, 2, 3]
+
+inference:
+  checkpoint: ???
+  results_dir: null
+  num_gpus: 4
+  gpu_ids: [0, 1, 2, 3]
+  batch_size: 4
+  num_workers: 12
+  mode: embeddings
+  overwrite_embeddings: false
+  video_embeddings_file: null
+  text_embeddings_file: null
+  search:
+    enabled: false
+    search_metric: cosine
+    top_k: 5
+    normalize: true
+  query:
+    input_texts: []
+    input_videos: []
+    text_file: null
+    num_frames: ${model.num_frames}
+
+export:
+  checkpoint: ???
+  onnx_file: ???
+  encoder_type: separate
+  input_height: 224
+  input_width: 224
+  input_channel: 3
+  batch_size: 1
+  opset_version: 23
+  gpu_id: 0
+  on_cpu: false
+  verbose: false

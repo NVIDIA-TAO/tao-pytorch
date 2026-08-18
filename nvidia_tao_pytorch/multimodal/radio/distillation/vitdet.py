@@ -3,8 +3,7 @@
 
 """ViTDet windowed-attention augmentation for distillation training.
 
-Adapted from EVFM's vitdet_aug_v2.py. Registers forward hooks on
-the student ViT's transformer blocks to alternate between local
+Registers forward hooks on the student ViT's transformer blocks to alternate between local
 (windowed) and global self-attention during training, acting as a
 regularizer that makes the student robust to restricted attention
 patterns while reducing the quadratic cost of self-attention.

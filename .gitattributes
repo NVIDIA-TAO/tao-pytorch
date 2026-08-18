@@ -1,0 +1,9 @@
+*.gz filter=lfs diff=lfs merge=lfs -text
+*.tlt filter=lfs diff=lfs merge=lfs -text
+*.eonnx filter=lfs diff=lfs merge=lfs -text
+*.nemo filter=lfs diff=lfs merge=lfs -text
+*.tar.gz filter=lfs diff=lfs merge=lfs -text
+*.zip filter=lfs diff=lfs merge=lfs -text
+*.arpa filter=lfs diff=lfs merge=lfs -text
+tests/pointcloud_unit_tests/pointpillars/data/pointpillars_ptm.onnx filter=lfs diff=lfs merge=lfs -text
+tests/pointcloud_unit_tests/pointpillars/data/102.bin filter=lfs diff=lfs merge=lfs -text

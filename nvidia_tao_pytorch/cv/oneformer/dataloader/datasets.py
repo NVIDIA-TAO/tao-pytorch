@@ -12,7 +12,13 @@ from pathlib import Path
 import numpy as np
 import torch
 from fvcore.transforms.transform import PadTransform
-from panopticapi.utils import rgb2id
+try:
+    from panopticapi.utils import rgb2id
+except ImportError as exc:
+    raise ImportError(
+        "OneFormer COCO panoptic data loading requires the 'panopticapi' "
+        "package. Install cocodataset/panopticapi before running OneFormer."
+    ) from exc
 from PIL import Image, ImageOps
 from PIL.Image import Resampling
 from torch.utils.data import Dataset
@@ -140,9 +146,12 @@ class COCOUnifiedDataset(Dataset):  # pylint: disable=too-many-instance-attribut
             self.instance_prob = cfg.dataset.task_prob_train.instance
             self.panoptic_prob = cfg.dataset.task_prob_train.panoptic
         else:
-            self.semantic_prob = cfg.dataset.task_prob_val.semantic
-            self.instance_prob = cfg.dataset.task_prob_val.instance
-            self.panoptic_prob = cfg.dataset.task_prob_val.panoptic
+            self.evaluation_task = str(cfg.evaluate.task).lower()
+            if self.evaluation_task not in {"semantic", "panoptic"}:
+                raise ValueError(
+                    "OneFormer evaluate.task must be either 'semantic' or "
+                    f"'panoptic'; got {self.evaluation_task!r}."
+                )
         self.ignore_label = cfg.model.sem_seg_head.ignore_value
 
         if self.is_training:
@@ -407,6 +416,23 @@ class COCOUnifiedDataset(Dataset):  # pylint: disable=too-many-instance-attribut
                     instances.gt_bboxes[i] = torch.tensor([0.0, 0.0, 1.0, 1.0])
         return instances, texts, label
 
+    def _normalized_panoptic_segments(self, segments_info):
+        """Map dataset category IDs to the model's contiguous evaluation IDs."""
+        normalized = []
+        for segment in segments_info:
+            category_id = int(segment["category_id"])
+            if self.contiguous_id:
+                category_id = self.stuff_dataset_id_to_contiguous_id[category_id]
+            normalized.append(
+                {
+                    "id": int(segment["id"]),
+                    "category_id": category_id,
+                    "iscrowd": bool(segment.get("iscrowd", False)),
+                    "isthing": category_id in self.things,
+                }
+            )
+        return normalized
+
     def __len__(self):
         """Return length of dataset."""
         return len(self.all_annotations)
@@ -526,15 +552,25 @@ class COCOUnifiedDataset(Dataset):  # pylint: disable=too-many-instance-attribut
 
         image_shape = img.shape[:2]
         segments_info = ann["segments_info"]
-        prob_task = np.random.uniform(0, 1.0)
         num_class_obj = dict.fromkeys(self.class_names, 0)
 
-        if prob_task < self.semantic_prob:
+        if not self.is_training:
+            selected_task = self.evaluation_task
+        else:
+            prob_task = np.random.uniform(0, 1.0)
+            if prob_task < self.semantic_prob:
+                selected_task = "semantic"
+            elif prob_task < self.instance_prob + self.semantic_prob:
+                selected_task = "instance"
+            else:
+                selected_task = "panoptic"
+
+        if selected_task == "semantic":
             task = "The task is semantic"
             instances, texts, sem_seg = self._get_semantic_dict(
                 pan_segm, image_shape, segments_info, num_class_obj
             )
-        elif prob_task < self.instance_prob + self.semantic_prob:
+        elif selected_task == "instance":
             task = "The task is instance"
             instances, texts, sem_seg = self._get_instance_dict(
                 pan_segm, image_shape, segments_info, num_class_obj
@@ -556,6 +592,13 @@ class COCOUnifiedDataset(Dataset):  # pylint: disable=too-many-instance-attribut
             "file_name": img_info["file_name"],
             "image_id": ann["image_id"],
         }
+        if not self.is_training and self.evaluation_task == "panoptic":
+            data["panoptic_seg"] = torch.from_numpy(
+                np.ascontiguousarray(pan_segm)
+            ).long()
+            data["panoptic_segments_info"] = self._normalized_panoptic_segments(
+                segments_info
+            )
         return data
 
     def collate_fn(self, batch):
@@ -584,6 +627,13 @@ class COCOUnifiedDataset(Dataset):  # pylint: disable=too-many-instance-attribut
         out["orig_shapes"] = orig_shapes
         out["file_names"] = file_names
         out["image_ids"] = image_ids
+        if "panoptic_seg" in batch[0]:
+            out["panoptic_segs"] = torch.stack(
+                [item["panoptic_seg"] for item in batch]
+            )
+            out["panoptic_segments_info"] = [
+                item["panoptic_segments_info"] for item in batch
+            ]
 
         return out
 

@@ -9,6 +9,7 @@ from torch.nn import functional as F
 
 from nvidia_tao_pytorch.core.tlt_logging import logging
 from nvidia_tao_pytorch.cv.mask2former.model.pixel_decoder.msdeformattn import MSDeformAttnPixelDecoder
+from nvidia_tao_pytorch.cv.deformable_detr.model.ops.modules import set_precise_msda
 
 from nvidia_tao_pytorch.cv.nvpanoptix3d.model.vggt import VGGT
 from nvidia_tao_pytorch.cv.nvpanoptix3d.model.blocks import DepthProjector
@@ -330,6 +331,9 @@ class MaskFormerHead(nn.Module):
         mask_dim = cfg.model.sem_seg_head.mask_dim
         transformer_in_features = cfg.model.sem_seg_head.deformable_transformer_encoder_in_features
         norm = cfg.model.sem_seg_head.norm
+
+        # Opt-in deterministic MSDeformAttn path (no-op unless precise_msda=True).
+        set_precise_msda(getattr(cfg.model, "precise_msda", False))
 
         pixel_decoder = MSDeformAttnPixelDecoder(
             input_shape, transformer_dropout, transformer_nheads, transformer_dim_feedforward,

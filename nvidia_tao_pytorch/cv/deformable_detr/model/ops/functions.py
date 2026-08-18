@@ -28,7 +28,7 @@ class MSDeformAttnFunction(Function):
     """MSDeformAttnFunction"""
 
     @staticmethod
-    def forward(ctx, value, value_spatial_shapes, value_level_start_index, sampling_locations, attention_weights, im2col_step):
+    def forward(ctx, value, value_spatial_shapes, value_level_start_index, sampling_locations, attention_weights, im2col_step, deterministic=False):
         """Forward function.
 
         Args:
@@ -45,12 +45,16 @@ class MSDeformAttnFunction(Function):
                 used when calculate the attention, has shape
                 (bs ,num_queries, num_heads, num_levels, num_points),
             im2col_step (torch.Tensor): The step used in image to column.
+            deterministic (bool): If True, use the bitwise-reproducible backward
+                (fixed-point integer accumulation of grad_value). The forward is
+                unchanged (already deterministic). Default False (fused backward).
 
         Returns:
             torch.Tensor: has shape (bs, num_queries, embed_dims)
 
         """
         ctx.im2col_step = im2col_step
+        ctx.deterministic = deterministic
         output = torch.ops.nvidia.MultiscaleDeformableAttnPlugin_TRT(
             value, value_spatial_shapes, value_level_start_index,
             sampling_locations, attention_weights)
@@ -69,8 +73,13 @@ class MSDeformAttnFunction(Function):
             tuple[Tensor]: Gradient of input tensors in forward.
         """
         value, value_spatial_shapes, value_level_start_index, sampling_locations, attention_weights = ctx.saved_tensors
-        grad_value, grad_sampling_loc, grad_attn_weight = \
-            torch.ops.nvidia.DMHA_backward(
-                value, value_spatial_shapes, value_level_start_index, sampling_locations, attention_weights, grad_output, ctx.im2col_step)
+        if getattr(ctx, "deterministic", False):
+            grad_value, grad_sampling_loc, grad_attn_weight = \
+                torch.ops.nvidia.DMHA_backward_deterministic(
+                    value, value_spatial_shapes, value_level_start_index, sampling_locations, attention_weights, grad_output, ctx.im2col_step)
+        else:
+            grad_value, grad_sampling_loc, grad_attn_weight = \
+                torch.ops.nvidia.DMHA_backward(
+                    value, value_spatial_shapes, value_level_start_index, sampling_locations, attention_weights, grad_output, ctx.im2col_step)
 
-        return grad_value, None, None, grad_sampling_loc, grad_attn_weight, None
+        return grad_value, None, None, grad_sampling_loc, grad_attn_weight, None, None

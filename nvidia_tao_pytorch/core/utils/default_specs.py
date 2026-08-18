@@ -10,7 +10,7 @@ from os import makedirs, listdir
 from os.path import abspath, dirname, exists, join
 
 from omegaconf import MISSING, OmegaConf
-from dataclasses import dataclass
+from dataclasses import dataclass, is_dataclass
 
 from nvidia_tao_pytorch.core.hydra.hydra_runner import hydra_runner
 from nvidia_tao_pytorch.core.tlt_logging import logging
@@ -56,7 +56,7 @@ def get_supported_modules():
     # __file__ is in nvidia_tao_pytorch/core/utils/download_specs.py
     # Go up 3 levels to get to nvidia_tao_pytorch/
     nvidia_tao_pytorch_dir = dirname(dirname(dirname(abspath(__file__))))
-    module_dirs = ["cv", "pointcloud", "sdg", "ssl"]
+    module_dirs = ["cv", "multimodal", "pointcloud", "sdg", "ssl"]
 
     # Get all implemented modules from tao-pytorch
     pytorch_modules = set()
@@ -120,6 +120,28 @@ def dataclass_to_yaml(dataclass_obj, yaml_file_path):
         logging.info(f"Generated default spec: {yaml_file_path}")
 
 
+def get_experiment_config(imported_module):
+    """Return the experiment config dataclass exported by a config module."""
+    if hasattr(imported_module, 'ExperimentConfig'):
+        return imported_module.ExperimentConfig
+
+    candidates = []
+    for name, value in vars(imported_module).items():
+        if not name.endswith("ExperimentConfig"):
+            continue
+        if not is_dataclass(value):
+            continue
+        if getattr(value, "__module__", None) != imported_module.__name__:
+            continue
+        candidates.append(value)
+    if len(candidates) == 1:
+        return candidates[0]
+
+    raise AttributeError(
+        f"Module '{imported_module.__name__}' does not have an unambiguous experiment config dataclass"
+    )
+
+
 @dataclass
 class DefaultConfig:
     """This is a structured config for generating default specs."""
@@ -164,11 +186,10 @@ def main(cfg: DefaultConfig) -> None:
     module_path = f"nvidia_tao_pytorch.config.{cfg.module_name}.default_config"
     try:
         imported_module = import_module_from_path(module_path)
-        if not hasattr(imported_module, 'ExperimentConfig'):
-            raise AttributeError(f"Module '{module_path}' does not have 'ExperimentConfig' dataclass")
+        experiment_config = get_experiment_config(imported_module)
 
         # Generate YAML from dataclass
-        dataclass_to_yaml(imported_module.ExperimentConfig, output_path)
+        dataclass_to_yaml(experiment_config, output_path)
 
         # Success logging
         logging.info(f"Default specification file for {cfg.module_name} generated at '{output_path}'")

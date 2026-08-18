@@ -128,6 +128,11 @@ class BackboneConfig:
             "fan_base_16_p4_hybrid",
             "vit_large_nvdinov2",
             "vit_giant_nvdinov2",
+            "vit_small_dinov3",
+            "vit_small_plus_dinov3",
+            "vit_base_dinov3",
+            "vit_large_dinov3",
+            "vit_huge_plus_dinov3",
             "vit_base_nvclip_16_siglip",
             "vit_huge_nvclip_14_siglip"
         ]),
@@ -475,7 +480,6 @@ class SFTrainExpConfig(TrainConfig):
         display_name="sync_batchnorm"
     )
 
-    checkpointer: Optional[Dict[str, Any]] = None
     enable_lr_monitor: Optional[bool] = False
 
 

@@ -16,6 +16,11 @@ from nvidia_tao_pytorch.multimodal.clip.model.builders import (
     build_siglip2_model,
     build_openclip_model,
 )
+from nvidia_tao_pytorch.multimodal.clip.model.logit_calibration import (
+    configure_source_logit_calibration,
+    named_logit_parameters,
+    register_logit_checkpoint_guard,
+)
 
 
 class CLIPModelPreProcess():
@@ -63,14 +68,9 @@ def build_model(experiment_config,
 
     image_size = experiment_config.model.image_size
 
-    # Infer logit scale/bias from loss_type if not explicitly set
     loss_type = getattr(experiment_config.train, 'loss_type', 'clip')
     init_logit_scale = experiment_config.model.init_logit_scale
     init_logit_bias = experiment_config.model.init_logit_bias
-    if init_logit_scale is None:
-        init_logit_scale = 2.3026 if loss_type == 'siglip' else 2.6592
-    if init_logit_bias is None:
-        init_logit_bias = -10.0 if loss_type == 'siglip' else 0.0
 
     if model_name in radio_model_configs:
         adaptor_name = getattr(
@@ -85,6 +85,7 @@ def build_model(experiment_config,
                 image_size=image_size,
                 logit_scale_init=init_logit_scale,
                 logit_bias_init=init_logit_bias,
+                loss_type=loss_type,
                 canonicalize_text=canonicalize_text,
             ))
 
@@ -98,6 +99,7 @@ def build_model(experiment_config,
                 image_size=image_size,
                 logit_scale_init=init_logit_scale,
                 logit_bias_init=init_logit_bias,
+                loss_type=loss_type,
                 canonicalize_text=canonicalize_text,
             ))
 
@@ -111,6 +113,7 @@ def build_model(experiment_config,
                 image_size=image_size,
                 logit_scale_init=init_logit_scale,
                 logit_bias_init=init_logit_bias,
+                loss_type=loss_type,
                 canonicalize_text=canonicalize_text,
             ))
 
@@ -129,7 +132,29 @@ def build_model(experiment_config,
                 model_name,
                 aug_cfg=dict(aug_cfg) if aug_cfg is not None else None
             ))
+        configure_source_logit_calibration(
+            model,
+            logit_scale_init=init_logit_scale,
+            logit_bias_init=init_logit_bias,
+            loss_type=loss_type,
+            bias_required=False,
+        )
+        if freeze_vision:
+            model.visual.requires_grad_(False)
+            model.visual.eval()
+        if freeze_text:
+            retained_parameter_ids = {
+                id(parameter)
+                for _, parameter in named_logit_parameters(model)
+            }
+            retained_parameter_ids.update(
+                id(parameter) for parameter in model.visual.parameters()
+            )
+            for parameter in model.parameters():
+                if id(parameter) not in retained_parameter_ids:
+                    parameter.requires_grad = False
         tokenizer = open_clip.get_tokenizer(model_name)
 
+    register_logit_checkpoint_guard(model)
     return CLIPModelPreProcess(
         model, tokenizer, preprocess_train, preprocess_val)

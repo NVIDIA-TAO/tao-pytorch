@@ -662,6 +662,13 @@ class OneFormerModelConfig:
         display_name="export",
         description="A flag to enable export mode."
     )
+    precise_msda: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        display_name="precise MSDeformAttn",
+        description="Enable the deterministic (bitwise-reproducible) MSDeformAttn backward kernel. "
+                    "Small (~+8%) training overhead; required for reproducible training."
+    )
     test: TestConfig = DATACLASS_FIELD(
         TestConfig(),
         description="Test.",

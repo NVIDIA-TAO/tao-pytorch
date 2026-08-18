@@ -8,7 +8,6 @@ import torch.nn as nn
 
 from nvidia_tao_pytorch.core.distributed.comm import get_global_rank
 from nvidia_tao_pytorch.core.tlt_logging import logging
-from nvidia_tao_pytorch.core.utils.ptm_utils import load_pretrained_weights
 
 from nvidia_tao_pytorch.cv.segformer.model.backbones import (
     cradio_vit_adapter_model_dict,
@@ -17,6 +16,7 @@ from nvidia_tao_pytorch.cv.segformer.model.backbones import (
     vit_adapter_model_dict,
 )
 from nvidia_tao_pytorch.cv.segformer.model.decode_heads.segformer_head import TAOSegFormerHead
+from nvidia_tao_pytorch.cv.segformer.utils.checkpoint import initialize_pretrained_backbone_weights
 
 
 class SegFormer(nn.Module):
@@ -105,20 +105,12 @@ class SegFormer(nn.Module):
         else:
             raise NotImplementedError('Bacbkbone name [%s] is not supported' % self.model_name)
 
-        # TODO: @hong-yu, add parser and ptm_adapter for segformer
-        segformer_parser = None
-        ptm_adapter = None
         # Load pretrained weights
         if pretrained_backbone_path:
-            state_dict = load_pretrained_weights(
+            initialize_pretrained_backbone_weights(
+                self.backbone,
                 pretrained_backbone_path,
-                parser=segformer_parser,
-                ptm_adapter=ptm_adapter
             )
-            msg = self.backbone.load_state_dict(state_dict, strict=False)
-            if get_global_rank() == 0:
-                logging.info(f"Loaded pretrained weights from {pretrained_backbone_path}")
-                logging.warning(f"{msg}")
 
         # Transformer Decoder
         self.decoder = TAOSegFormerHead(
@@ -177,6 +169,11 @@ def build_model(experiment_config,
         "fan_base_16_p4_hybrid": [128, 256, 448, 448],
         "vit_large_nvdinov2": [1024, 1024, 1024, 1024],
         "vit_giant_nvdinov2": [1536, 1536, 1536, 1536],
+        "vit_small_dinov3": [384, 384, 384, 384],
+        "vit_small_plus_dinov3": [384, 384, 384, 384],
+        "vit_base_dinov3": [768, 768, 768, 768],
+        "vit_large_dinov3": [1024, 1024, 1024, 1024],
+        "vit_huge_plus_dinov3": [1280, 1280, 1280, 1280],
         "vit_base_nvclip_16_siglip": [768, 768, 768, 768],
         "vit_huge_nvclip_14_siglip": [1280, 1280, 1280, 1280],
         "c_radio_v2_vit_base_patch16_224": [768, 768, 768, 768],

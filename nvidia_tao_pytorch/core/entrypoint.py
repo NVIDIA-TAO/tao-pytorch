@@ -18,8 +18,14 @@ from contextlib import contextmanager
 
 from nvidia_tao_pytorch.core.tlt_logging import logging
 from nvidia_tao_pytorch.core.distributed.validator import validate_configs
-from nvidia_tao_core.telemetry.nvml import get_device_details
-from nvidia_tao_core.telemetry.telemetry import send_telemetry_data
+try:
+    from nvidia_tao_core.telemetry.nvml import get_device_details
+    from nvidia_tao_core.telemetry.telemetry import send_telemetry_data
+    TELEMETRY_AVAILABLE = True
+except ImportError:
+    get_device_details = None
+    send_telemetry_data = None
+    TELEMETRY_AVAILABLE = False
 
 LIGHTNING_EXCLUDED_NETWORKS = [
     "bevfusion",
@@ -315,7 +321,10 @@ def launch(args, unknown_args, subtasks, network=None):
                 log_target.write(last_progress_bar_line + '\n')
                 log_target.flush()
             if proc.returncode == 0:
+                logging.info("Command completed successfully with return code 0")
                 process_passed = True
+            else:
+                logging.info(f"Command completed with return code {proc.returncode}")
 
     except (KeyboardInterrupt, SystemExit):
         logging.exception("Command was interrupted")
@@ -331,13 +340,16 @@ def launch(args, unknown_args, subtasks, network=None):
             "Schema validation error"
         ])
 
-        logging.exception(e)
+        logging.exception("Command encountered an exception")
         process_passed = False
 
     end = time()
     time_lapsed = int(end - start)
 
     try:
+        if not TELEMETRY_AVAILABLE:
+            logging.info("Telemetry module not available, skipping telemetry data.")
+            raise ImportError("nvidia_tao_core.telemetry is not available")
         gpu_data = list()
         for device in get_device_details():
             gpu_data.append(device.get_config())

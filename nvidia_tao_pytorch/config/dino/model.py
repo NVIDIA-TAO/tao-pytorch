@@ -101,6 +101,13 @@ class DINOModelConfig:
         valid_min=1,
         valid_max=5,
     )
+    precise_msda: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        display_name="precise MSDeformAttn",
+        description="Enable the deterministic (bitwise-reproducible) MSDeformAttn backward kernel. "
+                    "Small (~+8%) training overhead; required for reproducible training."
+    )
     cls_loss_coef: float = FLOAT_FIELD(
         value=2.0,
         default_value=2.0,

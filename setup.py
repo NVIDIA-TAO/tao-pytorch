@@ -3,15 +3,35 @@
 
 """Setup script to build the TLT launcher package."""
 
+import importlib.util
 import os
 import platform
 import setuptools
 
-from release.python.utils import utils
 from torch.utils.cpp_extension import BuildExtension
 
 
 _IS_X86_64 = platform.machine() in ("x86_64", "AMD64")
+
+
+def _load_release_utils():
+    """Load packaging helpers from this checkout instead of any installed package."""
+    utils_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "release",
+        "python",
+        "utils",
+        "utils.py"
+    )
+    spec = importlib.util.spec_from_file_location("tao_pytorch_release_utils", utils_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not load release utils from {utils_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+utils = _load_release_utils()
 
 
 def _spatial_transform_cxx_flags():
@@ -34,10 +54,6 @@ for package_name in PACKAGE_LIST:
     setuptools_packages.extend(utils.find_packages(package_name))
 
 
-if os.path.exists("pyarmor_runtime_001219"):
-    pyarmor_packages = ["pyarmor_runtime_001219"]
-    setuptools_packages += pyarmor_packages
-
 setuptools.setup(
     name=version_locals['__package_name__'],
     version=version_locals['__version__'],
@@ -56,7 +72,18 @@ setuptools.setup(
     keywords=version_locals['__keywords__'],
     packages=setuptools_packages,
     package_data={
-        '': ['*.pyc', "*.yaml", "*.so", "*.pdf"]
+        '': ['*.pyc', "*.yaml", "*.so", "*.pdf"],
+        # Vendored MobileCLIP text-tower configs are read from the installed
+        # package at runtime; the catch-all patterns above are not recursive.
+        'nvidia_tao_pytorch.multimodal.video_clip.model.backbones.internvideo2.backbones.internvideo2.mobileclip': [
+            "configs/*.json"
+        ],
+        # experiment_specs/ is a plain data directory, not a package, so
+        # find_packages() skips it and the non-recursive catch-all above never
+        # reaches its YAML. Ship the reference specs explicitly.
+        'nvidia_tao_pytorch.multimodal.video_clip': [
+            "experiment_specs/*.yaml"
+        ]
     },
     include_package_data=True,
     zip_safe=False,
@@ -90,9 +117,11 @@ setuptools.setup(
             # SDG entry point
             'stylegan_xl=nvidia_tao_pytorch.sdg.stylegan_xl.entrypoint.stylegan_xl:main',
             'nvdinov2=nvidia_tao_pytorch.ssl.nvdinov2.entrypoint.nvdinov2:main',
+            'dinov3=nvidia_tao_pytorch.ssl.dinov3.entrypoint.dinov3:main',
             'mae=nvidia_tao_pytorch.ssl.mae.entrypoint.mae:main',
             # Multimodal entry point
             'clip=nvidia_tao_pytorch.multimodal.clip.entrypoint.clip:main',
+            'video_clip=nvidia_tao_pytorch.multimodal.video_clip.entrypoint.video_clip:main',
             'radio=nvidia_tao_pytorch.multimodal.radio.entrypoint.radio:main',
         ]
     },

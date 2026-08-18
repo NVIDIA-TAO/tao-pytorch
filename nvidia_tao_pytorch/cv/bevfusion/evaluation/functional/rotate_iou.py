@@ -4,9 +4,32 @@
 """BEVFusion Rotated IOU compuation functions"""
 
 import math
+import os
 import numpy as np
 import numba
-from numba import cuda
+
+
+class _CudaStub:
+    """Avoid importing numba.cuda unless GPU rotated-IoU is explicitly used."""
+
+    class local:
+        """Placeholder for cuda.local in CPU mode."""
+
+        @staticmethod
+        def array(*args, **kwargs):
+            raise RuntimeError("cuda.local.array is unavailable in CPU IoU mode.")
+
+    def jit(self, *args, **kwargs):
+        """Return an identity decorator for CUDA kernels in CPU mode."""
+        if args and callable(args[0]) and len(args) == 1 and not kwargs:
+            return args[0]
+        return lambda func: func
+
+
+if os.getenv("BEVFUSION_ROTATE_IOU_BACKEND", "auto").lower() == "gpu":
+    from numba import cuda
+else:
+    cuda = _CudaStub()
 
 
 @numba.jit(nopython=True)
@@ -371,6 +394,10 @@ def rotate_iou_gpu_eval(boxes, query_boxes, criterion=-1, device_id=0):
     iou = np.zeros((N, K), dtype=np.float32)
     if N == 0 or K == 0:
         return iou
+
+    if _use_cpu_iou():
+        return _rotate_iou_cpu_eval(boxes, query_boxes, criterion)
+
     threadsPerBlock = 8 * 8
     cuda.select_device(device_id)
     blockspergrid = (div_up(N, threadsPerBlock), div_up(K, threadsPerBlock))
@@ -385,3 +412,79 @@ def rotate_iou_gpu_eval(boxes, query_boxes, criterion=-1, device_id=0):
                                        iou_dev, criterion)
         iou_dev.copy_to_host(iou.reshape([-1]), stream=stream)
     return iou.astype(boxes.dtype)
+
+
+def _use_cpu_iou():
+    """Return whether to use the CPU rotated-IoU implementation."""
+    backend = os.getenv("BEVFUSION_ROTATE_IOU_BACKEND", "auto").lower()
+    if backend == "gpu":
+        return False
+    if backend == "cpu":
+        return True
+
+    try:
+        cuda_major, _ = cuda.runtime.get_version()
+    except Exception:  # noqa: broad-exception-caught
+        return True
+
+    # The numba CUDA kernel can segfault during process teardown with CUDA 12+
+    # local-docker runtimes. Keep GPU available as an explicit opt-in.
+    return cuda_major >= 12
+
+
+def _rotate_iou_cpu_eval(boxes, query_boxes, criterion=-1):
+    """Compute rotated IoU on CPU using polygon intersections."""
+    try:
+        from shapely.geometry import Polygon
+    except ImportError as exc:
+        raise ImportError(
+            "shapely is required for BEVFusion CPU rotated-IoU fallback."
+        ) from exc
+
+    polygons = [_rbbox_to_polygon(box, Polygon) for box in boxes]
+    query_polygons = [_rbbox_to_polygon(box, Polygon) for box in query_boxes]
+    iou = np.zeros((boxes.shape[0], query_boxes.shape[0]), dtype=np.float32)
+
+    for box_idx, box_poly in enumerate(polygons):
+        area2 = float(box_poly.area)
+        for query_idx, query_poly in enumerate(query_polygons):
+            area1 = float(query_poly.area)
+            if area1 <= 0.0 or area2 <= 0.0:
+                continue
+            area_inter = float(query_poly.intersection(box_poly).area)
+            if criterion == -1:
+                denom = area1 + area2 - area_inter
+            elif criterion == 0:
+                denom = area1
+            elif criterion == 1:
+                denom = area2
+            else:
+                iou[box_idx, query_idx] = area_inter
+                continue
+            if denom > 0.0:
+                iou[box_idx, query_idx] = area_inter / denom
+
+    return iou.astype(boxes.dtype)
+
+
+def _rbbox_to_polygon(rbbox, polygon_cls):
+    """Convert [x, y, w, h, angle] rotated box to a polygon."""
+    angle = rbbox[4]
+    a_cos = math.cos(angle)
+    a_sin = math.sin(angle)
+    center_x = rbbox[0]
+    center_y = rbbox[1]
+    x_d = rbbox[2]
+    y_d = rbbox[3]
+    corners = []
+    for corner_x, corner_y in (
+        (-x_d / 2, -y_d / 2),
+        (-x_d / 2, y_d / 2),
+        (x_d / 2, y_d / 2),
+        (x_d / 2, -y_d / 2),
+    ):
+        corners.append((
+            a_cos * corner_x + a_sin * corner_y + center_x,
+            -a_sin * corner_x + a_cos * corner_y + center_y,
+        ))
+    return polygon_cls(corners)

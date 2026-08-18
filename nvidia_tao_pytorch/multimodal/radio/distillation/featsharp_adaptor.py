@@ -11,7 +11,6 @@ Requires the ``featsharp`` library to be importable (either installed as a
 package or available on ``sys.path``).  A FeatSharp checkpoint trained for
 the specific teacher architecture is also required.
 
-Adapted from EVFM's ``teacher_adaptors.py`` (``UpsampleFeatSharp``).
 """
 
 import importlib.util
@@ -33,7 +32,7 @@ def _ensure_featsharp_importable(lib_path: Optional[str] = None):
     """Make the ``featsharp`` package importable.
 
     Tries a regular import first.  If that fails and *lib_path* is given
-    (e.g. ``".../evfm/libs/FeatUp"``), inserts it into ``sys.path`` and
+    (for example, a local FeatUp checkout), inserts it into ``sys.path`` and
     retries.
     """
     if _FEATSHARP_STATE["available"]:
@@ -54,7 +53,7 @@ def _ensure_featsharp_importable(lib_path: Optional[str] = None):
     raise ImportError(
         "Cannot import 'featsharp'. Either install it as a package or set "
         "'featsharp_lib_path' in the teacher config to the directory "
-        "containing the featsharp package (e.g. '.../evfm/libs/FeatUp')."
+        "containing the featsharp package."
     )
 
 

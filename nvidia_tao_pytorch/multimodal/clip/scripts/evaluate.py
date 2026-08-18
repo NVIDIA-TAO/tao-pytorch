@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Evaluate CLIP model using retrieval metrics."""
+"""Evaluate generic CLIP retrieval or direct TAO-FT PAS exports."""
 
 import os
 
@@ -18,6 +18,11 @@ from nvidia_tao_pytorch.config.clip.default_config import (
     CLIPExperimentConfig as ExperimentConfig,
 )
 from nvidia_tao_pytorch.multimodal.clip.model.pl_clip_model import CLIPPlModel
+from nvidia_tao_pytorch.multimodal.clip.model.evaluation.pas import (
+    find_pas_pairs_file,
+    resolve_pas_eval_data,
+    run_pas_evaluation,
+)
 from nvidia_tao_pytorch.multimodal.clip.dataloader.pl_clip_data_module import (
     CLIPDataModule,
 )
@@ -27,7 +32,7 @@ from nvidia_tao_pytorch.multimodal.clip.utils.utils import (
 
 
 def run_experiment(experiment_config, key):
-    """Run retrieval evaluation experiment.
+    """Run a generic retrieval or direct PAS evaluation experiment.
 
     Parameters
     ----------
@@ -44,19 +49,46 @@ def run_experiment(experiment_config, key):
     """
     del key  # Unused but required by TAO API
 
-    # Validate that retrieval evaluation is configured
-    val_cfg = getattr(experiment_config.dataset, 'val', None)
-    if val_cfg is None or not getattr(val_cfg, 'datasets', None):
+    # Direct PAS evaluation is an explicit opt-in through evaluate.datasets.
+    # Validation datasets remain on the generic Trainer.test() route even
+    # when a conventionally named pairs sidecar exists next to an image list.
+    eval_cfg = getattr(experiment_config, 'evaluate', None)
+    pas_datasets = list(getattr(eval_cfg, 'datasets', None) or [])
+    pas_pairs_file = find_pas_pairs_file(experiment_config)
+    if pas_datasets and pas_pairs_file is None:
         raise ValueError(
-            "No evaluation data configured. For evaluate task, you must provide:\n"
+            "Direct PAS evaluation was requested through evaluate.datasets, "
+            "but no valid attribute_pairs_file or inferred *_pairs.json "
+            "sidecar was found."
+        )
+
+    # Generic retrieval requires paired validation data. Direct PAS
+    # evaluation can instead use evaluate.datasets.
+    val_cfg = getattr(experiment_config.dataset, 'val', None)
+    if (
+        pas_pairs_file is None
+        and (
+            val_cfg is None
+            or not getattr(val_cfg, 'datasets', None)
+        )
+    ):
+        raise ValueError(
+            "No evaluation data configured. For evaluate task, you must "
+            "provide:\n"
             "  dataset.val.datasets:\n"
             "  - image_dir: /path/to/images\n"
             "    caption_dir: /path/to/captions"
         )
 
-    logging.info(f"Retrieval evaluation: {len(val_cfg.datasets)} dataset(s)")
-    for i, ds in enumerate(val_cfg.datasets):
-        logging.info(f"  Dataset {i + 1}: images={ds.image_dir}, captions={ds.caption_dir}")
+    if pas_pairs_file is None:
+        logging.info(
+            f"Retrieval evaluation: {len(val_cfg.datasets)} dataset(s)"
+        )
+        for i, ds in enumerate(val_cfg.datasets):
+            logging.info(
+                f"  Dataset {i + 1}: images={ds.image_dir}, "
+                f"captions={ds.caption_dir}"
+            )
 
     model_path, trainer_kwargs = initialize_evaluation_experiment(
         experiment_config, experiment_config.encryption_key
@@ -73,6 +105,22 @@ def run_experiment(experiment_config, key):
         )
         model = CLIPPlModel(experiment_config)
 
+    if pas_pairs_file is not None:
+        pas_data = resolve_pas_eval_data(
+            experiment_config, pas_pairs_file
+        )
+        pairs, resolved_pairs_file = pas_data
+        logging.info(
+            "Detected PAS TAO-FT pairs file: %s",
+            resolved_pairs_file,
+        )
+        run_pas_evaluation(
+            experiment_config,
+            model,
+            pairs,
+        )
+        return
+
     dm = CLIPDataModule(
         experiment_config.dataset,
         model.tokenizer,
@@ -85,7 +133,6 @@ def run_experiment(experiment_config, key):
     logging.info("Starting retrieval evaluation")
     trainer = Trainer(**trainer_kwargs)
     trainer.test(model, datamodule=dm)
-
     logging.info("Evaluation finished")
 
 

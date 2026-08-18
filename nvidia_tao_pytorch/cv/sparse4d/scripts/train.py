@@ -72,10 +72,22 @@ def run_experiment(experiment_config, key):
         callbacks.append(PklResampleCallback(num_iters_per_epoch=num_iters_per_epoch))
         logging.info(f"PklResampleCallback enabled (interval={num_iters_per_epoch} steps)")
 
+    # Sparse4D defines its training budget in optimizer steps.  Keeping the
+    # common max_epochs limit as well can terminate a resumed run at the epoch
+    # boundary encoded in the checkpoint before the increased max_steps budget
+    # is consumed.  Let max_steps be the single authoritative stop condition so
+    # multi-fidelity AutoML promotions actually execute their additional steps.
+    max_steps = num_iters_per_epoch * num_epochs
+    if max_steps <= 0:
+        raise ValueError("Sparse4D training requires a positive optimizer-step budget")
+    # Keep epochs unbounded only because max_steps is always set below; the
+    # optimizer-step budget is the single stop condition for every run.
+    trainer_kwargs["max_epochs"] = -1
+
     trainer = Trainer(
         **trainer_kwargs,
         num_nodes=num_nodes,
-        max_steps=num_iters_per_epoch * num_epochs,
+        max_steps=max_steps,
         limit_train_batches=num_iters_per_epoch,
         reload_dataloaders_every_n_epochs=0,
         log_every_n_steps=50,

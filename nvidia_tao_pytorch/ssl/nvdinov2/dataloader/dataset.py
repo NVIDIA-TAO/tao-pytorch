@@ -11,6 +11,8 @@ from torch.utils.data import Dataset
 
 logger = logging.getLogger(__name__)
 
+ARCHIVE_SUFFIXES = (".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz", ".zip")
+
 
 class DinoV2Dataset(Dataset):
     """Dataset for NVDINOv2 to manage and transform image data for training, with support for various image formats."""
@@ -47,9 +49,20 @@ class DinoV2Dataset(Dataset):
 
         assert self.transform is not None, "Transform must be specified."
 
+        if not self.root.exists():
+            raise FileNotFoundError(f"images_dir does not exist: {self.root}")
+        if self.root.is_file():
+            if self.root.name.lower().endswith(ARCHIVE_SUFFIXES):
+                raise ValueError(
+                    f"images_dir must be an extracted image directory, not an archive ({self.root}). "
+                    "Extract it first (e.g. `tar -xzf`) and point images_dir at the resulting folder."
+                )
+            raise ValueError(f"images_dir must be a directory, but got a file: {self.root}")
+
         self.all_images = self._list_images()
 
-        assert len(self.all_images) > 0, f"No images found in {self.root}."
+        if not self.all_images:
+            raise ValueError(f"No images found in {self.root}.")
 
     def _list_images(self):
         """Lists all image paths in the specified root directory.

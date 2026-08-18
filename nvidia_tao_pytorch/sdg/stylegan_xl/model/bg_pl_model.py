@@ -110,6 +110,11 @@ class BigdatasetganPlModel(TAOLightningModule):
         super().__init__(experiment_spec)
 
         self.checkpoint_filename = 'bigdatasetgan_model'
+        # Best-checkpoint default: monitor validation mean IoU (logged as "val_avg_iou" in
+        # on_validation_epoch_end via status_logging_by_stage). Higher is better. This
+        # module's configure_callbacks calls super(), so it gets the best-checkpoint plumbing.
+        self.monitor_metric = "val_avg_iou"
+        self.monitor_mode = "max"
         self.dm = dm
         self.cudnn_benchmark = True
 

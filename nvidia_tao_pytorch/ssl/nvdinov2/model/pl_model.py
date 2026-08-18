@@ -14,7 +14,10 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.optim as optim
 from torch.distributed.fsdp import FullyShardedDataParallel, ShardingStrategy
-from torch.distributed.fsdp._runtime_utils import _reshard
+try:
+    from torch.distributed.fsdp._runtime_utils import _reshard
+except ImportError:  # removed in newer PyTorch; the manual teacher reshard becomes a no-op
+    _reshard = None
 from torch.distributed.fsdp.wrap import wrap
 import pytorch_lightning as pl
 from pytorch_lightning.strategies.fsdp import FSDPStrategy
@@ -114,6 +117,27 @@ class CustomModelCheckpoint(ModelCheckpoint):
 class DinoV2PlModel(TAOLightningModule):
     """Pytorch Lightning module for NVDINOv2"""
 
+    # Backbone hyper-parameter table (embed_dim/depth/num_heads/...) keyed by backbone type.
+    param_map = model_params.map_params
+
+    @staticmethod
+    def _validate_backbone_types(backbone_config, param_map):
+        """Validate the teacher/student backbone names against the supported architectures.
+
+        ``param_map`` is the subclass's arch table (its keys are the supported architectures),
+        so this stays correct for every SSL family (nvdinov2, dinov3, ...) without a second
+        source of truth. Raises a clear ValueError listing the allowed values instead of the
+        bare KeyError the arch lookups would otherwise raise. See bug 6460904.
+        """
+        supported = sorted(param_map["depth"].keys())
+        for role in ("teacher_type", "student_type"):
+            name = backbone_config[role]
+            if name not in param_map["depth"]:
+                raise ValueError(
+                    f"Unsupported model.backbone.{role}: '{name}'. Supported architectures are: "
+                    f"{', '.join(supported)}."
+                )
+
     def __init__(self, experiment_spec):
         """Initializes the DinoV2PlModel with the specified experiment configuration.
 
@@ -127,6 +151,12 @@ class DinoV2PlModel(TAOLightningModule):
         self.train_config = experiment_spec.train
         self.model_config = experiment_spec.model
 
+        # Fail up front on an unsupported backbone name. The packaged JSON-schema enum
+        # (STR_FIELD valid_options) is documentation only -- backbone type is an unconstrained
+        # str at runtime, so a typo/unsupported arch otherwise dies later with a bare KeyError
+        # deep in model init. See bug 6460904.
+        self._validate_backbone_types(self.model_config.backbone, self.param_map)
+
         # Dataset configs
         self.batch_size = self.dataset_config["batch_size"]
         self.n_global_crops = self.dataset_config.transform["n_global_crops"]
@@ -137,28 +167,39 @@ class DinoV2PlModel(TAOLightningModule):
         self.clip_grad_norm = self.train_config["clip_grad_norm"]
         self.num_prototypes = self.train_config["num_prototypes"]
         self.num_gpus = max(self.train_config["num_gpus"], len(self.train_config["gpu_ids"]))
-        if self._test_if_after_or_equal_to_blackwell_gpu():
-            self.use_custom_attention = False
-            logging.info("Disabling flash attention since current GPU is after or equal to the Blackwell series, which is currently not supported for FA3")
-        else:
+        if self._custom_attention_supported():
             self.use_custom_attention = self.train_config["use_custom_attention"]
             logging.info("Using flash attention if set by user")
+        else:
+            self.use_custom_attention = False
+            props = torch.cuda.get_device_properties(0)
+            if (props.major, props.minor) >= (10, 0):
+                logging.info(
+                    "Disabling xformers custom attention on Blackwell (SM%d%d): FA3 is not yet "
+                    "supported; using the SDPA fallback attention.", props.major, props.minor
+                )
+            else:
+                logging.info(
+                    "Disabling xformers custom attention on Hopper (SM%d%d): memory_efficient_attention "
+                    "fails to launch with this xformers build (bug 6459926); using the SDPA fallback "
+                    "attention.", props.major, props.minor
+                )
         # Teacher Backbone
         self.teacher_backbone_type = self.model_config.backbone['teacher_type']
-        self.teacher_depth = model_params.map_params['depth'][self.teacher_backbone_type]
-        self.teacher_num_heads = model_params.map_params['num_heads'][self.teacher_backbone_type]
-        self.teacher_init_values = model_params.map_params['init_values'][self.teacher_backbone_type]
-        self.teacher_drop_path_schedule = model_params.map_params['drop_path_schedule'][self.teacher_backbone_type]
-        self.teacher_num_classes = model_params.map_params['num_classes'][self.teacher_backbone_type]
-        self.teacher_embed_dim = model_params.map_params['embed_dim'][self.teacher_backbone_type]  # self.teacher_embed_dim should be equal to self.student_embed_dim
+        self.teacher_depth = self.param_map['depth'][self.teacher_backbone_type]
+        self.teacher_num_heads = self.param_map['num_heads'][self.teacher_backbone_type]
+        self.teacher_init_values = self.param_map['init_values'][self.teacher_backbone_type]
+        self.teacher_drop_path_schedule = self.param_map['drop_path_schedule'][self.teacher_backbone_type]
+        self.teacher_num_classes = self.param_map['num_classes'][self.teacher_backbone_type]
+        self.teacher_embed_dim = self.param_map['embed_dim'][self.teacher_backbone_type]  # self.teacher_embed_dim should be equal to self.student_embed_dim
         # Student Backbone
         self.student_backbone_type = self.model_config.backbone['student_type']
-        self.student_depth = model_params.map_params['depth'][self.student_backbone_type]
-        self.student_num_heads = model_params.map_params['num_heads'][self.student_backbone_type]
-        self.student_init_values = model_params.map_params['init_values'][self.student_backbone_type]
-        self.student_drop_path_schedule = model_params.map_params['drop_path_schedule'][self.student_backbone_type]
-        self.student_num_classes = model_params.map_params['num_classes'][self.student_backbone_type]
-        self.student_embed_dim = model_params.map_params['embed_dim'][self.student_backbone_type]
+        self.student_depth = self.param_map['depth'][self.student_backbone_type]
+        self.student_num_heads = self.param_map['num_heads'][self.student_backbone_type]
+        self.student_init_values = self.param_map['init_values'][self.student_backbone_type]
+        self.student_drop_path_schedule = self.param_map['drop_path_schedule'][self.student_backbone_type]
+        self.student_num_classes = self.param_map['num_classes'][self.student_backbone_type]
+        self.student_embed_dim = self.param_map['embed_dim'][self.student_backbone_type]
 
         self.patch_size = self.model_config.backbone['patch_size']
         self.img_size = self.model_config.backbone['img_size']
@@ -258,19 +299,23 @@ class DinoV2PlModel(TAOLightningModule):
         self.checkpoint_filename = 'nvdinov2_model'
         self.dm = []
 
-    def _test_if_after_or_equal_to_blackwell_gpu(self):
-        """Test if the GPU is after or equal to the Blackwell GPU"""
-        # Get the major/minor compute capability of the current device
-        major = torch.cuda.get_device_properties(0).major
-        minor = torch.cuda.get_device_properties(0).minor
+    def _custom_attention_supported(self):
+        """Whether the xformers custom-attention path is usable on the current GPU.
 
-        if (major, minor) >= (10, 0):
-            logging.debug("Running on GPU after or equal to the Blackwell series")
-            # Use native torch attention
+        The xformers ``memory_efficient_attention`` kernel fails to launch on Hopper (SM90A,
+        compute capability ``(9, x)``) with ``cudaErrorLaunchFailure`` (bug 6459926), and FA3
+        is not yet supported on Blackwell (``>= (10, 0)``). So the custom path is enabled only
+        on pre-Hopper GPUs (Ampere and older, ``< (9, 0)``); Hopper and newer fall back to the
+        shared SDPA path (``MemoryEfficientAttention._fallback_attention``), which is
+        numerically stable and launches on those archs. This is deliberately an
+        xformers-build-scoped arch hardcode - the true gate is whether this xformers build
+        launches ``memory_efficient_attention`` on the arch - and is the pragmatic P0 unblock.
+        """
+        if not torch.cuda.is_available():
+            # No device to probe (e.g. CPU-only construction); honor the configured flag.
             return True
-
-        logging.debug("Running on GPU before to the Blackwell series")
-        return False
+        props = torch.cuda.get_device_properties(0)
+        return (props.major, props.minor) < (9, 0)
 
     def _build_model(self):
         """Build Teacher and Student"""
@@ -484,6 +529,26 @@ class DinoV2PlModel(TAOLightningModule):
             teacher_backbone_global_output,
         )
 
+    def _extra_losses(self, **ctx):
+        """Hook for subclasses to inject additional loss terms into ``student_forward``.
+
+        The base (DINOv2) implementation returns an empty list, so the total loss is
+        identical to the original. Subclasses (e.g. DINOv3 Gram anchoring) override this
+        to return a list of extra loss tensors that get summed with the DINO/iBOT/KoLeo
+        terms. The keyword context exposes the student backbone outputs (which carry the
+        patch tokens and masks) and the raw crops/masks so an extra term can run its own
+        teacher and build whatever it needs.
+
+        Args:
+            **ctx: Context forwarded from ``student_forward`` (global/local crops,
+                global masks/indices/weights, and the student global/local backbone
+                outputs).
+
+        Returns:
+            list: Extra loss tensors to add. Empty for DINOv2.
+        """
+        return []
+
     def student_forward(
         self,
         *,
@@ -642,6 +707,18 @@ class DinoV2PlModel(TAOLightningModule):
             batch_size=self.batch_size,
         )
 
+        # Subclass-injected extra loss terms (e.g. DINOv3 Gram anchoring).
+        # Base implementation returns [], so DINOv2 numerics are unchanged.
+        losses += self._extra_losses(
+            global_crops=global_crops,
+            local_crops=local_crops,
+            global_masks=global_masks,
+            global_masks_indices=global_masks_indices,
+            global_masks_weight=global_masks_weight,
+            student_backbone_global_output=student_backbone_global_output,
+            student_backbone_local_output=student_backbone_local_output,
+        )
+
         # Calculate final loss
         loss = sum(losses)
         self.log("loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True, batch_size=self.batch_size,)
@@ -690,14 +767,19 @@ class DinoV2PlModel(TAOLightningModule):
             teacher_temperature=schedules["teacher_temperature"],
         )
 
-        # Reshard here to save memory
+        # Free the teacher's full params gathered during the teacher forward to trim peak
+        # memory. FULL_SHARD already reshards automatically in the FSDP post-forward hook, so
+        # this is only a best-effort optimization. The PyTorch <=2.1 manual-reshard internals
+        # (``m._handles`` / ``_runtime_utils._reshard``) were removed in newer PyTorch, so guard
+        # on their presence and otherwise rely on the automatic resharding.
         for m in FullyShardedDataParallel.fsdp_modules(self.teacher):
             if isinstance(m, FullyShardedDataParallel) is False or \
                     m.sharding_strategy == ShardingStrategy.NO_SHARD:
                 continue
 
-            handles = m._handles
-            _reshard(m, handles, [True] * len(handles))
+            handles = getattr(m, "_handles", None)
+            if _reshard is not None and handles:
+                _reshard(m, handles, [True] * len(handles))
 
         loss = self.student_forward(
             global_crops=global_crops,
@@ -729,8 +811,30 @@ class DinoV2PlModel(TAOLightningModule):
 
         return loss
 
+    @staticmethod
+    def _assert_train_loss_finite(model):
+        """Raise if the epoch train loss is non-finite.
+
+        ``train_loss`` is the sole in-loop AutoML monitoring KPI (minimize), so a NaN/Inf loss
+        must abort the run rather than be silently reported as PASS -- otherwise HPO and
+        loss-based milestone selection are poisoned. Kept as a static helper (taking the model
+        explicitly) so it is unit-testable without a full Lightning trainer. A common cause is
+        fp16 (16-mixed) attention overflow on the Blackwell fallback path; use bf16-mixed or a
+        build with the fp32 fallback-attention fix. See bug 6460915.
+        """
+        train_loss = model.trainer.logged_metrics.get("train_loss_epoch")
+        if train_loss is not None and not torch.isfinite(train_loss).all():
+            raise ValueError(
+                f"Training loss is non-finite (train_loss_epoch={train_loss}); aborting. A "
+                "NaN/Inf loss must not be reported as a successful run."
+            )
+
     def on_train_epoch_end(self):
-        """Log Training metrics to status.json"""
+        """Log Training metrics to status.json (and fail loudly on a non-finite loss)."""
+        # Check finiteness first so a NaN/Inf run raises before we emit a RUNNING/nan status
+        # line -- the last status the run writes should be the FAILURE, not RUNNING. See 6460915.
+        self._assert_train_loss_finite(self)
+
         average_train_loss = self.trainer.logged_metrics["train_loss_epoch"].item()
 
         self.status_logging_dict = {}
@@ -759,25 +863,87 @@ class DinoV2PlModel(TAOLightningModule):
             self.feat = torch.cat((self.feat, teacher_global_cls_token), 0)
         self.input_path.extend(input_path)
 
-    def on_predict_epoch_end(self):
-        """Predict epoch end"""
-        # Gather results from all GPUs
-        gathered_results = self.all_gather(self.feat)
-        gathered_paths = self.all_gather(self.input_path)
+    @staticmethod
+    def _collate_predictions(gathered_feat, gathered_paths, distributed):
+        """Assemble deduped ``(input_path, features)`` rows for the inference CSV.
 
-        # Single GPU case
-        if len(gathered_results.shape) == 1:
-            gathered_results = gathered_results.unsqueeze(dim=0)
+        Args:
+            gathered_feat: In the distributed case the ``all_gather`` output shaped
+                ``[world, N_local, D]``; in the single-device case the local features ``[N, D]``.
+            gathered_paths: In the distributed case a list-of-lists (one path list per rank,
+                from ``all_gather_object``); in the single-device case the local path list.
+            distributed (bool): Whether ``gathered_*`` carry the extra per-rank leading axis.
+
+        Returns:
+            list[dict]: One ``{"input_path", "features"}`` row per unique image.
+
+        The multi-GPU path previously (a) never flattened the ``[world, N_local, D]`` feature
+        tensor -- so iterating it yielded one row *per rank* instead of per image -- and (b)
+        called ``all_gather`` on a ``list[str]``, which is a silent no-op (only tensors are
+        gathered), leaving paths rank-local. The mismatched column lengths then raised on rank 0
+        inside this DDP hook, which manifested as a hang (one GPU pinned) with no CSV written.
+        See bug 6469109.
+        """
+        if distributed:
+            gathered_feat = gathered_feat.reshape(-1, gathered_feat.shape[-1])
+            gathered_paths = [path for rank_paths in gathered_paths for path in rank_paths]
+        if gathered_feat.dim() == 1:
+            gathered_feat = gathered_feat.unsqueeze(dim=0)
+
+        features = [str(row.cpu().numpy().tolist()) for row in gathered_feat]
+
+        # The predict DistributedSampler pads an uneven split by repeating whole samples; drop
+        # those duplicates so there is exactly one row per input image. Precondition: input paths
+        # are unique -- the dataset enumerates each file once (rglob), so a repeated path can only
+        # come from the sampler's padding, making the path a safe dedup key.
+        seen = set()
+        rows = []
+        for path, feature in zip(gathered_paths, features):
+            if path in seen:
+                continue
+            seen.add(path)
+            rows.append({"input_path": path, "features": feature})
+        return rows
+
+    @staticmethod
+    def _all_gather_predictions(feat, input_path, world_size):
+        """All-gather per-rank features (tensor) and paths (list[str]) across the default PG.
+
+        Kept ``torch.distributed``-based (rather than Lightning's ``self.all_gather``) so the exact
+        collective sequence that fixes the multi-GPU hang is unit-testable with a gloo process
+        group. Every rank must call this -- the collectives are the sync point, and a rank-0-only
+        path here is what deadlocked inference.
+
+        Returns:
+            tuple: ``(gathered_feat [world, N_local, D], paths_per_rank list[list[str]])``.
+
+        See bug 6469109.
+        """
+        gathered_feat = [torch.empty_like(feat) for _ in range(world_size)]
+        dist.all_gather(gathered_feat, feat)
+        gathered_feat = torch.stack(gathered_feat, dim=0)
+        paths_per_rank = [None] * world_size
+        dist.all_gather_object(paths_per_rank, input_path)
+        return gathered_feat, paths_per_rank
+
+    def on_predict_epoch_end(self):
+        """Predict epoch end: gather per-rank features/paths and write inference.csv on rank 0."""
+        # Every rank must invoke the collectives symmetrically (a rank-0-only path here is what
+        # deadlocked multi-GPU inference). all_gather handles the equal-shape feature tensors;
+        # string paths are not tensors, so use the object collective for them.
+        if self.trainer.world_size > 1:
+            gathered_feat, gathered_paths = self._all_gather_predictions(
+                self.feat, self.input_path, self.trainer.world_size
+            )
+            distributed = True
+        else:
+            gathered_feat = self.feat
+            gathered_paths = self.input_path
+            distributed = False
 
         if self.trainer.is_global_zero:
-            # Combine input paths and features into a DataFrame
-            gathered_results = [str(tensor.cpu().numpy().tolist()) for tensor in gathered_results]
-
-            data = {
-                "input_path": gathered_paths,
-                "features": gathered_results
-            }
-            df = pd.DataFrame(data)
+            rows = self._collate_predictions(gathered_feat, gathered_paths, distributed)
+            df = pd.DataFrame(rows, columns=["input_path", "features"])
             df.to_csv(
                 os.path.join(self.experiment_spec.results_dir, "inference.csv"),
                 header=True,
@@ -810,13 +976,17 @@ class DinoV2PlModel(TAOLightningModule):
         student_params_list = []
 
         if isinstance(self.trainer.strategy, FSDPStrategy):
+            # Under FSDP (FULL_SHARD) each wrapped module's ``.parameters()`` yields the *local*
+            # sharded flat-params. The student and teacher ModuleDicts are wrapped identically,
+            # so their shards line up index-for-index and the element-wise EMA below is
+            # equivalent to a full-tensor update with no all-gather. (The previous path read
+            # ``fsdp_modules(...).params``, a PyTorch <=2.1 internal removed in newer PyTorch.)
             for key in student.keys():
                 for student_param, teacher_param in zip(
-                    FullyShardedDataParallel.fsdp_modules(student[key]),
-                    FullyShardedDataParallel.fsdp_modules(teacher[key]),
+                    student[key].parameters(), teacher[key].parameters()
                 ):
-                    teacher_params_list += teacher_param.params
-                    student_params_list += student_param.params
+                    teacher_params_list.append(teacher_param.data)
+                    student_params_list.append(student_param.data)
         else:
             for teacher_param, student_param in zip(
                 teacher.parameters(), student.parameters()
@@ -966,4 +1136,11 @@ class DinoV2PlModel(TAOLightningModule):
         TAOExceptionCheckpoint.CHECKPOINT_NAME_LAST = CustomModelCheckpoint.CHECKPOINT_NAME_LAST
         exception_checkpoint_callback = TAOExceptionCheckpoint(dirpath=results_dir)
 
-        return [status_logger_callback, checkpoint_callback, exception_checkpoint_callback]
+        callbacks = [status_logger_callback, checkpoint_callback, exception_checkpoint_callback]
+        # Best-checkpoint saving (additive by default, or replacing the periodic
+        # callback when train.checkpointer.replace_periodic is enabled).
+        # NVDINOv2 is SSL pretraining with no validation loop / no logged val metric, so the
+        # best callback is inert unless a validation metric is added (or an explicit
+        # train.checkpointer.monitor is supplied). Wired for consistency with other trainers.
+        callbacks = self._configure_best_checkpoint(callbacks, results_dir)
+        return callbacks
