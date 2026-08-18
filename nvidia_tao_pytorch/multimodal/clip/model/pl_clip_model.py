@@ -656,6 +656,13 @@ class CLIPPlModel(TAOLightningModule):
             "train/logit_scale", logit_scale.item(),
             on_step=True, on_epoch=False, prog_bar=False
         )
+        if outputs is not None and len(outputs) == 4:
+            logit_bias = outputs[3]
+            if logit_bias is not None:
+                self.log(
+                    "train/logit_bias", logit_bias.item(),
+                    on_step=True, on_epoch=False, prog_bar=False
+                )
         return loss_value
 
     def optimizer_step(self, *args, **kwargs):
@@ -887,20 +894,37 @@ class CLIPPlModel(TAOLightningModule):
         return _broadcast_pas_metrics(weighted_rows, self.device)
 
     def _log_pas_metrics(self, metrics: dict, prefix: str) -> None:
-        """Log query-weighted PAS mAP for easy, medium, and hard queries."""
+        """Log per-difficulty and overall query-weighted PAS mAP."""
+        overall_weighted_sum = 0.0
+        overall_num_queries = 0
         for query_type in PAS_METADATA_QUERY_TYPES:
             query_metrics = metrics.get(query_type)
             if query_metrics is None:
                 continue
             name = f"{prefix}/pas/{query_type}_mAP"
             map_score = query_metrics["mAP"]
+            num_queries = query_metrics["num_queries"]
             self.log(name, map_score, sync_dist=True)
             self.status_logging_dict[name] = str(map_score)
+            overall_weighted_sum += map_score * num_queries
+            overall_num_queries += num_queries
             logging.info(
                 "%s: %.6f (%s deduplicated queries)",
                 name,
                 map_score,
-                f"{query_metrics['num_queries']:,}",
+                f"{num_queries:,}",
+            )
+
+        if overall_num_queries:
+            name = f"{prefix}/pas/overall_mAP"
+            overall_map = overall_weighted_sum / overall_num_queries
+            self.log(name, overall_map, sync_dist=True)
+            self.status_logging_dict[name] = str(overall_map)
+            logging.info(
+                "%s: %.6f (%s deduplicated queries)",
+                name,
+                overall_map,
+                f"{overall_num_queries:,}",
             )
 
     def _evaluate_and_log_paired_retrieval(

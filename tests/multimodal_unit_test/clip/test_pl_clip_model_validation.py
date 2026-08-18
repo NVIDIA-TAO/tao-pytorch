@@ -302,7 +302,28 @@ class TestCLIPPASValidation:
             "val/pas/easy_mAP",
             "val/pas/medium_mAP",
             "val/pas/hard_mAP",
+            "val/pas/overall_mAP",
         ]
+
+    def test_pas_overall_map_is_weighted_by_query_count(self):
+        """Overall PAS mAP represents every deduplicated query equally."""
+        model = _validation_model(
+            metadata_match_eval=True,
+            evaluator=_CaptureEvaluator(),
+        )
+        metrics = {
+            "easy": {"mAP": 0.25, "num_queries": 4},
+            "medium": {"mAP": 0.5, "num_queries": 2},
+            "hard": {"mAP": 1.0, "num_queries": 1},
+        }
+
+        model._log_pas_metrics(metrics, "val")
+
+        logged = {call[0][0]: call[0][1] for call in model.logged}
+        assert logged["val/pas/overall_mAP"] == pytest.approx(3 / 7)
+        assert float(
+            model.status_logging_dict["val/pas/overall_mAP"]
+        ) == pytest.approx(3 / 7)
 
     def test_multiple_pas_pair_files_load_in_dataloader_order(
         self, tmp_path, monkeypatch
