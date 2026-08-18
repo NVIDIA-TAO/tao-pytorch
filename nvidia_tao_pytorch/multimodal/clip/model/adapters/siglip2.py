@@ -148,10 +148,10 @@ class SigLIP2(BaseCLIPAdapter):
         )
 
     def get_encoder_blocks(self, tower):
-        """Return ordered list of transformer blocks for a given tower."""
+        """Return SigLIP2 transformer blocks for a tower."""
         if tower == 'vision':
             return list(self.backbone.inner.vision_model.encoder.layers)
-        elif tower == 'text':
+        if tower == 'text':
             return list(self.backbone.inner.text_model.encoder.layers)
         raise ValueError(f"Unknown tower: {tower}")
 

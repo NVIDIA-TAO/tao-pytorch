@@ -186,10 +186,10 @@ class OpenCLIP(BaseCLIPAdapter):
         return text_total, text_trainable
 
     def get_encoder_blocks(self, tower):
-        """Return ordered list of transformer blocks for a given tower."""
+        """Return OpenCLIP transformer blocks for a tower."""
         if tower == 'vision':
             return list(self.backbone.model.visual.transformer.resblocks)
-        elif tower == 'text':
+        if tower == 'text':
             return list(self.backbone.model.transformer.resblocks)
         raise ValueError(f"Unknown tower: {tower}")
 
