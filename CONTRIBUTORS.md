@@ -20,7 +20,9 @@ Maintainers review and merge pull requests, triage issues, and cut releases.
 
 Listed in order of first contribution.
 
-_None yet — be the first._
+| Name | GitHub |
+|------|--------|
+| Jugal Sheth | [@jugal-sheth](https://github.com/jugal-sheth) |
 
 ## How to be listed
 
