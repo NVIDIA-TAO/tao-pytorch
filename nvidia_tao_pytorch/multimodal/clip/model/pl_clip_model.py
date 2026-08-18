@@ -18,6 +18,11 @@ from nvidia_tao_pytorch.core.loggers import (  # noqa: E402
     api_logging as status_logging,
 )
 from nvidia_tao_pytorch.multimodal.clip.model.clip import build_model  # noqa: E402
+from nvidia_tao_pytorch.multimodal.clip.model.lora import inject_lora  # noqa: E402
+from nvidia_tao_pytorch.multimodal.clip.model.preservation_loss import (  # noqa: E402
+    build_preservation_loss,
+    normalize_teacher_state,
+)
 from nvidia_tao_pytorch.multimodal.clip.model.logit_calibration import (  # noqa: E402
     clamp_logit_scale_,
     preserve_logit_scale_ceiling_,
@@ -258,6 +263,24 @@ class CLIPPlModel(TAOLightningModule):
             self.experiment_spec.train, "triplet_margin", 0.2
         )
 
+        # PEFT and regularization setup
+        peft_cfg = getattr(self.experiment_spec, 'peft', None)
+        reg_cfg = getattr(self.experiment_spec, 'regularization', None)
+        self.peft_enabled = peft_cfg is not None and peft_cfg.enabled
+
+        # Build preservation loss BEFORE LoRA injection (teacher needs
+        # original pretrained weights)
+        self.preservation_loss = None
+        if reg_cfg is not None and reg_cfg.enabled:
+            self.preservation_loss = build_preservation_loss(
+                self.model, reg_cfg
+            )
+
+        # Inject LoRA adapters (freezes backbone, adds trainable LoRA params)
+        self.lora_stats = None
+        if self.peft_enabled:
+            self.lora_stats = inject_lora(self.model, peft_cfg)
+
         # Check if retrieval validation is configured
         val_cfg = getattr(self.experiment_spec.dataset, 'val', None)
         self.retrieval_enabled = (
@@ -280,6 +303,22 @@ class CLIPPlModel(TAOLightningModule):
             else []
         )
         self._pas_validation_pairs = None
+
+    def on_load_checkpoint(self, checkpoint):
+        """Reconcile calibration and the frozen teacher on restore.
+
+        Two concerns share this hook: the canonical logit calibration that
+        Lightning just restored is trusted state (its ceiling is preserved in
+        on_train_start), and the frozen preservation teacher is rebuilt from the
+        base weights in __init__ so whatever the checkpoint carries for it must
+        be reconciled against the running config.
+        """
+        super().on_load_checkpoint(checkpoint)
+        self._logit_scale_restored = True
+        state_dict = checkpoint.get("state_dict", checkpoint)
+        normalize_teacher_state(
+            state_dict, getattr(self, "preservation_loss", None)
+        )
 
     def setup(self, stage=None):
         """Set up training after Trainer is initialized."""
@@ -421,18 +460,23 @@ class CLIPPlModel(TAOLightningModule):
             self._logit_scale_restored = False
         self.trainer.datamodule.resume_step = self.trainer.global_step
 
-    def on_load_checkpoint(self, checkpoint):
-        """Mark canonical calibration loaded by Lightning as trusted state."""
-        del checkpoint
-        self._logit_scale_restored = True
-
     def _forward_pass(self, batch):
         """Run forward pass."""
         image, text = batch[0], batch[1]
         return self.model(image=image, text=text)
 
     def _backward(self, outputs, batch=None):
-        """Compute loss from model outputs."""
+        """Compute loss from model outputs.
+
+        Args:
+            outputs: Model forward outputs.
+            batch: Original batch (needed for preservation loss teacher forward).
+
+        Returns:
+            Tuple of (loss_value_or_dict, logit_scale).
+            When preservation losses are active, returns a dict with
+            'total', 'contrastive', 'embedding_mse', 'cosine', 'similarity'.
+        """
         if len(outputs) == 3:
             image_features, text_features, logit_scale = outputs
             logit_bias = None
@@ -471,6 +515,28 @@ class CLIPPlModel(TAOLightningModule):
             clip_loss = self.loss(
                 image_features, text_features, logit_scale, logit_bias
             )
+
+        contrastive_value = (
+            clip_loss['contrastive_loss']
+            if isinstance(clip_loss, dict)
+            else clip_loss
+        )
+
+        preservation_loss = getattr(self, "preservation_loss", None)
+        if preservation_loss is not None and batch is not None:
+            image, text = batch[0], batch[1]
+            pres_losses = preservation_loss(
+                image_features, text_features, image, text
+            )
+            total_loss = contrastive_value + pres_losses['preservation_total']
+            return {
+                'total': total_loss,
+                'contrastive': contrastive_value,
+                'embedding_mse': pres_losses['embedding_mse'],
+                'cosine': pres_losses['cosine'],
+                'similarity': pres_losses['similarity'],
+            }, logit_scale, image_features, text_features
+
         return clip_loss, logit_scale, image_features, text_features
 
     def training_step(self, batch):
@@ -483,7 +549,7 @@ class CLIPPlModel(TAOLightningModule):
         )
         outputs = self._forward_pass(batch)
         loss, logit_scale, image_features, text_features = self._backward(
-            outputs, batch
+            outputs, batch=batch
         )
 
         # Update per-tower learning rates
@@ -528,28 +594,59 @@ class CLIPPlModel(TAOLightningModule):
             "train/lr", current_text_lr,
             on_step=True, on_epoch=False, prog_bar=True
         )
-        contrastive_loss = (
-            loss['contrastive_loss'] if isinstance(loss, dict) else loss
-        )
+
+        # Handle preservation-loss dict ('total' present) vs scalar/standard.
+        if isinstance(loss, dict) and 'total' in loss:
+            loss_value = loss['total']
+            contrastive_loss = loss['contrastive']
+            preservation_active = True
+            self.log(
+                "train/contrastive_loss", loss['contrastive'],
+                on_step=True, on_epoch=False, prog_bar=False,
+                sync_dist=True, batch_size=batch_size,
+            )
+            self.log(
+                "train/emb_mse_loss", loss['embedding_mse'],
+                on_step=True, on_epoch=False, prog_bar=False,
+                sync_dist=True, batch_size=batch_size,
+            )
+            self.log(
+                "train/cosine_loss", loss['cosine'],
+                on_step=True, on_epoch=False, prog_bar=False,
+                sync_dist=True, batch_size=batch_size,
+            )
+            self.log(
+                "train/sim_loss", loss['similarity'],
+                on_step=True, on_epoch=False, prog_bar=False,
+                sync_dist=True, batch_size=batch_size,
+            )
+        else:
+            contrastive_loss = (
+                loss['contrastive_loss'] if isinstance(loss, dict) else loss
+            )
+            loss_value = contrastive_loss
+            preservation_active = False
+
+        # Optional batch-hard triplet loss, applied on top of the target.
         if self.triplet_loss_weight > 0:
             triplet_loss = _batch_hard_image_text_triplet_loss(
                 image_features, text_features, self.triplet_margin
             )
             loss_value = (
-                contrastive_loss + self.triplet_loss_weight * triplet_loss
+                loss_value + self.triplet_loss_weight * triplet_loss
             )
             self.log(
                 "train/triplet_loss", triplet_loss,
                 on_step=True, on_epoch=True, prog_bar=False,
                 sync_dist=True, batch_size=batch_size,
             )
-            self.log(
-                "train/contrastive_loss", contrastive_loss,
-                on_step=True, on_epoch=True, prog_bar=False,
-                sync_dist=True, batch_size=batch_size,
-            )
-        else:
-            loss_value = contrastive_loss
+            if not preservation_active:
+                self.log(
+                    "train/contrastive_loss", contrastive_loss,
+                    on_step=True, on_epoch=True, prog_bar=False,
+                    sync_dist=True, batch_size=batch_size,
+                )
+
         self.log(
             "train_loss", loss_value,
             on_step=True, on_epoch=True, prog_bar=True,
@@ -590,6 +687,8 @@ class CLIPPlModel(TAOLightningModule):
             )
             self.image_embeddings = []
             self.text_embeddings = []
+            self.teacher_image_embeddings = []
+            self.teacher_text_embeddings = []
             self.pas_row_indices = []
             logging.info("Retrieval evaluator initialized for validation.")
             if self.metadata_match_eval:
@@ -603,6 +702,8 @@ class CLIPPlModel(TAOLightningModule):
             self.retrieval_evaluator = None
             self.image_embeddings = []
             self.text_embeddings = []
+            self.teacher_image_embeddings = []
+            self.teacher_text_embeddings = []
             self.pas_row_indices = []
             logging.warning(
                 "No validation configured. Add datasets to val.datasets "
@@ -664,6 +765,16 @@ class CLIPPlModel(TAOLightningModule):
                     "metadata key 'pas_row_index'."
                 )
             self.pas_row_indices.append(metadata["pas_row_index"].cpu())
+
+        # Collect teacher embeddings for drift metric
+        preservation_loss = getattr(self, "preservation_loss", None)
+        if preservation_loss is not None:
+            with torch.no_grad():
+                t_img, t_txt = preservation_loss.teacher_forward(
+                    batch[0], text
+                )
+                self.teacher_image_embeddings.append(t_img.cpu())
+                self.teacher_text_embeddings.append(t_txt.cpu())
 
     def _evaluate_accumulated_retrieval(self, image_emb, text_emb):
         """Evaluate accumulated embeddings with paired ground truth."""
@@ -851,6 +962,27 @@ class CLIPPlModel(TAOLightningModule):
                     text_emb,
                     "val",
                 )
+
+        # Embedding drift metric (teacher vs student)
+        if (getattr(self, "preservation_loss", None) is not None and
+                self.teacher_image_embeddings):
+            t_img = torch.cat(self.teacher_image_embeddings, dim=0)
+            t_txt = torch.cat(self.teacher_text_embeddings, dim=0)
+            s_img = torch.cat(self.image_embeddings, dim=0)
+            s_txt = torch.cat(self.text_embeddings, dim=0)
+
+            img_drift = 1.0 - torch.nn.functional.cosine_similarity(
+                s_img, t_img, dim=-1
+            ).mean().item()
+            txt_drift = 1.0 - torch.nn.functional.cosine_similarity(
+                s_txt, t_txt, dim=-1
+            ).mean().item()
+            avg_drift = (img_drift + txt_drift) / 2.0
+
+            self.log("val/img_drift", img_drift, sync_dist=True)
+            self.log("val/txt_drift", txt_drift, sync_dist=True)
+            self.log("val/embedding_drift", avg_drift, sync_dist=True)
+            self.status_logging_dict["val/embedding_drift"] = str(avg_drift)
 
         if not self.trainer.sanity_checking and self.status_logging_dict:
             status_logging.get_status_logger().kpi = self.status_logging_dict

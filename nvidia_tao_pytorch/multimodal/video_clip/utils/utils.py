@@ -1,0 +1,494 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""CLIP utils."""
+
+import copy
+import os
+
+import numpy as np
+import torch
+from apex.optimizers import FusedLAMB
+from tabulate import tabulate
+from torch.optim import AdamW
+
+from nvidia_tao_pytorch.core.distributed.comm import get_global_rank
+from nvidia_tao_pytorch.core.tlt_logging import logging
+from nvidia_tao_pytorch.core.utils.ptm_utils import load_pretrained_weights
+
+
+SUPPORTED_CHECKPOINT_EXTENSIONS = {'.pth', '.ckpt'}
+
+# Maps user-facing precision strings to PyTorch Lightning Trainer precision.
+LIGHTNING_PRECISION_MAP = {
+    'fp16': '16-mixed',
+    'bf16': 'bf16-mixed',
+    'fp32': '32-true',
+}
+
+
+def to_lightning_precision(precision, default='32-true', strict=False):
+    """Map a user precision string to a Lightning Trainer precision string.
+
+    Parameters
+    ----------
+    precision : str
+        User-facing precision ('fp16', 'bf16', or 'fp32'); case-insensitive.
+    default : str
+        Returned for unknown values when ``strict`` is False.
+    strict : bool
+        When True, raise ValueError on an unknown precision instead of
+        falling back to ``default``.
+
+    Returns
+    -------
+    str
+        Lightning precision string (e.g. '16-mixed').
+    """
+    mapped = LIGHTNING_PRECISION_MAP.get(str(precision).lower())
+    if mapped is None:
+        if strict:
+            raise ValueError(
+                f"Precision '{precision}' is not supported. "
+                f"Supported: {list(LIGHTNING_PRECISION_MAP)}"
+            )
+        return default
+    return mapped
+
+
+def register_checkpoint_safe_globals():
+    """Register numpy types as safe globals for PyTorch 2.6+ checkpoint loading.
+
+    PyTorch 2.6+ uses weights_only=True by default when loading checkpoints,
+    which requires explicit allowlisting of non-tensor types. This function
+    registers numpy types commonly found in checkpoints (e.g., from HuggingFace
+    or older training runs) to allow safe loading.
+
+    Should be called early in scripts that load checkpoints via PyTorch Lightning
+    or torch.load with weights_only=True.
+    """
+    try:
+        from numpy._core.multiarray import scalar as np_scalar
+    except ImportError:
+        from numpy.core.multiarray import scalar as np_scalar
+
+    torch.serialization.add_safe_globals([
+        np_scalar,
+        np.dtype,
+        np.ndarray,
+    ])
+
+
+def _strip_checkpoint_prefixes(key, prefixes):
+    """Strip known wrapper prefixes from one checkpoint key."""
+    for prefix in prefixes:
+        if key.startswith(prefix):
+            key = key[len(prefix):]
+    return key
+
+
+def load_partial_pretrained_weights(
+    module, checkpoint, *, prefixes=(), source=None,
+):
+    """Load compatible pretrained tensors and report everything not restored.
+
+    This follows the RT-DETR pretrained-loading pattern: unwrap the checkpoint,
+    normalize known wrapper prefixes, compare against the target state dict,
+    skip incompatible shapes, and load with ``strict=False``.
+    """
+    state_dict = load_pretrained_weights(checkpoint)
+    if not hasattr(state_dict, "items"):
+        raise TypeError(
+            f"Checkpoint {source or checkpoint} does not contain a state dict."
+        )
+
+    target_state = module.state_dict()
+    normalized = {}
+    checkpoint_only = []
+    shape_mismatches = []
+    for original_key, value in state_dict.items():
+        key = _strip_checkpoint_prefixes(original_key, prefixes)
+        target = target_state.get(key)
+        if target is None:
+            checkpoint_only.append(original_key)
+            continue
+        if not hasattr(value, "shape") or value.shape != target.shape:
+            shape_mismatches.append(
+                f"{key}: checkpoint={getattr(value, 'shape', None)}, "
+                f"model={target.shape}"
+            )
+            continue
+        normalized[key] = value
+
+    label = source or str(checkpoint)
+    if not normalized:
+        raise ValueError(
+            f"No compatible tensors from checkpoint {label} matched the target "
+            f"module ({len(target_state)} tensors)."
+        )
+
+    incompatible = module.load_state_dict(normalized, strict=False)
+    if get_global_rank() == 0:
+        logging.info(
+            "Loaded %d/%d target tensors from pretrained checkpoint %s.",
+            len(normalized), len(target_state), label,
+        )
+        if incompatible.missing_keys:
+            logging.info(
+                "Layers not loaded from checkpoint; retained initialization "
+                "(%d):\n  %s",
+                len(incompatible.missing_keys),
+                "\n  ".join(incompatible.missing_keys),
+            )
+        if shape_mismatches:
+            logging.info(
+                "Layers skipped for shape mismatch (%d):\n  %s",
+                len(shape_mismatches),
+                "\n  ".join(shape_mismatches),
+            )
+        if checkpoint_only:
+            logging.info(
+                "Checkpoint-only layers ignored (%d):\n  %s",
+                len(checkpoint_only),
+                "\n  ".join(checkpoint_only),
+            )
+    return incompatible
+
+
+VALID_OPTIMIZER_TYPES = {'adamw', 'lamb'}
+VALID_SCHEDULERS = {'cosine', 'constant', 'linear'}
+
+
+def _is_bias_or_norm(name, param):
+    """Return True if param should be excluded from weight decay."""
+    return (param.ndim < 2 or "bn" in name or "ln" in name or
+            "bias" in name or "logit_scale" in name)
+
+
+def _create_optimizer(optimizer_type, param_groups, lr, betas, eps):
+    """Instantiate an optimizer by type name.
+
+    Parameters
+    ----------
+    optimizer_type : str
+        'adamw' or 'lamb'.
+    param_groups : list[dict]
+        Parameter groups with 'params' and 'weight_decay' keys.
+    lr : float
+        Base learning rate.
+    betas : list[float]
+        Beta parameters.
+    eps : float
+        Epsilon for numerical stability.
+
+    Returns
+    -------
+    torch.optim.Optimizer
+    """
+    if optimizer_type == 'adamw':
+        return AdamW(param_groups, lr=lr, betas=tuple(betas), eps=eps)
+    elif optimizer_type == 'lamb':
+        return FusedLAMB(param_groups, lr=lr, betas=tuple(betas), eps=eps)
+    else:
+        raise ValueError(
+            f"Unknown optimizer_type '{optimizer_type}'. "
+            f"Supported: {VALID_OPTIMIZER_TYPES}"
+        )
+
+
+def _make_tower_groups(named_params, cfg, tower_label):
+    """Split named parameters into bias/norm and rest groups.
+
+    Parameters
+    ----------
+    named_params : iterable of (str, Parameter)
+        Named parameters for a single tower.
+    cfg : config object
+        Must have lr, weight_decay, betas, eps attributes.
+    tower_label : str
+        Label for logging (e.g., 'vision', 'text', 'logit').
+
+    Returns
+    -------
+    list[dict]
+        Two param groups: [bias_norm_group, rest_group].
+        Each group has metadata keys '_tower' and '_is_bias_norm'.
+    """
+    bias_norm = []
+    rest = []
+    for name, param in named_params:
+        if not param.requires_grad:
+            continue
+        if _is_bias_or_norm(name, param):
+            bias_norm.append(param)
+        else:
+            rest.append(param)
+
+    groups = []
+    if bias_norm:
+        groups.append({
+            'params': bias_norm,
+            'lr': cfg.lr,
+            'betas': tuple(cfg.betas),
+            'eps': cfg.eps,
+            'weight_decay': 0.0,
+            '_tower': tower_label,
+            '_is_bias_norm': True,
+        })
+    if rest:
+        groups.append({
+            'params': rest,
+            'lr': cfg.lr,
+            'betas': tuple(cfg.betas),
+            'eps': cfg.eps,
+            'weight_decay': cfg.weight_decay,
+            '_tower': tower_label,
+            '_is_bias_norm': False,
+        })
+    return groups
+
+
+class _TowerCfg:
+    """Lightweight config holder for a single tower's optimizer settings."""
+
+    __slots__ = ('lr', 'weight_decay', 'betas', 'eps')
+
+    def __init__(self, lr, weight_decay, betas, eps):
+        """Initialize tower config."""
+        self.lr = lr
+        self.weight_decay = weight_decay
+        self.betas = betas
+        self.eps = eps
+
+
+def build_optimizer(model, train_cfg):
+    """Build optimizer with per-tower parameter groups.
+
+    Parameters
+    ----------
+    model : BaseCLIPAdapter
+        Model with vision_named_parameters() and text_named_parameters().
+    train_cfg : CLIPTrainConfig
+        Training config with optim containing vision_lr/text_lr.
+
+    Returns
+    -------
+    torch.optim.Optimizer
+        Optimizer with per-tower parameter groups.
+    """
+    cfg = train_cfg.optim
+
+    v_cfg = _TowerCfg(
+        lr=cfg.vision_lr, weight_decay=cfg.weight_decay,
+        betas=cfg.betas, eps=cfg.eps,
+    )
+    t_cfg = _TowerCfg(
+        lr=cfg.text_lr, weight_decay=cfg.weight_decay,
+        betas=cfg.betas, eps=cfg.eps,
+    )
+
+    param_groups = []
+    param_groups.extend(
+        _make_tower_groups(model.vision_named_parameters(), v_cfg, 'vision')
+    )
+    param_groups.extend(
+        _make_tower_groups(model.text_named_parameters(), t_cfg, 'text')
+    )
+    param_groups.extend(
+        _make_tower_groups(model.other_named_parameters(), t_cfg, 'logit')
+    )
+
+    if not param_groups:
+        logging.warning("No trainable parameters found.")
+        return AdamW([{'params': []}], lr=cfg.vision_lr)
+
+    optimizer = _create_optimizer(
+        cfg.optimizer_type, param_groups,
+        lr=cfg.vision_lr, betas=cfg.betas, eps=cfg.eps
+    )
+
+    _log_optimizer_summary(cfg, param_groups)
+    return optimizer
+
+
+def _log_optimizer_summary(cfg, param_groups):
+    """Log a summary of the optimizer configuration."""
+    vision_params = sum(
+        p.numel() for g in param_groups if g['_tower'] == 'vision'
+        for p in g['params']
+    )
+    text_params = sum(
+        p.numel() for g in param_groups if g['_tower'] == 'text'
+        for p in g['params']
+    )
+    logit_params = sum(
+        p.numel() for g in param_groups if g['_tower'] == 'logit'
+        for p in g['params']
+    )
+
+    table_data = [
+        ["vision", f"{vision_params:,}", f"{cfg.vision_lr:.2e}",
+         f"{cfg.weight_decay:.2e}", cfg.warmup_steps, cfg.scheduler],
+        ["text", f"{text_params:,}", f"{cfg.text_lr:.2e}",
+         f"{cfg.weight_decay:.2e}", cfg.warmup_steps, cfg.scheduler],
+        ["logit", f"{logit_params:,}", "", "", "", ""],
+    ]
+    headers = ["Tower", "Params", "LR", "WD", "Warmup", "Schedule"]
+    table = tabulate(table_data, headers=headers, tablefmt="simple")
+
+    logging.info(f"Optimizer: {cfg.optimizer_type.upper()}\n{table}")
+
+
+# ---- LR Schedulers ----
+
+def compute_lr(step, base_lr, warmup_steps, max_steps, scheduler='cosine'):
+    """Compute learning rate for a given step.
+
+    Parameters
+    ----------
+    step : int
+        Current training step.
+    base_lr : float
+        Base learning rate (peak after warmup).
+    warmup_steps : int
+        Steps for linear warmup.
+    max_steps : int
+        Total training steps.
+    scheduler : str
+        'cosine', 'constant', or 'linear'.
+
+    Returns
+    -------
+    float
+        Learning rate for the current step.
+    """
+    if step < warmup_steps:
+        return base_lr * (step + 1) / max(warmup_steps, 1)
+
+    if scheduler == 'constant':
+        return base_lr
+
+    progress = step - warmup_steps
+    total = max(max_steps - warmup_steps, 1)
+
+    if scheduler == 'linear':
+        return base_lr * max(1.0 - progress / total, 0.0)
+
+    # cosine (default)
+    return 0.5 * (1 + np.cos(np.pi * progress / total)) * base_lr
+
+
+def validate_peft_state_dict(
+    state_dict, experiment_config, checkpoint_label="checkpoint",
+):
+    """Warn when loaded checkpoint LoRA weights disagree with the PEFT config."""
+    try:
+        keys = state_dict.keys()
+    except AttributeError:
+        logging.warning(
+            "Could not inspect %s for LoRA weights: state_dict is not a mapping.",
+            checkpoint_label,
+        )
+        return
+    has_lora = any(
+        ".lora_A" in key or ".lora_B" in key for key in keys
+    )
+
+    peft_cfg = getattr(experiment_config, 'peft', None)
+    peft_enabled = peft_cfg is not None and getattr(peft_cfg, 'enabled', False)
+
+    if has_lora and not peft_enabled:
+        logging.warning(
+            "Checkpoint %s contains LoRA adapter weights but the config has no "
+            "enabled `peft` block. The adapters will NOT be loaded and the "
+            "model falls back to base weights. Provide the matching `peft` "
+            "config used during fine-tuning.", checkpoint_label,
+        )
+    elif peft_enabled and not has_lora:
+        logging.warning(
+            "Config enables a `peft` (LoRA) block but checkpoint %s has no LoRA "
+            "adapter weights; LoRA layers will be randomly initialized. This is "
+            "expected only when starting fine-tuning from a non-LoRA checkpoint.",
+            checkpoint_label,
+        )
+
+
+def load_model_from_checkpoint(model_path, experiment_config, model_class):
+    """Load CLIP model from checkpoint.
+
+    Parameters
+    ----------
+    model_path : str
+        Path to the model checkpoint file.
+    experiment_config : ExperimentConfig
+        Experiment configuration object.
+    model_class : class
+        The PyTorch Lightning model class to load (e.g., VideoCLIPPlModel).
+
+    Returns
+    -------
+    model
+        Loaded PyTorch Lightning model.
+
+    Raises
+    ------
+    NotImplementedError
+        If the model format is not supported.
+    """
+    if not model_path:
+        raise ValueError(
+            "A trained checkpoint is required for evaluation and inference."
+        )
+
+    register_checkpoint_safe_globals()
+    ext = os.path.splitext(model_path)[1].lower()
+
+    if ext in SUPPORTED_CHECKPOINT_EXTENSIONS:
+        restore_config = copy.deepcopy(experiment_config)
+        model_cfg = restore_config.model
+        for field in (
+            "internvideo2clip_hf_id",
+            "vision_encoder",
+            "text_encoder",
+            "clip_head",
+            "pretrained_ckpt",
+        ):
+            if hasattr(model_cfg, field):
+                setattr(model_cfg, field, None)
+        # Preservation regularization is training-only. Skip the frozen-teacher
+        # deep copy on restore: the weight sources above were just nulled, so a
+        # teacher built here would hold random weights.
+        reg_cfg = getattr(restore_config, "regularization", None)
+        if reg_cfg is not None and getattr(reg_cfg, "enabled", False):
+            reg_cfg.enabled = False
+        model = model_class.load_from_checkpoint(
+            model_path,
+            map_location="cpu",
+            experiment_spec=restore_config
+        )
+        logging.info(f"Model loaded from {model_path}")
+        return model
+
+    if ext == '.engine':
+        raise NotImplementedError(
+            "TensorRT inference is supported through "
+            "tao-deploy, not tao-pytorch."
+        )
+
+    raise NotImplementedError(
+        f"Model format '{ext}' is not supported. "
+        f"Supported formats: {SUPPORTED_CHECKPOINT_EXTENSIONS}"
+    )

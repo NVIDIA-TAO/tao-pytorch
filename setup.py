@@ -72,7 +72,18 @@ setuptools.setup(
     keywords=version_locals['__keywords__'],
     packages=setuptools_packages,
     package_data={
-        '': ['*.pyc', "*.yaml", "*.so", "*.pdf"]
+        '': ['*.pyc', "*.yaml", "*.so", "*.pdf"],
+        # Vendored MobileCLIP text-tower configs are read from the installed
+        # package at runtime; the catch-all patterns above are not recursive.
+        'nvidia_tao_pytorch.multimodal.video_clip.model.backbones.internvideo2.backbones.internvideo2.mobileclip': [
+            "configs/*.json"
+        ],
+        # experiment_specs/ is a plain data directory, not a package, so
+        # find_packages() skips it and the non-recursive catch-all above never
+        # reaches its YAML. Ship the reference specs explicitly.
+        'nvidia_tao_pytorch.multimodal.video_clip': [
+            "experiment_specs/*.yaml"
+        ]
     },
     include_package_data=True,
     zip_safe=False,
@@ -110,6 +121,7 @@ setuptools.setup(
             'mae=nvidia_tao_pytorch.ssl.mae.entrypoint.mae:main',
             # Multimodal entry point
             'clip=nvidia_tao_pytorch.multimodal.clip.entrypoint.clip:main',
+            'video_clip=nvidia_tao_pytorch.multimodal.video_clip.entrypoint.video_clip:main',
             'radio=nvidia_tao_pytorch.multimodal.radio.entrypoint.radio:main',
         ]
     },
