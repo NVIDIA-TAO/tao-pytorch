@@ -73,7 +73,7 @@ python tools/update_readme_supported_commands.py
 | :--- | :--- |
 | Computer vision | `action_recognition`, `centerpose`, `classification_pyt`, `deformable_detr`, `depth_net`, `dino`, `grounding_dino`, `mal`, `mask2former`, `mask_grounding_dino`, `ml_recog`, `ocdnet`, `ocrnet`, `oneformer`, `optical_inspection`, `pose_classification`, `re_identification`, `rtdetr`, `segformer`, `visual_changenet` |
 | 3D / point cloud | `bevfusion`, `pointpillars`, `sparse4d` |
-| Multimodal | `clip`, `radio` |
+| Multimodal | `clip`, `radio`, `video_clip` |
 | Self-supervised learning | `dinov3`, `mae`, `nvdinov2` |
 | Synthetic data generation | `stylegan_xl` |
 
@@ -107,6 +107,7 @@ python tools/update_readme_supported_commands.py
 | `segformer` | `cv.segformer` | `default_specs`, `evaluate`, `export`, `inference`, `quantize`, `train` |
 | `sparse4d` | `cv.sparse4d` | `default_specs`, `evaluate`, `export`, `inference`, `quantize`, `train` |
 | `stylegan_xl` | `sdg.stylegan_xl` | `dataset_convert`, `default_specs`, `evaluate`, `export`, `inference`, `train` |
+| `video_clip` | `multimodal.video_clip` | `default_specs`, `evaluate`, `export`, `inference`, `train` |
 | `visual_changenet` | `cv.visual_changenet` | `default_specs`, `evaluate`, `export`, `inference`, `quantize`, `train` |
 
 For a specific model family, run the command with no subtask or with `-h` to see

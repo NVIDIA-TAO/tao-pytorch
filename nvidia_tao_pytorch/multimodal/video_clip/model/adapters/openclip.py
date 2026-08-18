@@ -1,5 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """OpenCLIP model adapter for CLIP-compatible training.
 
@@ -13,14 +26,10 @@ Supports OpenCLIP/NV-CLIP models with both vision and text encoders:
 import torch
 import torch.nn.functional as F
 
-from nvidia_tao_pytorch.core.tlt_logging import logging
-from nvidia_tao_pytorch.multimodal.clip.model.adapters.base import (
+from nvidia_tao_pytorch.multimodal.video_clip.model.adapters.base import (
     BaseCLIPAdapter,
 )
-from nvidia_tao_pytorch.multimodal.clip.model.logit_calibration import (
-    configure_source_logit_calibration,
-)
-from nvidia_tao_pytorch.multimodal.clip.model.tokenizers import (
+from nvidia_tao_pytorch.multimodal.video_clip.model.tokenizers import (
     OpenCLIPWrappedTokenizer,
     CLIPCompatibleTokenizer,
 )
@@ -29,18 +38,13 @@ from nvidia_tao_pytorch.multimodal.clip.model.tokenizers import (
 class OpenCLIP(BaseCLIPAdapter):
     """Adapter to make backbone_v2.open_clip compatible with CLIP training.
 
-    Calibration is owned by the wrapped native OpenCLIP model.
-
     This wraps the backbone_v2 OpenCLIP model to provide the same
     interface as other CLIP adapters for training compatibility.
 
     Args:
         backbone_model: The backbone_v2 OpenCLIP model
-        logit_scale_init: Optional raw scale override; None preserves native
-            calibration.
-        logit_bias_init: Optional bias override; None preserves native
-            calibration.
-        loss_type: Contrastive loss family used for missing-value fallback
+        logit_scale_init: Initial value for logit scale parameter
+        logit_bias_init: Initial value for logit bias parameter
         freeze_vision_encoder: Freeze vision encoder parameters
         freeze_text_encoder: Freeze text encoder parameters
         canonicalize_text: Apply text canonicalization before tokenization
@@ -49,29 +53,19 @@ class OpenCLIP(BaseCLIPAdapter):
     def __init__(
         self,
         backbone_model,
-        logit_scale_init=None,
-        logit_bias_init=None,
+        logit_scale_init=2.3026,
+        logit_bias_init=-10.0,
         freeze_vision_encoder=False,
         freeze_text_encoder=False,
         canonicalize_text=False,
-        loss_type='siglip',
     ):
         """Initialize OpenCLIP adapter."""
         super().__init__(
-            loss_type=loss_type,
-            owns_logit_parameters=False,
+            logit_scale_init=logit_scale_init,
+            logit_bias_init=logit_bias_init,
         )
 
         self.backbone = backbone_model
-        configure_source_logit_calibration(
-            self.backbone.model,
-            logit_scale_init=logit_scale_init,
-            logit_bias_init=logit_bias_init,
-            loss_type=loss_type,
-            bias_required=False,
-        )
-        self.logit_scale_max = self.backbone.model.logit_scale_max
-
         self.freeze_vision_encoder = freeze_vision_encoder
         self.freeze_text_encoder = freeze_text_encoder
 
@@ -87,24 +81,11 @@ class OpenCLIP(BaseCLIPAdapter):
         # Log parameters
         self._log_parameters()
 
-    @property
-    def logit_scale(self):
-        """Return the canonical native OpenCLIP raw logit scale."""
-        return self.backbone.model.logit_scale
-
-    @property
-    def logit_bias(self):
-        """Return the optional canonical native OpenCLIP logit bias."""
-        return getattr(self.backbone.model, 'logit_bias', None)
-
     def _configure_trainable_params(self):
         """Configure trainable params based on freeze settings."""
-        # Warning if both encoders are frozen
-        if self.freeze_vision_encoder and self.freeze_text_encoder:
-            logging.warning(
-                "Both vision and text encoders are frozen. "
-                "Only available logit calibration parameters will be trained."
-            )
+        self._warn_if_fully_frozen(
+            self.freeze_vision_encoder, self.freeze_text_encoder
+        )
 
         # Freeze vision encoder if requested
         if self.freeze_vision_encoder:
@@ -139,12 +120,8 @@ class OpenCLIP(BaseCLIPAdapter):
 
     def _log_parameters(self):
         """Log parameter configuration summary."""
-        vision_total = sum(
-            p.numel() for p in self.backbone.model.visual.parameters()
-        )
-        vision_trainable = sum(
-            p.numel() for p in self.backbone.model.visual.parameters()
-            if p.requires_grad
+        vision_trainable, vision_total = self._count_params(
+            self.backbone.model.visual.parameters()
         )
         text_total, text_trainable = self._count_text_params()
 
@@ -184,14 +161,6 @@ class OpenCLIP(BaseCLIPAdapter):
         text_total = sum(p.numel() for p in text_params)
         text_trainable = sum(p.numel() for p in text_params if p.requires_grad)
         return text_total, text_trainable
-
-    def get_encoder_blocks(self, tower):
-        """Return ordered list of transformer blocks for a given tower."""
-        if tower == 'vision':
-            return list(self.backbone.model.visual.transformer.resblocks)
-        elif tower == 'text':
-            return list(self.backbone.model.transformer.resblocks)
-        raise ValueError(f"Unknown tower: {tower}")
 
     def vision_named_parameters(self):
         """Return named parameters for the vision encoder."""

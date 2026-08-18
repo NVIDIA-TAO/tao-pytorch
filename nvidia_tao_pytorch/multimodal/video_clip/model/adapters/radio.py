@@ -1,5 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """C-RADIO model adapter for CLIP-compatible training.
 
@@ -23,13 +36,10 @@ import torch
 import torch.nn.functional as F
 
 from nvidia_tao_pytorch.core.tlt_logging import logging
-from nvidia_tao_pytorch.multimodal.clip.model.adapters.base import (
+from nvidia_tao_pytorch.multimodal.video_clip.model.adapters.base import (
     BaseCLIPAdapter,
 )
-from nvidia_tao_pytorch.multimodal.clip.model.logit_calibration import (
-    configure_source_logit_calibration,
-)
-from nvidia_tao_pytorch.multimodal.clip.model.tokenizers import (
+from nvidia_tao_pytorch.multimodal.video_clip.model.tokenizers import (
     CLIPCompatibleTokenizer,
     OpenCLIPWrappedTokenizer,
     SigLIP2WrappedTokenizer,
@@ -47,11 +57,8 @@ class CRADIO(BaseCLIPAdapter):
     Args:
         model_version: C-RADIO model version (e.g., 'c-radio_v3-l').
         adaptor_name: Name of the text adaptor ('siglip2' or 'clip').
-        logit_scale_init: Optional raw scale override; None preserves native
-            calibration or uses the selected loss-family fallback.
-        logit_bias_init: Optional bias override; None preserves native
-            absence or uses the loss-family fallback for local ownership.
-        loss_type: Contrastive loss family used for fallback initialization.
+        logit_scale_init: Initial value for logit scale parameter.
+        logit_bias_init: Initial value for logit bias parameter.
         freeze_vision_encoder: Freeze vision encoder parameters.
         freeze_text_encoder: Freeze text encoder parameters.
         canonicalize_text: Apply text canonicalization before tokenization.
@@ -68,17 +75,16 @@ class CRADIO(BaseCLIPAdapter):
         self,
         model_version='c-radio_v3-l',
         adaptor_name='siglip2',
-        logit_scale_init=None,
-        logit_bias_init=None,
+        logit_scale_init=2.3026,
+        logit_bias_init=-10.0,
         freeze_vision_encoder=False,
         freeze_text_encoder=False,
         canonicalize_text=False,
-        loss_type='siglip',
     ):
         """Initialize CRADIO adapter."""
         super().__init__(
-            loss_type=loss_type,
-            owns_logit_parameters=False,
+            logit_scale_init=logit_scale_init,
+            logit_bias_init=logit_bias_init,
         )
 
         self.model_version = model_version
@@ -99,23 +105,7 @@ class CRADIO(BaseCLIPAdapter):
         )
         self.radio_model.make_preprocessor_external()
 
-        source_owner = self._source_logit_owner()
-        self._uses_source_logit_calibration = source_owner is not None
-        if source_owner is None:
-            self._create_local_logit_parameters(
-                logit_scale_init=logit_scale_init,
-                logit_bias_init=logit_bias_init,
-                loss_type=loss_type,
-            )
-        else:
-            configure_source_logit_calibration(
-                source_owner,
-                logit_scale_init=logit_scale_init,
-                logit_bias_init=logit_bias_init,
-                loss_type=loss_type,
-                bias_required=False,
-            )
-            self.logit_scale_max = source_owner.logit_scale_max
+        self.adaptor = self.radio_model.adaptors[adaptor_name]
 
         # Wrap the adaptor's built-in tokenizer for dataloader compatibility.
         # Apply canonicalization wrapper based on config.
@@ -140,36 +130,6 @@ class CRADIO(BaseCLIPAdapter):
         self._log_parameters()
 
     @property
-    def adaptor(self):
-        """Return the selected adaptor without registering a second alias."""
-        return self.radio_model.adaptors[self.adaptor_name]
-
-    def _source_logit_owner(self):
-        """Return native adaptor calibration owner when one is available."""
-        source = self.text_model
-        logit_scale = getattr(source, 'logit_scale', None)
-        logit_bias = getattr(source, 'logit_bias', None)
-        if logit_scale is None:
-            if logit_bias is not None:
-                raise ValueError(
-                    "RADIO adaptor exposes logit_bias without logit_scale."
-                )
-            return None
-        return source
-
-    def get_logit_scale_parameter(self):
-        """Return native or local canonical raw logit scale."""
-        if self._uses_source_logit_calibration:
-            return self._source_logit_owner().logit_scale
-        return super().get_logit_scale_parameter()
-
-    def get_logit_bias_parameter(self):
-        """Return native or local canonical logit bias."""
-        if self._uses_source_logit_calibration:
-            return getattr(self._source_logit_owner(), 'logit_bias', None)
-        return super().get_logit_bias_parameter()
-
-    @property
     def text_model(self):
         """Return the text encoder sub-module inside the adaptor."""
         attr = self._TEXT_MODEL_ATTR.get(self.adaptor_name)
@@ -181,21 +141,14 @@ class CRADIO(BaseCLIPAdapter):
         )
 
     def _configure_trainable_params(self):
-        """Configure trainable params without freezing native calibration."""
-        if self.freeze_vision_encoder and self.freeze_text_encoder:
-            logging.warning(
-                "Both vision and text encoders are frozen. "
-                "Only available logit calibration parameters will be trained."
-            )
+        """Configure trainable params based on freeze settings."""
+        self._warn_if_fully_frozen(
+            self.freeze_vision_encoder, self.freeze_text_encoder
+        )
 
-        text_param_ids = {id(param) for param in self.text_model.parameters()}
-        logit_param_ids = {
-            id(param) for _, param in self.named_logit_parameters()
-        }
+        text_param_ids = {id(p) for p in self.text_model.parameters()}
+
         for param in self.radio_model.parameters():
-            if id(param) in logit_param_ids:
-                param.requires_grad = True
-                continue
             is_text = id(param) in text_param_ids
             freeze = (
                 self.freeze_text_encoder if is_text
@@ -209,59 +162,41 @@ class CRADIO(BaseCLIPAdapter):
             self.text_model.eval()
 
     def _log_parameters(self):
-        """Log parameter configuration summary without double-counting."""
-        vision_params = [
-            param for _, param in self.vision_named_parameters()
-        ]
-        text_params = [
-            param for _, param in self.text_named_parameters()
-        ]
+        """Log parameter configuration summary."""
+        text_train, text_total = self._count_params(
+            self.text_model.parameters()
+        )
+        radio_train, radio_total = self._count_params(
+            self.radio_model.parameters()
+        )
+
         self._log_model_summary(
             model_name=f"RADIO: {self.model_version} ({self.adaptor_name})",
-            vision_total=sum(param.numel() for param in vision_params),
-            vision_trainable=sum(
-                param.numel() for param in vision_params
-                if param.requires_grad
-            ),
-            text_total=sum(param.numel() for param in text_params),
-            text_trainable=sum(
-                param.numel() for param in text_params if param.requires_grad
-            ),
+            vision_total=radio_total - text_total,
+            vision_trainable=radio_train - text_train,
+            text_total=text_total,
+            text_trainable=text_train,
             freeze_vision=self.freeze_vision_encoder,
             freeze_text=self.freeze_text_encoder,
         )
-
-    def get_encoder_blocks(self, tower):
-        """Return ordered list of transformer blocks for a given tower."""
-        if tower == 'vision':
-            return list(self.radio_model.model.blocks)
-        elif tower == 'text':
-            return list(self.text_model.encoder.layers)
-        raise ValueError(f"Unknown tower: {tower}")
 
     # -- Parameter enumeration for per-tower optimizer groups --
 
     def vision_named_parameters(self):
         """Yield named parameters for the vision encoder."""
-        text_param_ids = {id(param) for param in self.text_model.parameters()}
+        text_param_ids = {id(p) for p in self.text_model.parameters()}
         for name, param in self.radio_model.named_parameters():
             if id(param) not in text_param_ids:
                 yield f'radio_model.{name}', param
 
     def text_named_parameters(self):
-        """Yield text parameters, excluding canonical calibration."""
+        """Yield named parameters for the text encoder."""
         attr = self._TEXT_MODEL_ATTR.get(self.adaptor_name)
         if attr is None:
             return
-        logit_param_ids = {
-            id(param) for _, param in self.named_logit_parameters()
-        }
-        prefix = (
-            f'radio_model.adaptors.{self.adaptor_name}.{attr}'
-        )
+        prefix = f'adaptor.{attr}'
         for name, param in self.text_model.named_parameters():
-            if id(param) not in logit_param_ids:
-                yield f'{prefix}.{name}', param
+            yield f'{prefix}.{name}', param
 
     # -- Forward pass --
 
