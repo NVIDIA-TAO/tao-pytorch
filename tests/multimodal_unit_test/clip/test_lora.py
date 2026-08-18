@@ -196,6 +196,15 @@ def test_lora_with_no_matching_projection_is_rejected():
         ))
 
 
+@pytest.mark.parametrize('num_last_blocks', [-1, 3])
+def test_lora_rejects_block_counts_outside_the_tower_depth(num_last_blocks):
+    """LoRA depth must be zero/all or within the encoder block count."""
+    config = _hybrid_config('lora', 'frozen', calibration=False)
+    config.vision.num_last_blocks = num_last_blocks
+    with pytest.raises(ValueError, match='num_last_blocks must be between'):
+        inject_lora(_TinyCLIP(), config)
+
+
 @pytest.mark.parametrize('calibration', [False, True])
 def test_logit_calibration_is_controlled_independently(calibration):
     """Logit parameters follow train_logit_calibration, not tower mode."""
@@ -306,4 +315,3 @@ def test_lora_checkpoint_state_restores_exactly(tmp_path):
         resumed(image=image, text=text), model(image=image, text=text)
     ):
         torch.testing.assert_close(actual, expected)
-
