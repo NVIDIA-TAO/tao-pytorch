@@ -21,38 +21,62 @@ from nvidia_tao_pytorch.cv.grounding_dino.model.pl_gdino_model import GDINOPlMod
 from nvidia_tao_pytorch.cv.grounding_dino.model.utils import grounding_dino_parser, ptm_adapter
 
 
-def _assert_precision_supported_on_device(precision):
-    """Fail fast on mixed-precision training on SM 12.x (RTX PRO 6000 Blackwell and siblings).
+def _configure_gemm_workarounds_for_device(precision):
+    """Work around the cuBLASLt SM 12.x batched-GEMM defect (RTX PRO 6000 Blackwell and siblings).
 
-    cuBLASLt's ``nvjet_sm120_*_tmaAB_*`` TMA GEMM kernels make illegal memory accesses on
-    SM 12.x for the skinny-N half-precision strided-batched GEMMs this model issues
-    (text cross-attention and the vision-text fusion layer). The fault happens inside the
-    library, poisons the CUDA context, and surfaces as ``CUBLAS_STATUS_INTERNAL_ERROR``
-    followed by ``cudaErrorIllegalAddress`` -- typically several minutes into a run and with
-    a traceback that points at unrelated code, which is very hard to act on.
+    cuBLASLt's ``nvjet_sm120_*_tmaAB_*`` TMA GEMM kernels make illegal memory accesses on SM 12.x
+    for the skinny-N strided-batched GEMMs this model issues (text encoder / text cross-attention
+    and the vision-text fusion layer). The fault happens inside the library, poisons the CUDA
+    context, and surfaces as ``CUBLAS_STATUS_INTERNAL_ERROR`` followed by
+    ``cudaErrorIllegalAddress``, usually with a traceback pointing at unrelated code.
 
-    Both fp16 and bf16 are affected (bf16 fails ~35% of runs, fp16 more often); fp32 is clean.
-    The defect is below the framework, so there is no reliable model-side workaround -- two
-    distinct kernels in the family were observed via different call paths. Datacenter Blackwell
-    (SM 10.x) is unaffected and is not gated here.
+    One kernel in that family is selected per compute type, so the defect is not tied to a single
+    precision:
 
-    Remove this guard once the container ships a cuBLAS with the fix.
+    ==========  =============================================  ===========================
+    Precision   Faulting kernel                                cuBLASLt entry point
+    ==========  =============================================  ===========================
+    fp16        ``nvjet_sm120_hsh_mma_16x128x32_...``          ``cublasLtHSHMatmul``
+    bf16        ``nvjet_sm120_tst_mma_128x8x32_...``           ``cublasLtTSTMatmul``
+    fp32/TF32   ``nvjet_sm120_sss_tf32_mma_32x64x32_...``      ``cublasLtSSSMatmul``
+    ==========  =============================================  ===========================
+
+    The fp32 variant is only reachable because this container's PyTorch build enables TF32 matmul
+    by default, so plain fp32 training still lands on a tensor-core kernel. Turning TF32 off for
+    matmul routes fp32 onto an unaffected kernel and is enough to make fp32 training work; it does
+    not help fp16/bf16, whose kernels are selected by their own compute type, so those stay gated.
+
+    Datacenter Blackwell (SM 10.x) is unaffected and is not touched here. Remove all of this once
+    the container ships a cuBLAS with the fix.
     """
-    if precision == '32-true' or not torch.cuda.is_available():
+    if not torch.cuda.is_available():
         return
 
     props = torch.cuda.get_device_properties(0)
     if props.major != 12:
         return
 
-    raise RuntimeError(
-        f"Mixed-precision training (train.precision={precision}) is not supported on "
-        f"{props.name} (SM {props.major}{props.minor}). The cuBLAS shipped in this container has "
-        f"a defect in its SM 12.x batched-GEMM kernels that corrupts the CUDA context and crashes "
-        f"training with 'CUBLAS_STATUS_INTERNAL_ERROR' / 'illegal memory access'. "
-        f"Set 'train.precision: fp32' in your spec to train on this GPU "
-        f"(you may need to reduce dataset.batch_size to fit). ONNX export is unaffected."
-    )
+    if precision != '32-true':
+        raise RuntimeError(
+            f"Mixed-precision training (train.precision={precision}) is not supported on "
+            f"{props.name} (SM {props.major}{props.minor}). The cuBLAS shipped in this container "
+            f"has a defect in its SM 12.x batched-GEMM kernels that corrupts the CUDA context and "
+            f"crashes training with 'CUBLAS_STATUS_INTERNAL_ERROR' / 'illegal memory access'. "
+            f"Set 'train.precision: fp32' in your spec to train on this GPU "
+            f"(you may need to reduce dataset.batch_size to fit). ONNX export is unaffected."
+        )
+
+    # fp32 on its own is not sufficient: with TF32 matmul enabled (the default in this container)
+    # fp32 still dispatches to the faulting tensor-core kernel. Guarded so the log line is emitted
+    # once even though this runs both before and after the FSDP precision override.
+    if torch.backends.cuda.matmul.allow_tf32:
+        torch.backends.cuda.matmul.allow_tf32 = False
+        logging.info(
+            "Disabling TF32 matmul on %s (SM %d%d): the cuBLAS in this container has a defect in "
+            "its SM 12.x TF32 batched-GEMM kernel that crashes training. This costs some "
+            "throughput and is removed once a fixed cuBLAS ships.",
+            props.name, props.major, props.minor
+        )
 
 
 def run_experiment(experiment_config):
@@ -69,7 +93,7 @@ def run_experiment(experiment_config):
 
     # Resolved up front so an unsupported precision fails before the model and dataloaders are
     # built, rather than minutes later.
-    _assert_precision_supported_on_device(precision)
+    _configure_gemm_workarounds_for_device(precision)
 
     resume_ckpt, trainer_kwargs = initialize_train_experiment(experiment_config)
 
@@ -146,7 +170,7 @@ def run_experiment(experiment_config):
 
     # Checked after the FSDP branch above, which overrides precision to 16-mixed regardless of
     # what the user configured -- so the guard has to see the precision actually handed to the Trainer.
-    _assert_precision_supported_on_device(precision)
+    _configure_gemm_workarounds_for_device(precision)
 
     trainer = Trainer(**trainer_kwargs,
                       num_nodes=num_nodes,
