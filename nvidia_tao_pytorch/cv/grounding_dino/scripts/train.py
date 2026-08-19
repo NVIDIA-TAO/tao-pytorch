@@ -5,6 +5,8 @@
 
 import os
 
+import torch
+
 from pytorch_lightning import Trainer
 
 from nvidia_tao_pytorch.core.decorators.workflow import monitor_status
@@ -19,8 +21,56 @@ from nvidia_tao_pytorch.cv.grounding_dino.model.pl_gdino_model import GDINOPlMod
 from nvidia_tao_pytorch.cv.grounding_dino.model.utils import grounding_dino_parser, ptm_adapter
 
 
+def _assert_precision_supported_on_device(precision):
+    """Fail fast on mixed-precision training on SM 12.x (RTX PRO 6000 Blackwell and siblings).
+
+    cuBLASLt's ``nvjet_sm120_*_tmaAB_*`` TMA GEMM kernels make illegal memory accesses on
+    SM 12.x for the skinny-N half-precision strided-batched GEMMs this model issues
+    (text cross-attention and the vision-text fusion layer). The fault happens inside the
+    library, poisons the CUDA context, and surfaces as ``CUBLAS_STATUS_INTERNAL_ERROR``
+    followed by ``cudaErrorIllegalAddress`` -- typically several minutes into a run and with
+    a traceback that points at unrelated code, which is very hard to act on.
+
+    Both fp16 and bf16 are affected (bf16 fails ~35% of runs, fp16 more often); fp32 is clean.
+    The defect is below the framework, so there is no reliable model-side workaround -- two
+    distinct kernels in the family were observed via different call paths. Datacenter Blackwell
+    (SM 10.x) is unaffected and is not gated here.
+
+    Remove this guard once the container ships a cuBLAS with the fix.
+    """
+    if precision == '32-true' or not torch.cuda.is_available():
+        return
+
+    props = torch.cuda.get_device_properties(0)
+    if props.major != 12:
+        return
+
+    raise RuntimeError(
+        f"Mixed-precision training (train.precision={precision}) is not supported on "
+        f"{props.name} (SM {props.major}{props.minor}). The cuBLAS shipped in this container has "
+        f"a defect in its SM 12.x batched-GEMM kernels that corrupts the CUDA context and crashes "
+        f"training with 'CUBLAS_STATUS_INTERNAL_ERROR' / 'illegal memory access'. "
+        f"Set 'train.precision: fp32' in your spec to train on this GPU "
+        f"(you may need to reduce dataset.batch_size to fit). ONNX export is unaffected."
+    )
+
+
 def run_experiment(experiment_config):
     """Start the training."""
+    if experiment_config.train.precision.lower() == 'fp16':
+        precision = '16-mixed'
+    elif experiment_config.train.precision.lower() == 'bf16':
+        precision = 'bf16-mixed'
+    elif experiment_config.train.precision.lower() == 'fp32':
+        precision = '32-true'
+    else:
+        raise NotImplementedError(f"{experiment_config.train.precision} is not supported. \
+                                  Only bf16, fp16, and fp32 are supported")
+
+    # Resolved up front so an unsupported precision fails before the model and dataloaders are
+    # built, rather than minutes later.
+    _assert_precision_supported_on_device(precision)
+
     resume_ckpt, trainer_kwargs = initialize_train_experiment(experiment_config)
 
     dm = ODVGDataModule(experiment_config.dataset)
@@ -78,16 +128,6 @@ def run_experiment(experiment_config):
     is_dry_run = experiment_config.train.is_dry_run
     distributed_strategy = experiment_config.train.distributed_strategy
 
-    if experiment_config.train.precision.lower() == 'fp16':
-        precision = '16-mixed'
-    elif experiment_config.train.precision.lower() == 'bf16':
-        precision = 'bf16-mixed'
-    elif experiment_config.train.precision.lower() == 'fp32':
-        precision = '32-true'
-    else:
-        raise NotImplementedError(f"{experiment_config.train.precision} is not supported. \
-                                  Only bf16, fp16, and fp32 are supported")
-
     strategy = 'auto'
     if len(trainer_kwargs['devices']) > 1:
         # By default find_unused_parameters is set to False in Lightning
@@ -103,6 +143,10 @@ def run_experiment(experiment_config):
             precision = '16-mixed'
         else:
             raise NotImplementedError(f"{distributed_strategy} is not implemented. Only ddp and fsdp are supported")
+
+    # Checked after the FSDP branch above, which overrides precision to 16-mixed regardless of
+    # what the user configured -- so the guard has to see the precision actually handed to the Trainer.
+    _assert_precision_supported_on_device(precision)
 
     trainer = Trainer(**trainer_kwargs,
                       num_nodes=num_nodes,
