@@ -196,10 +196,10 @@ def _broadcast_pas_metrics(
     weighted_rows,
     device: torch.device,
 ) -> dict:
-    """Broadcast query-weighted PAS mAP/query counts from rank zero."""
+    """Broadcast query-weighted PAS metrics/query counts from rank zero."""
     collective_device = _collective_device(device)
     payload = torch.full(
-        (len(PAS_METADATA_QUERY_TYPES), 2),
+        (len(PAS_METADATA_QUERY_TYPES), 4),
         float("nan"),
         dtype=torch.float64,
         device=collective_device,
@@ -212,14 +212,18 @@ def _broadcast_pas_metrics(
             row = by_query_type.get(query_type)
             if row is not None:
                 payload[index, 0] = float(row["mAP"])
-                payload[index, 1] = float(row["num_queries"])
+                payload[index, 1] = float(row["Rank-1"])
+                payload[index, 2] = float(row["Rank-5"])
+                payload[index, 3] = float(row["num_queries"])
     if _distributed_ready():
         dist.broadcast(payload, src=0)
     payload = payload.cpu()
     return {
         query_type: {
             "mAP": float(payload[index, 0]),
-            "num_queries": int(payload[index, 1]),
+            "rank1": float(payload[index, 1]),
+            "rank5": float(payload[index, 2]),
+            "num_queries": int(payload[index, 3]),
         }
         for index, query_type in enumerate(PAS_METADATA_QUERY_TYPES)
         if not torch.isnan(payload[index, 0])
@@ -656,6 +660,13 @@ class CLIPPlModel(TAOLightningModule):
             "train/logit_scale", logit_scale.item(),
             on_step=True, on_epoch=False, prog_bar=False
         )
+        if outputs is not None and len(outputs) == 4:
+            logit_bias = outputs[3]
+            if logit_bias is not None:
+                self.log(
+                    "train/logit_bias", logit_bias.item(),
+                    on_step=True, on_epoch=False, prog_bar=False
+                )
         return loss_value
 
     def optimizer_step(self, *args, **kwargs):
@@ -887,21 +898,45 @@ class CLIPPlModel(TAOLightningModule):
         return _broadcast_pas_metrics(weighted_rows, self.device)
 
     def _log_pas_metrics(self, metrics: dict, prefix: str) -> None:
-        """Log query-weighted PAS mAP for easy, medium, and hard queries."""
+        """Log per-difficulty and overall query-weighted PAS metrics."""
+        metric_names = ("mAP", "rank1", "rank5")
+        overall_weighted_sums = dict.fromkeys(metric_names, 0.0)
+        overall_num_queries = 0
         for query_type in PAS_METADATA_QUERY_TYPES:
             query_metrics = metrics.get(query_type)
             if query_metrics is None:
                 continue
-            name = f"{prefix}/pas/{query_type}_mAP"
-            map_score = query_metrics["mAP"]
-            self.log(name, map_score, sync_dist=True)
-            self.status_logging_dict[name] = str(map_score)
-            logging.info(
-                "%s: %.6f (%s deduplicated queries)",
-                name,
-                map_score,
-                f"{query_metrics['num_queries']:,}",
-            )
+            num_queries = query_metrics["num_queries"]
+            for metric_name in metric_names:
+                name = f"{prefix}/pas/{query_type}_{metric_name}"
+                metric_value = query_metrics[metric_name]
+                self.log(name, metric_value, sync_dist=True)
+                self.status_logging_dict[name] = str(metric_value)
+                overall_weighted_sums[metric_name] += (
+                    metric_value * num_queries
+                )
+                logging.info(
+                    "%s: %.6f (%s deduplicated queries)",
+                    name,
+                    metric_value,
+                    f"{num_queries:,}",
+                )
+            overall_num_queries += num_queries
+
+        if overall_num_queries:
+            for metric_name in metric_names:
+                name = f"{prefix}/pas/overall_{metric_name}"
+                metric_value = overall_weighted_sums[
+                    metric_name
+                ] / overall_num_queries
+                self.log(name, metric_value, sync_dist=True)
+                self.status_logging_dict[name] = str(metric_value)
+                logging.info(
+                    "%s: %.6f (%s deduplicated queries)",
+                    name,
+                    metric_value,
+                    f"{overall_num_queries:,}",
+                )
 
     def _evaluate_and_log_paired_retrieval(
         self,

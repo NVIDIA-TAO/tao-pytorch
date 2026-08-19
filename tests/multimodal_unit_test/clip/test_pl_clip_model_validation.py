@@ -201,6 +201,8 @@ def _run_two_rank_pas_validation(rank, world_size, init_method):
         )
         assert set(metrics) == set(PAS_METADATA_QUERY_TYPES)
         assert all(value["mAP"] == 1.0 for value in metrics.values())
+        assert all(value["rank1"] == 1.0 for value in metrics.values())
+        assert all(value["rank5"] == 1.0 for value in metrics.values())
         assert all(value["num_queries"] == 2 for value in metrics.values())
     finally:
         dist.destroy_process_group()
@@ -295,14 +297,56 @@ class TestCLIPPASValidation:
 
         assert set(metrics) == set(PAS_METADATA_QUERY_TYPES)
         assert all(value["mAP"] == 1.0 for value in metrics.values())
+        assert all(value["rank1"] == 1.0 for value in metrics.values())
+        assert all(value["rank5"] == 1.0 for value in metrics.values())
         assert all(value["num_queries"] == 2 for value in metrics.values())
 
         model._log_pas_metrics(metrics, "val")
         assert [call[0][0] for call in model.logged] == [
             "val/pas/easy_mAP",
+            "val/pas/easy_rank1",
+            "val/pas/easy_rank5",
             "val/pas/medium_mAP",
+            "val/pas/medium_rank1",
+            "val/pas/medium_rank5",
             "val/pas/hard_mAP",
+            "val/pas/hard_rank1",
+            "val/pas/hard_rank5",
+            "val/pas/overall_mAP",
+            "val/pas/overall_rank1",
+            "val/pas/overall_rank5",
         ]
+
+    def test_pas_overall_metrics_are_weighted_by_query_count(self):
+        """Overall PAS metrics represent every deduplicated query equally."""
+        model = _validation_model(
+            metadata_match_eval=True,
+            evaluator=_CaptureEvaluator(),
+        )
+        metrics = {
+            "easy": {
+                "mAP": 0.25, "rank1": 0.25, "rank5": 0.5,
+                "num_queries": 4,
+            },
+            "medium": {
+                "mAP": 0.5, "rank1": 0.5, "rank5": 0.75,
+                "num_queries": 2,
+            },
+            "hard": {
+                "mAP": 1.0, "rank1": 1.0, "rank5": 1.0,
+                "num_queries": 1,
+            },
+        }
+
+        model._log_pas_metrics(metrics, "val")
+
+        logged = {call[0][0]: call[0][1] for call in model.logged}
+        assert logged["val/pas/overall_mAP"] == pytest.approx(3 / 7)
+        assert logged["val/pas/overall_rank1"] == pytest.approx(3 / 7)
+        assert logged["val/pas/overall_rank5"] == pytest.approx(4.5 / 7)
+        assert float(
+            model.status_logging_dict["val/pas/overall_mAP"]
+        ) == pytest.approx(3 / 7)
 
     def test_multiple_pas_pair_files_load_in_dataloader_order(
         self, tmp_path, monkeypatch
