@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Center Loss for traning."""
+"""Center Loss for training."""
 from __future__ import absolute_import
 
 import torch
@@ -62,6 +62,10 @@ class CenterLoss(nn.Module):
         assert x.size(0) == labels.size(0), "Features.size(0) is not equal to Labels.size(0)."
 
         batch_size = x.size(0)
+
+        # Cast to Centers' to avoid AMP autocast Half/Float mismatch
+        x = x.to(self.centers.dtype)
+
         distmat = torch.pow(x, 2).sum(dim=1, keepdim=True).expand(batch_size, self.num_classes) + \
             torch.pow(self.centers, 2).sum(dim=1, keepdim=True).expand(self.num_classes, batch_size).t()
         distmat.addmm_(x, self.centers.t(), beta=1, alpha=-2)
