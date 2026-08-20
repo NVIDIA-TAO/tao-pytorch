@@ -83,26 +83,40 @@ class ChangeNetPlModel(TAOLightningModule):
         self.model = build_model(experiment_config=self.experiment_spec, export=export)
 
     def _build_criterion(self):
-        """Internal function to build the loss function."""
-        assert self.difference_module in ["learnable", "euclidean"], "Only 'learnable' and 'euclidean' difference modules supported"
+        """Build the checkpoint-compatible criterion for the model architecture."""
+        if self.difference_module not in ["learnable", "euclidean"]:
+            raise ValueError(
+                "Only 'learnable' and 'euclidean' difference modules are supported"
+            )
         n_class = self.dataset_config.num_classes
-        assert self.loss_fn in ["ce", "contrastive"], "Only CE(Cross Entropy), Contrastive loss are supported"
         self.total_samples = 0
         self.correct_predictions = 0
-        if self.loss_fn == 'contrastive':
+        if self.difference_module == 'euclidean':
             self.margin = self.model_config.classify.train_margin_euclid
-            assert self.difference_module == 'euclidean', "Contrastive loss only supports Euclidean distance module"
             self.criterion = ContrastiveLoss(self.margin)
-        elif self.loss_fn == 'ce':
-            assert self.difference_module == 'learnable', "CE (Cross Entropy) loss only supports learnable distance module"
+        else:
             cls_weight = self.cls_weight
-            assert len(cls_weight) == n_class, f"""Class weights must be provided for each class
-            Provided weights for {len(cls_weight)} classes when total classes are {n_class}.
-            """
+            if len(cls_weight) != n_class:
+                raise ValueError(
+                    "Class weights must be provided for each class: "
+                    f"received {len(cls_weight)} weights for {n_class} classes"
+                )
             self.class_weights = torch.tensor(cls_weight)
             self.criterion = nn.CrossEntropyLoss(weight=self.class_weights)
-        else:
-            raise NotImplementedError(f"loss function {self.loss_fn} is not implemented")
+
+    def setup(self, stage):
+        """Validate the configured training loss only when training is requested."""
+        if stage != "fit":
+            return
+        expected_loss = {
+            "learnable": "ce",
+            "euclidean": "contrastive",
+        }[self.difference_module]
+        if self.loss_fn != expected_loss:
+            raise ValueError(
+                f"difference_module='{self.difference_module}' requires "
+                f"train.classify.loss='{expected_loss}', got '{self.loss_fn}'"
+            )
 
     def configure_optimizers(self):
         """Configure optimizers for training"""
