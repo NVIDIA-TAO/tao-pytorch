@@ -237,11 +237,13 @@ class AOIMetrics(Metric):
         Returns:
             dict: Dictionary containing the computed metrics.
         """
+        total = self.tot_pass + self.tot_fail
+        zero = torch.zeros_like(total, dtype=torch.float32)
         metric_collect = {}
-        metric_collect['total_accuracy'] = ((self.match_pass + self.match_fail) / (self.tot_pass + self.tot_fail)) * 100
-        metric_collect['defect_accuracy'] = torch.Tensor([0]) if self.tot_fail == 0 else (self.match_fail / self.tot_fail) * 100
-        metric_collect['false_alarm'] = (self.mismatch_pass / (self.tot_pass + self.tot_fail)) * 100
-        metric_collect['false_negative'] = (self.mismatch_fail / (self.tot_pass + self.tot_fail)) * 100
+        metric_collect['total_accuracy'] = zero if total == 0 else ((self.match_pass + self.match_fail) / total) * 100
+        metric_collect['defect_accuracy'] = zero if self.tot_fail == 0 else (self.match_fail / self.tot_fail) * 100
+        metric_collect['false_alarm'] = zero if self.tot_pass == 0 else (self.mismatch_pass / self.tot_pass) * 100
+        metric_collect['false_negative'] = zero if self.tot_fail == 0 else (self.mismatch_fail / self.tot_fail) * 100
 
         return metric_collect
 
