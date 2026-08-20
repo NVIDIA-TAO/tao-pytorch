@@ -106,6 +106,7 @@ class ChangeNetPlModel(TAOLightningModule):
 
     def setup(self, stage):
         """Validate the configured training loss only when training is requested."""
+        super().setup(stage)
         if stage != "fit":
             return
         expected_loss = {
