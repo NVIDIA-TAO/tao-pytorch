@@ -122,8 +122,11 @@ def inject_lora(model, peft_config):
                 )
             target_blocks = blocks if num_last_blocks == 0 else blocks[-num_last_blocks:]
             start_index = len(blocks) - len(target_blocks)
+            available_linear_leaves = set()
             for offset, block in enumerate(target_blocks):
                 for name, module in list(block.named_modules()):
+                    if isinstance(module, nn.Linear):
+                        available_linear_leaves.add(name.rsplit('.', 1)[-1])
                     if not _match_target(name, tower_config.target_modules):
                         continue
                     parent_path, _, attribute = name.rpartition('.')
@@ -141,8 +144,11 @@ def inject_lora(model, peft_config):
         )
         if mode == 'lora' and tower_trainable_params[tower_name] == 0:
             raise ValueError(
-                f"PEFT {tower_name} mode='lora' injected zero modules. "
-                "Check target_modules and num_last_blocks for this backbone."
+                f"PEFT {tower_name} mode='lora' injected zero modules (no LoRA adapters): "
+                f"target_modules {list(tower_config.target_modules)} matched no "
+                f"nn.Linear modules. Available leaves: "
+                f"{sorted(available_linear_leaves)}. Check target_modules and "
+                "num_last_blocks for this backbone."
             )
 
     if _config_value(peft_config, 'train_logit_calibration', True):
