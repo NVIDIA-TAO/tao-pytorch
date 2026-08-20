@@ -61,6 +61,18 @@ def test_cudnn_defaults_support_custom_attention():
 
 @pytest.mark.config
 @pytest.mark.ssl_unit
+def test_logging_interval_defaults_to_every_step():
+    """Short DINOv3 runs publish component losses without extra overrides."""
+    cfg = OmegaConf.structured(ExperimentConfig())
+    assert cfg.train.log_every_n_steps == 1
+
+    field = DINOv3TrainExpConfig.__dataclass_fields__["log_every_n_steps"]
+    assert field.metadata["valid_min"] == 1
+    assert field.metadata["popular"] == "no"
+
+
+@pytest.mark.config
+@pytest.mark.ssl_unit
 def test_backbone_patch16_rope_defaults():
     """DINOv3 backbone defaults: patch-16, 4 register tokens, ViT-B, RoPE theta present."""
     cfg = OmegaConf.structured(ExperimentConfig())

@@ -531,6 +531,14 @@ class DINOv3TrainExpConfig(NVDINOv2TrainExpConfig):
         display_name="distributed strategy",
         popular="yes"
     )
+    log_every_n_steps: int = INT_FIELD(
+        value=1,
+        default_value=1,
+        valid_min=1,
+        description="Number of training steps between logger updates.",
+        display_name="logging interval",
+        popular="no",
+    )
     cudnn: DINOv3CuDNNConfig = DATACLASS_FIELD(
         DINOv3CuDNNConfig(),
         description="CuDNN settings compatible with DINOv3 custom attention.",

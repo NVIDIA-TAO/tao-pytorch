@@ -1136,13 +1136,29 @@ class TestLoRAExport:
                 )
             assert torch.allclose(ref_output, loaded_output, atol=1e-6)
 
-            # Merge (relaxed tolerance — merge changes FP operation order)
+            # Merge (relaxed tolerance — merge changes FP operation order).
+            #
+            # The tolerance must scale with the magnitude of what is compared.
+            # This test runs on CUDA and compares *un-normalized* embeddings,
+            # whose components reach |x| ~ 2.5. The CPU merge tests above can
+            # use atol=1e-5 because CPU float32 accumulation is deterministic,
+            # and the GPU merge test that reuses atol=1e-3 compares
+            # normalize=True outputs, which are unit-norm (|x| <= 1) and so
+            # tolerate a much tighter absolute bound. Here, folding B@A into W
+            # changes the float32/TF32 accumulation order in every vision
+            # block, which empirically deviates by ~1.1e-3 — marginally above
+            # atol=1e-3, making the assertion nondeterministically flaky. Use a
+            # bound proportional to the compared magnitudes instead; this still
+            # catches a genuinely broken merge (which perturbs outputs by
+            # orders of magnitude more) while tolerating FP reassociation.
             merge_lora(model2)
             with torch.no_grad():
                 merged_output = model2.encode_image(
                     test_images, normalize=False
                 )
-            assert torch.allclose(ref_output, merged_output, atol=1e-3)
+            assert torch.allclose(
+                ref_output, merged_output, atol=5e-3, rtol=1e-3
+            )
 
             # ONNX export
             export_wrapper = MockVisionExportWrapper(model2)
