@@ -13,6 +13,7 @@ import pytest
 import torch
 
 from nvidia_tao_pytorch.ssl.dinov3.utils.checkpoint_remap import (
+    backbone_registry_name_for_arch,
     timm_to_tao,
     tao_to_timm,
     extract_backbone_state_dict,
@@ -22,6 +23,25 @@ from nvidia_tao_pytorch.ssl.dinov3.utils.checkpoint_remap import (
 
 EMBED = 8
 REG = 4
+
+
+@pytest.mark.ssl_unit
+def test_backbone_registry_names_cover_supported_arches():
+    """Each SSL arch resolves to its registered downstream constructor."""
+    from nvidia_tao_pytorch.cv.backbone_v2 import BACKBONE_REGISTRY
+
+    expected_names = {
+        "vit_s": "dinov3_vits16",
+        "vit_s_plus": "dinov3_vits16plus",
+        "vit_b": "dinov3_vitb16",
+        "vit_l": "dinov3_vitl16",
+        "vit_h_plus": "dinov3_vith16plus",
+        "vit_7b": "dinov3_vit7b16",
+    }
+    for arch, expected_name in expected_names.items():
+        registry_name = backbone_registry_name_for_arch(arch)
+        assert registry_name == expected_name
+        assert callable(BACKBONE_REGISTRY.get(registry_name))
 
 
 @pytest.mark.ssl_unit

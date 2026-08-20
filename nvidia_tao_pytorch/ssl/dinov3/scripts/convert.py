@@ -16,6 +16,7 @@ from nvidia_tao_pytorch.core.hydra.hydra_runner import hydra_runner
 from nvidia_tao_pytorch.core.tlt_logging import logging, obfuscate_logs
 from nvidia_tao_pytorch.config.dinov3.default_config import ExperimentConfig
 from nvidia_tao_pytorch.ssl.dinov3.utils.checkpoint_remap import (
+    backbone_registry_name_for_arch,
     convert_ssl_to_timm,
     timm_model_name_for_arch,
 )
@@ -40,6 +41,7 @@ def run_convert(experiment_config):
     backbone = experiment_config.model.backbone
     arch = backbone.student_type if source.startswith("student") else backbone.teacher_type
     timm_model_name = timm_model_name_for_arch(arch)
+    registry_name = backbone_registry_name_for_arch(arch)
 
     output_path = convert_config.output_path
     if not output_path:
@@ -63,7 +65,7 @@ def run_convert(experiment_config):
     )
     logging.info(
         f"Backbone written to {output_path}. Load it downstream via "
-        f"BACKBONE_REGISTRY.get('{arch}')(pretrained_backbone_path='{output_path}')."
+        f"BACKBONE_REGISTRY.get('{registry_name}')(pretrained_backbone_path='{output_path}')."
     )
 
 

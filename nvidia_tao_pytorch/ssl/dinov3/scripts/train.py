@@ -53,6 +53,7 @@ def run_experiment(experiment_config, key):
     validate_img_size(experiment_config.model.backbone)
 
     resume_ckpt, trainer_kwargs = initialize_train_experiment(experiment_config, key)
+    trainer_kwargs["log_every_n_steps"] = experiment_config.train.log_every_n_steps
 
     num_nodes = experiment_config.train.num_nodes
 

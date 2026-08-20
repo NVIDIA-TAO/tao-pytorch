@@ -49,6 +49,15 @@ _TIMM_MODEL_BY_ARCH = {
     "vit_7b": "vit_7b_patch16_dinov3",
 }
 
+_BACKBONE_REGISTRY_BY_ARCH = {
+    "vit_s": "dinov3_vits16",
+    "vit_s_plus": "dinov3_vits16plus",
+    "vit_b": "dinov3_vitb16",
+    "vit_l": "dinov3_vitl16",
+    "vit_h_plus": "dinov3_vith16plus",
+    "vit_7b": "dinov3_vit7b16",
+}
+
 
 def timm_model_name_for_arch(arch):
     """Return the timm DINOv3 model name for a TAO backbone arch (e.g. ``vit_b``).
@@ -64,6 +73,23 @@ def timm_model_name_for_arch(arch):
             f"No timm DINOv3 model name known for arch '{arch}'. Known: {list(_TIMM_MODEL_BY_ARCH)}"
         )
     return _TIMM_MODEL_BY_ARCH[arch]
+
+
+def backbone_registry_name_for_arch(arch):
+    """Return the downstream ``BACKBONE_REGISTRY`` name for a TAO backbone arch.
+
+    Args:
+        arch (str): TAO backbone type (for example, ``vit_b``).
+
+    Returns:
+        str: The registered ``cv/backbone_v2`` constructor name.
+    """
+    if arch not in _BACKBONE_REGISTRY_BY_ARCH:
+        raise ValueError(
+            f"No DINOv3 backbone registry name known for arch '{arch}'. "
+            f"Known: {list(_BACKBONE_REGISTRY_BY_ARCH)}"
+        )
+    return _BACKBONE_REGISTRY_BY_ARCH[arch]
 
 
 def timm_to_tao(key):
