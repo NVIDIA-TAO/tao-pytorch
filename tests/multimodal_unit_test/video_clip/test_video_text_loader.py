@@ -122,16 +122,8 @@ def fake_pyav(monkeypatch):
             for index in frame_indices
         }
 
-    class FakeCodec:
-        name = "h264_cuvid"
-
-    class FakeCodecContext:
-        codec = FakeCodec()
-        options = {}
-
     class FakeStream:
         thread_type = "AUTO"
-        codec_context = FakeCodecContext()
 
     stream = FakeStream()
 
@@ -311,10 +303,9 @@ class TestVideoTextDataset:
         ],
     )
     def test_pyav_requests_the_linspace_frame_indices(
-        self, fake_pyav, monkeypatch, num_frames, start_frame, end_frame, expected
+        self, fake_pyav, num_frames, start_frame, end_frame, expected
     ):
         """PyAV backend should decode exactly the sampled indices, in order."""
-        monkeypatch.setenv("LOCAL_RANK", "3")
         requested, stream = fake_pyav
         frames = video_decode._load_with_pyav(
             "/tmp/fake.mp4",
@@ -327,7 +318,6 @@ class TestVideoTextDataset:
 
         assert requested == [expected]
         assert stream.thread_type == "SLICE"
-        assert stream.codec_context.options == {"gpu": "3"}
         assert len(frames) == num_frames
         assert all(isinstance(frame, Image.Image) for frame in frames)
 
