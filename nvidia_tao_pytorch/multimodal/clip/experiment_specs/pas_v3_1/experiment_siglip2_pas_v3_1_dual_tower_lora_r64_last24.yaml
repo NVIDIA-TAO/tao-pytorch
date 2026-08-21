@@ -1,0 +1,206 @@
+# Best D1 dual-tower LoRA configuration (r=64, alpha=128, last 24 blocks).
+# Supply `results_dir=<run directory>` at launch time.
+model_name: clip
+encryption_key: null
+results_dir: null
+wandb:
+  enable: true
+  project: TAO Toolkit
+  entity: ''
+  group: ''
+  tags:
+  - training
+  - tao-toolkit
+  reinit: false
+  sync_tensorboard: false
+  save_code: false
+  name: TAO Toolkit training experiment
+  run_id: ''
+model:
+  type: siglip2-so400m-patch16-256
+  adaptor_name: null
+  freeze_vision_encoder: false
+  freeze_text_encoder: false
+  image_size: 256
+  init_logit_scale: null
+  init_logit_bias: null
+  canonicalize_text: false
+dataset:
+  train:
+    datasets:
+    - image_dir: /workspace/data/pas/NVIDIA_PAS_Filtered_06152026_V3.1_tao_ft_metadata_base_plus_val_test_medium_attr_matched_aug_val20_accessory_v2.1/images
+      image_list_file: /workspace/data/pas/NVIDIA_PAS_Filtered_06152026_V3.1_tao_ft_metadata_base_plus_val_test_medium_attr_matched_aug_val20_accessory_v2.1/train_list.txt
+      caption_dir: /workspace/data/pas/NVIDIA_PAS_Filtered_06152026_V3.1_tao_ft_metadata_base_plus_val_test_medium_attr_matched_aug_val20_accessory_v2.1/captions
+      caption_file_suffix: .txt
+      train_pairs_file: /workspace/data/pas/NVIDIA_PAS_Filtered_06152026_V3.1_tao_ft_metadata_base_plus_val_test_medium_attr_matched_aug_val20_accessory_v2.1/train_pairs.json
+      attribute_pairs_file: null
+    batch_size: 128
+    num_workers: 16
+    type: custom
+    wds:
+      root_dir: null
+      shard_list_file: null
+      samples_per_shard: 10000
+    balance_query_types: false
+    unique_caption_per_batch: false
+    include_attribute_metadata: true
+  val:
+    datasets:
+    - image_dir: /workspace/data/pas/NVIDIA_PAS_Filtered_06152026_V3.1_tao_ft_metadata_base_plus_val_test_medium_attr_matched_aug_val20_accessory_v2.1/images
+      image_list_file: /workspace/data/pas/NVIDIA_PAS_Filtered_06152026_V3.1_tao_ft_metadata_base_plus_val_test_medium_attr_matched_aug_val20_accessory_v2.1/val_list.txt
+      caption_dir: /workspace/data/pas/NVIDIA_PAS_Filtered_06152026_V3.1_tao_ft_metadata_base_plus_val_test_medium_attr_matched_aug_val20_accessory_v2.1/captions
+      caption_file_suffix: .txt
+      train_pairs_file: null
+      attribute_pairs_file: null
+    batch_size: 16
+    num_workers: 4
+    metadata_match_eval: true
+    metadata_match_mode: scalar_plus_accessories
+  augmentation:
+    scale:
+    - 0.4
+    - 1.0
+    color_jitter:
+    - 0.8
+    - 0.32
+    - 0.32
+    - 0.32
+    - 0.08
+    grayscale: 0.2
+  pin_memory: true
+  seed: 42
+train:
+  num_gpus: 8
+  gpu_ids:
+  - 0
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+  - 6
+  - 7
+  num_nodes: 1
+  seed: 1234
+  cudnn:
+    benchmark: false
+    deterministic: false
+  num_epochs: 20
+  checkpoint_interval: 1
+  checkpoint_interval_unit: epoch
+  validation_interval: 1
+  resume_training_checkpoint_path: null
+  results_dir: null
+  checkpointer:
+    enable_topk: false
+    replace_periodic: false
+    monitor: null
+    mode: null
+    save_top_k: 1
+    filename: model_best_{epoch:03d}
+    dirpath: null
+    auto_insert_metric_name: false
+  optim:
+    optimizer_type: adamw
+    vision_lr: 1.0e-05
+    text_lr: 1.0e-05
+    weight_decay: 0.0001
+    betas:
+    - 0.9
+    - 0.95
+    eps: 1.0e-06
+    warmup_steps: 0
+    scheduler: cosine
+  loss_type: siglip
+  siglip_loss_dist_impl: gather
+  siglip_loss_mask_mode: attribute_plus_accessory_match_ignore
+  triplet_loss_weight: 0.0
+  triplet_margin: 0.2
+  precision: fp16
+  grad_clip_norm: 1.0
+  grad_checkpointing: false
+  distributed_strategy: ddp
+  pretrained_model_path: null
+  val_check_interval: null
+evaluate:
+  datasets: []
+  batch_size: 128
+  num_workers: 8
+  checkpoint: null
+  num_gpus: 1
+  gpu_ids:
+  - 0
+  results_dir: null
+  trt_engine: null
+  text_file: null
+  pas_ground_truth_mode: scalar_plus_accessories
+inference:
+  datasets: []
+  batch_size: 32
+  num_workers: 8
+  checkpoint: null
+  num_gpus: 1
+  gpu_ids:
+  - 0
+  results_dir: null
+  trt_engine: null
+  text_file: null
+peft:
+  enabled: true
+  method: lora
+  train_logit_calibration: true
+  vision:
+    mode: lora
+    target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - out_proj
+    num_last_blocks: 24
+    rank: 64
+    alpha: 128
+    dropout: 0.05
+  text:
+    mode: lora
+    target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - out_proj
+    num_last_blocks: 24
+    rank: 64
+    alpha: 128
+    dropout: 0.05
+regularization:
+  enabled: false
+  embedding_mse_weight: 0.05
+  cosine_weight: 0.05
+  similarity_weight: 0.1
+export:
+  checkpoint: null
+  onnx_file: null
+  encoder_type: combined
+  opset_version: 17
+  batch_size: -1
+  input_height: 256
+  input_width: 256
+  gpu_id: 0
+  on_cpu: false
+  input_channel: 3
+  verbose: false
+  results_dir: null
+gen_trt_engine:
+  results_dir: null
+  gpu_id: 0
+  onnx_file: ???
+  trt_engine: ???
+  timing_cache: null
+  batch_size: -1
+  verbose: false
+  tensorrt:
+    workspace_size: 1024
+    min_batch_size: 1
+    opt_batch_size: 1
+    max_batch_size: 16
+    layers_precision: []
+    data_type: fp32
