@@ -125,8 +125,10 @@ def fake_pyav(monkeypatch):
     class FakeStream:
         thread_type = "AUTO"
 
+    stream = FakeStream()
+
     class FakeContainer:
-        streams = SimpleNamespace(video=[FakeStream()])
+        streams = SimpleNamespace(video=[stream])
 
         def __enter__(self):
             return self
@@ -142,7 +144,7 @@ def fake_pyav(monkeypatch):
     monkeypatch.setitem(
         sys.modules, "av", SimpleNamespace(open=lambda path: FakeContainer())
     )
-    return requested
+    return requested, stream
 
 
 @pytest.mark.multimodal_unit
@@ -304,6 +306,7 @@ class TestVideoTextDataset:
         self, fake_pyav, num_frames, start_frame, end_frame, expected
     ):
         """PyAV backend should decode exactly the sampled indices, in order."""
+        requested, stream = fake_pyav
         frames = video_decode._load_with_pyav(
             "/tmp/fake.mp4",
             num_frames=num_frames,
@@ -313,7 +316,8 @@ class TestVideoTextDataset:
             end_frame=end_frame,
         )
 
-        assert fake_pyav == [expected]
+        assert requested == [expected]
+        assert stream.thread_type == "SLICE"
         assert len(frames) == num_frames
         assert all(isinstance(frame, Image.Image) for frame in frames)
 
