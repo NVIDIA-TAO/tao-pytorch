@@ -333,12 +333,16 @@ class SegFormerPlModel(TAOLightningModule):
 
     def _collect_epoch_states(self):
         """Collect evaluation metrics for each epoch (train, val, test)"""
-        scores, mean_score_dict = self.running_metric.get_scores()
+        scores, mean_score_dict = self.running_metric.get_scores(
+            sync_dist=True, device=self.device
+        )
         self.epoch_acc = scores['mf1']
         # message = 'Scores per class'
-        self.log_dict(scores, on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
+        # Confusion-matrix counts were already globally reduced, so every rank
+        # now owns the same exact metrics and Lightning must not average them.
+        self.log_dict(scores, on_step=False, on_epoch=True, prog_bar=False, sync_dist=False)
         # message = 'Mean scores for all classes: '
-        self.log_dict(mean_score_dict, on_step=False, on_epoch=True, sync_dist=True)
+        self.log_dict(mean_score_dict, on_step=False, on_epoch=True, sync_dist=False)
         return scores, mean_score_dict
 
     def _prepare_batch(self, batch):
@@ -407,8 +411,8 @@ class SegFormerPlModel(TAOLightningModule):
         # FLUSHING VALIDATION EPOCH METRICS
         if not self.trainer.sanity_checking:
             scores, mean_scores = self._collect_epoch_states()  # logs all evaluation metrics
-            self.log("val_acc", scores['acc'], on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
-            self.log("val_miou", scores['miou'], on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+            self.log("val_acc", scores['acc'], on_step=False, on_epoch=True, prog_bar=True, sync_dist=False)
+            self.log("val_miou", scores['miou'], on_step=False, on_epoch=True, prog_bar=True, sync_dist=False)
         self._clear_cache()
 
         average_val_loss = self.trainer.logged_metrics["val_loss"].item()

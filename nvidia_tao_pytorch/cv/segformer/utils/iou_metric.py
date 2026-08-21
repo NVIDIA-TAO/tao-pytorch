@@ -6,6 +6,7 @@
 
 import numpy as np
 import torch
+import torch.distributed as dist
 
 
 class MeanIoUMeter:
@@ -150,8 +151,40 @@ class MeanIoUMeter:
             )
             self.update(area_intersect, area_union, area_pred_label, area_label)
 
-    def get_scores(self):
-        """get scores from confusion matrix"""
+    def get_scores(self, sync_dist: bool = False, device=None):
+        """Get scores from the confusion matrix.
+
+        When running distributed validation/test, reduce the additive
+        confusion-matrix totals before computing nonlinear metrics such as
+        mIoU. Averaging independently computed per-rank mIoUs is not
+        equivalent to computing mIoU over the complete dataset.
+
+        Args:
+            sync_dist (bool): All-reduce accumulated counts across ranks.
+            device: Device used for NCCL reductions. Ignored by CPU backends.
+        """
+        totals = (
+            self.area_intersect,
+            self.area_union,
+            self.area_pred_label,
+            self.area_label,
+        )
+        if sync_dist and dist.is_available() and dist.is_initialized():
+            backend = str(dist.get_backend()).lower()
+            if "nccl" in backend:
+                reduce_device = (
+                    torch.device(device)
+                    if device is not None
+                    else torch.device("cuda", torch.cuda.current_device())
+                )
+            else:
+                reduce_device = torch.device("cpu")
+            reduced = torch.as_tensor(
+                np.stack(totals), dtype=torch.float64, device=reduce_device
+            )
+            dist.all_reduce(reduced, op=dist.ReduceOp.SUM)
+            totals = tuple(reduced.cpu().numpy())
+
         return self.total_area_to_metrics(
-            self.area_intersect, self.area_union, self.area_pred_label, self.area_label, n_class=self.n_class
+            *totals, n_class=self.n_class
         )
