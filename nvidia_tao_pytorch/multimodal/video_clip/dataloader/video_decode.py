@@ -22,6 +22,7 @@ OpenCV, and logs which backend won.
 """
 
 import json
+import os
 
 import numpy as np
 from PIL import Image
@@ -196,6 +197,13 @@ def _load_with_pyav(video_path, num_frames, start_time_sec, end_time_sec,
 
     with av.open(str(video_path)) as container:
         stream = container.streams.video[0]
+        codec_context = stream.codec_context
+        if codec_context.codec.name == "h264_cuvid":
+            # torchrun exports LOCAL_RANK before DataLoader workers fork. Keep
+            # each rank's NVDEC work on its corresponding visible GPU instead
+            # of concentrating all 96 workers on device 0.
+            codec_context.options = dict(codec_context.options)
+            codec_context.options["gpu"] = os.environ.get("LOCAL_RANK", "0")
         # Frame threading can hang when sampled decoding exits before EOF;
         # keep decoding parallel within each frame instead.
         stream.thread_type = "SLICE"
