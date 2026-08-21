@@ -113,21 +113,30 @@ class CLIPModelConfig:
 class CLIPLoRATargetConfig:
     """Adaptation configuration for a single encoder tower (vision or text).
 
-    Controls which transformer blocks and attention modules receive
-    low-rank adapters. When enabled, only the LoRA parameters in the
-    selected blocks are trainable; all other backbone parameters are frozen.
+    Controls how a tower is adapted. ``mode: legacy`` preserves existing
+    enabled-only YAMLs by resolving ``enabled: true`` to ``lora`` and
+    ``enabled: false`` to ``frozen``.
     """
 
     mode: str = STR_FIELD(
-        value=MISSING,
-        default_value=MISSING,
-        valid_options="frozen,full,lora",
+        value="legacy",
+        default_value="legacy",
+        valid_options="legacy,frozen,full,lora",
         description=(
-            "Tower adaptation mode. 'frozen' leaves the tower fixed; 'full' "
-            "trains all tower parameters; 'lora' trains only injected LoRA "
-            "parameters. Required when PEFT is enabled."
+            "Tower adaptation mode. 'legacy' resolves from the deprecated "
+            "enabled field; 'frozen' leaves the tower fixed; 'full' trains "
+            "all tower parameters; 'lora' trains only injected LoRA parameters."
         ),
         display_name="Adaptation Mode",
+    )
+    enabled: Optional[bool] = BOOL_FIELD(
+        value=None,
+        default_value=None,
+        description=(
+            "Deprecated legacy switch. With mode='legacy', true selects LoRA "
+            "and false selects frozen. Omit it when using an explicit mode."
+        ),
+        display_name="Enabled (Legacy)",
     )
     target_modules: List[str] = LIST_FIELD(
         arrList=["q_proj", "k_proj", "v_proj", "out_proj"],

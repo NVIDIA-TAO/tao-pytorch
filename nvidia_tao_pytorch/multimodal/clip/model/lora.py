@@ -52,6 +52,7 @@ def _match_target(module_name, target_modules):
 
 
 VALID_TOWER_MODES = {'frozen', 'full', 'lora'}
+LEGACY_TOWER_MODE = 'legacy'
 
 
 def _config_value(config, name, default=None):
@@ -62,18 +63,24 @@ def _config_value(config, name, default=None):
 
 
 def resolve_tower_mode(tower_config, tower_name):
-    """Validate and return a tower's explicit adaptation mode."""
-    mode = _config_value(tower_config, 'mode')
-    if mode in (None, '???'):
-        raise ValueError(
-            f"PEFT {tower_name}.mode is required when peft.enabled=true. "
-            "Choose one of: frozen, full, lora."
-        )
+    """Resolve a tower mode, including enabled-only legacy configurations."""
+    mode = _config_value(tower_config, 'mode', LEGACY_TOWER_MODE)
+    enabled = _config_value(tower_config, 'enabled')
+    if mode in (None, '???', LEGACY_TOWER_MODE):
+        return 'lora' if enabled else 'frozen'
     if mode not in VALID_TOWER_MODES:
         raise ValueError(
             f"Invalid {tower_name} PEFT mode {mode!r}. Expected one of "
-            f"{sorted(VALID_TOWER_MODES)}."
+            f"{sorted(VALID_TOWER_MODES | {LEGACY_TOWER_MODE})}."
         )
+    if enabled is not None:
+        legacy_mode = 'lora' if enabled else 'frozen'
+        if mode != legacy_mode:
+            raise ValueError(
+                f"PEFT {tower_name}.mode={mode!r} conflicts with legacy "
+                f"{tower_name}.enabled={enabled!r}. Remove enabled or use "
+                f"mode={legacy_mode!r}."
+            )
     return mode
 
 

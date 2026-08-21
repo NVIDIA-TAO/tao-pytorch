@@ -84,6 +84,17 @@ def _tower(mode, targets=None):
     )
 
 
+def _legacy_tower(enabled):
+    return SimpleNamespace(
+        enabled=enabled,
+        target_modules=['q_proj', 'k_proj'],
+        num_last_blocks=1,
+        rank=2,
+        alpha=4,
+        dropout=0.0,
+    )
+
+
 def _hybrid_config(vision_mode, text_mode, calibration=False):
     return SimpleNamespace(
         enabled=True,
@@ -177,13 +188,34 @@ def test_per_tower_modes_enable_only_the_requested_parameters(
     assert not model.logit_scale.requires_grad
 
 
-def test_peft_requires_an_explicit_mode_for_each_tower():
-    """Dev-only PEFT configs cannot rely on the removed enabled switch."""
-    with pytest.raises(ValueError, match='vision.mode is required'):
-        inject_lora(_TinyCLIP(), SimpleNamespace(
-            enabled=True, train_logit_calibration=False,
-            vision=SimpleNamespace(), text=_tower('frozen'),
-        ))
+def test_legacy_enabled_only_tower_config_preserves_lora_behavior():
+    """Existing enabled-only YAMLs resolve to the equivalent tower modes."""
+    model = _TinyCLIP()
+    stats = inject_lora(model, SimpleNamespace(
+        enabled=True,
+        train_logit_calibration=False,
+        vision=_legacy_tower(True),
+        text=_legacy_tower(False),
+    ))
+
+    assert stats['requested_modes'] == {'vision': 'lora', 'text': 'frozen'}
+    assert any('lora_A' in name for name, _ in model.vision_named_parameters())
+    assert not any('lora_A' in name for name, _ in model.text_named_parameters())
+
+
+@pytest.mark.parametrize(
+    ('mode', 'enabled'),
+    [('lora', False), ('frozen', True), ('full', False), ('full', True)],
+)
+def test_explicit_mode_rejects_conflicting_legacy_enabled(mode, enabled):
+    """A supplied legacy switch cannot silently contradict an explicit mode."""
+    with pytest.raises(ValueError, match='conflicts with legacy'):
+        resolve_tower_mode(SimpleNamespace(mode=mode, enabled=enabled), 'vision')
+
+
+@pytest.mark.parametrize(('mode', 'enabled'), [('lora', True), ('frozen', False)])
+def test_explicit_mode_accepts_equivalent_legacy_enabled(mode, enabled):
+    assert resolve_tower_mode(SimpleNamespace(mode=mode, enabled=enabled), 'vision') == mode
 
 
 def test_lora_with_no_matching_projection_is_rejected():
