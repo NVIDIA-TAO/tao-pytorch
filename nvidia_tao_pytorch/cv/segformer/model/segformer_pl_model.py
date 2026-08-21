@@ -275,8 +275,7 @@ class SegFormerPlModel(TAOLightningModule):
 
                 # Save combined visualisation in a different folder.
                 vis_combined_dir = os.path.join(self.vis_dir, "combined_visualisation")
-                if not os.path.exists(vis_combined_dir):
-                    os.makedirs(vis_combined_dir)
+                os.makedirs(vis_combined_dir, exist_ok=True)
                 file_name = expand_path(os.path.join(
                     vis_combined_dir, self.batch['name'][i]))
                 plt.imsave(file_name, vis)
@@ -316,8 +315,7 @@ class SegFormerPlModel(TAOLightningModule):
                 vis = np.clip(vis, a_min=0.0, a_max=1.0)
                 # Save combined visualisation in a different folder.
                 vis_combined_dir = os.path.join(self.vis_dir, "combined_visualisation")
-                if not os.path.exists(vis_combined_dir):
-                    os.makedirs(vis_combined_dir)
+                os.makedirs(vis_combined_dir, exist_ok=True)
                 file_name = expand_path(os.path.join(
                     vis_combined_dir, self.batch['name'][i]))
                 plt.imsave(file_name, vis)
