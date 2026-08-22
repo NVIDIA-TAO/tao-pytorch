@@ -380,3 +380,55 @@ def c_radio_v3_vit_large_patch16_reg4_dinov2(
         return_idx=return_idx,
         **kwargs
     )
+
+
+def c_radio_v4_vit_huge_patch16_224(
+    return_idx=[0, 1, 2, 3], resolution=(1024, 1024), use_summary_token=True, **kwargs
+):
+    """C-RADIOv4 ViT-Huge backbone with a SegFormer ViT-Adapter pyramid."""
+    return RADIOAdapter(
+        resolution=resolution,
+        backbone="vit_huge_patch16_224",
+        summary_idxs=[0, 1],
+        window_size=None,
+        num_teacher=3,
+        cpe_max_size=2048,
+        register_multiple=10,
+        drop_path_rate=0,
+        conv_inplane=56,
+        n_points=4,
+        deform_num_heads=16,
+        init_values=1e-5,
+        interaction_indexes=[[0, 7], [8, 15], [16, 23], [24, 31]],
+        cffn_ratio=0.25,
+        deform_ratio=0.5,
+        add_summary=use_summary_token,
+        return_idx=return_idx,
+        **kwargs
+    )
+
+
+def c_radio_v4_vit_so400m_patch16_224(
+    return_idx=[0, 1, 2, 3], resolution=(1024, 1024), use_summary_token=True, **kwargs
+):
+    """C-RADIOv4 SO400M backbone with a SegFormer ViT-Adapter pyramid."""
+    return RADIOAdapter(
+        resolution=resolution,
+        backbone="vit_so400m_patch16_224",
+        summary_idxs=[0, 1],
+        window_size=None,
+        num_teacher=3,
+        cpe_max_size=2048,
+        register_multiple=10,
+        drop_path_rate=0,
+        conv_inplane=56,
+        n_points=4,
+        deform_num_heads=16,
+        init_values=1e-5,
+        interaction_indexes=[[0, 6], [7, 13], [14, 20], [21, 26]],
+        cffn_ratio=0.25,
+        deform_ratio=0.5,
+        add_summary=use_summary_token,
+        return_idx=return_idx,
+        **kwargs
+    )

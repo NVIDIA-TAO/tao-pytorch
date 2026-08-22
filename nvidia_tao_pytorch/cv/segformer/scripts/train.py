@@ -32,7 +32,7 @@ def run_experiment(experiment_config, key):
     # Load pretrained model as starting point if pretrained path is provided
     pretrained_path = experiment_config.train.pretrained_model_path
 
-    precision = '32-true'
+    precision = experiment_config.train.precision
 
     assert enable_tensorboard is False, "Currently tensorboard visualization is not supported for Segmentation"
 

@@ -1096,7 +1096,7 @@ class FAN(BackboneBase):
             if torch.onnx.is_in_onnx_export() or not self.activation_checkpoint:
                 x = blk(x)
             else:
-                x = checkpoint.checkpoint(blk, x, use_reentrant=True)
+                x = checkpoint.checkpoint(blk, x, use_reentrant=False)
             H, W = blk.H, blk.W
 
         cls_tokens = self.cls_token.expand(B, -1, -1)
@@ -1128,7 +1128,7 @@ class FAN(BackboneBase):
             if torch.onnx.is_in_onnx_export() or not self.activation_checkpoint:
                 x = blk(x)
             else:
-                x = checkpoint.checkpoint(blk, x, use_reentrant=True)
+                x = checkpoint.checkpoint(blk, x, use_reentrant=False)
             H, W = blk.H, blk.W
             # [B, L, C] -> [B, C, H, W]
             x_spatial = x.permute(0, 2, 1).view(B, -1, H, W)

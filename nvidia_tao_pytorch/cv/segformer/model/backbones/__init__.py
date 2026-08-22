@@ -29,11 +29,14 @@ from nvidia_tao_pytorch.cv.segformer.model.backbones.open_clip import (
     vit_base_nvclip_16_siglip,
     vit_huge_nvclip_14_siglip,
 )
+from nvidia_tao_pytorch.cv.segformer.model.backbones.vit5 import vit5_large_patch16_224
 from nvidia_tao_pytorch.cv.segformer.model.backbones.radio import (
     c_radio_v2_vit_base_patch16_224,
     c_radio_v2_vit_huge_patch16_224,
     c_radio_v2_vit_large_patch16_224,
     c_radio_v3_vit_large_patch16_reg4_dinov2,
+    c_radio_v4_vit_huge_patch16_224,
+    c_radio_v4_vit_so400m_patch16_224,
 )
 
 
@@ -47,6 +50,7 @@ vit_adapter_model_dict = {
     "vit_huge_plus_dinov3": vit_huge_plus_dinov3,
     "vit_base_nvclip_16_siglip": vit_base_nvclip_16_siglip,
     "vit_huge_nvclip_14_siglip": vit_huge_nvclip_14_siglip,
+    "vit5_large_patch16_224": vit5_large_patch16_224,
 }
 
 cradio_vit_adapter_model_dict = {
@@ -54,6 +58,8 @@ cradio_vit_adapter_model_dict = {
     "c_radio_v2_vit_large_patch16_224": c_radio_v2_vit_large_patch16_224,
     "c_radio_v2_vit_base_patch16_224": c_radio_v2_vit_base_patch16_224,
     "c_radio_v3_vit_large_patch16_reg4_dinov2": c_radio_v3_vit_large_patch16_reg4_dinov2,
+    "c_radio_v4_vit_huge_patch16_224": c_radio_v4_vit_huge_patch16_224,
+    "c_radio_v4_vit_so400m_patch16_224": c_radio_v4_vit_so400m_patch16_224,
 }
 
 fan_model_dict = {

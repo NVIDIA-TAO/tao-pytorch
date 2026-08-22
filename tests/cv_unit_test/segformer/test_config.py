@@ -182,6 +182,14 @@ def _test_train_spec():
     train_config = SFTrainExpConfig()
     yield train_config
 
+
+def test_train_precision_defaults_to_fp32_and_accepts_bf16():
+    """SegFormer exposes the Lightning precision used by memory-heavy backbones."""
+    train_config = OmegaConf.structured(SFTrainExpConfig())
+    assert train_config.precision == "32-true"
+    train_config.precision = "bf16-mixed"
+    assert train_config.precision == "bf16-mixed"
+
 @pytest.fixture
 def _test_experiment_spec():
     experiment_config = ExperimentConfig()

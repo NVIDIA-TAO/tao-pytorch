@@ -262,7 +262,7 @@ class Extractor(nn.Module):
             return query
 
         if self.with_cp and query.requires_grad and not torch.onnx.is_in_onnx_export():
-            query = checkpoint.checkpoint(_inner_forward, query, feat, use_reentrant=True)
+            query = checkpoint.checkpoint(_inner_forward, query, feat, use_reentrant=False)
         else:
             query = _inner_forward(query, feat)
 
@@ -340,7 +340,7 @@ class Injector(nn.Module):
             return query + self.ls(attn)
 
         if self.with_cp and query.requires_grad and not torch.onnx.is_in_onnx_export():
-            query = checkpoint.checkpoint(_inner_forward, query, feat, use_reentrant=True)
+            query = checkpoint.checkpoint(_inner_forward, query, feat, use_reentrant=False)
         else:
             query = _inner_forward(query, feat)
 

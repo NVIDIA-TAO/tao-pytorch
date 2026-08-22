@@ -55,7 +55,7 @@ class SFOptimConfig:
     policy: str = STR_FIELD(
         value="linear",
         default_value="linear",
-        valid_options="linear,step",
+        valid_options="linear,cosine,step",
         description="Optimizer policy"
     )
     momentum: float = FLOAT_FIELD(
@@ -133,8 +133,15 @@ class BackboneConfig:
             "vit_base_dinov3",
             "vit_large_dinov3",
             "vit_huge_plus_dinov3",
+            "vit5_large_patch16_224",
             "vit_base_nvclip_16_siglip",
-            "vit_huge_nvclip_14_siglip"
+            "vit_huge_nvclip_14_siglip",
+            "c_radio_v2_vit_base_patch16_224",
+            "c_radio_v2_vit_large_patch16_224",
+            "c_radio_v2_vit_huge_patch16_224",
+            "c_radio_v3_vit_large_patch16_reg4_dinov2",
+            "c_radio_v4_vit_huge_patch16_224",
+            "c_radio_v4_vit_so400m_patch16_224"
         ]),
     )
     feat_downsample: bool = BOOL_FIELD(
@@ -160,6 +167,12 @@ class BackboneConfig:
 class SFModelConfig:
     """SF Model config."""
 
+    activation_checkpoint: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        display_name="Activation checkpointing",
+        description="Trade compute for lower backbone activation memory during training",
+    )
     backbone: BackboneConfig = DATACLASS_FIELD(BackboneConfig())
     decode_head: SegFormerHeadConfig = DATACLASS_FIELD(SegFormerHeadConfig())
 
@@ -444,8 +457,15 @@ class SFTrainSegmentConfig:
     loss: str = STR_FIELD(
         value="ce",
         default_value="ce",
-        valid_options="ce",
-        description="ChangeNet Segment loss"
+        valid_options="ce,mmiou,ce_mmiou,ce_lovasz,ce_boundary",
+        description="SegFormer segmentation loss"
+    )
+    iou_weight: float = FLOAT_FIELD(
+        value=0.5,
+        default_value=0.5,
+        valid_min=0.0,
+        valid_max=1.0,
+        description="Auxiliary overlap or boundary contribution for composite losses",
     )
     weights: List[float] = LIST_FIELD(
         arrList=[0.5, 0.5, 0.5, 0.8, 1.0],
@@ -459,6 +479,13 @@ class SFTrainExpConfig(TrainConfig):
     """Train Config."""
 
     optim: SFOptimConfig = DATACLASS_FIELD(SFOptimConfig())
+    precision: str = STR_FIELD(
+        value="32-true",
+        default_value="32-true",
+        description="PyTorch Lightning numerical precision used for training.",
+        display_name="Precision",
+        valid_options="32-true,bf16-mixed,16-mixed",
+    )
     pretrained_model_path: Optional[str] = STR_FIELD(
         value=None,
         default_value="",

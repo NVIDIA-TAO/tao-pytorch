@@ -275,3 +275,69 @@ class mmIoULoss(nn.Module):
         # loss
         loss = -min_iou - torch.mean(iou)
         return loss
+
+
+def _lovasz_gradient(sorted_foreground):
+    """Gradient of the Lovasz extension for a sorted binary foreground mask."""
+    pixel_count = sorted_foreground.numel()
+    foreground_count = sorted_foreground.sum()
+    intersection = foreground_count - sorted_foreground.float().cumsum(0)
+    union = foreground_count + (1.0 - sorted_foreground).float().cumsum(0)
+    gradient = 1.0 - intersection / union.clamp_min(1e-8)
+    if pixel_count > 1:
+        gradient[1:pixel_count] = gradient[1:pixel_count] - gradient[:-1]
+    return gradient
+
+
+class LovaszSoftmaxLoss(nn.Module):
+    """Multiclass Lovasz-Softmax surrogate for mean intersection-over-union."""
+
+    def __init__(self, n_classes=2):
+        super().__init__()
+        self.classes = n_classes
+
+    def forward(self, inputs, target):
+        if target.dim() == 4:
+            target = target.squeeze(1)
+        if inputs.shape[-2:] != target.shape[-2:]:
+            inputs = F.interpolate(inputs, size=target.shape[-2:], mode="bilinear", align_corners=False)
+        probabilities = F.softmax(inputs, dim=1).permute(0, 2, 3, 1).reshape(-1, self.classes)
+        labels = target.reshape(-1)
+        losses = []
+        for class_id in range(self.classes):
+            foreground = (labels == class_id).to(probabilities.dtype)
+            if foreground.sum() == 0:
+                continue
+            errors = (foreground - probabilities[:, class_id]).abs()
+            errors_sorted, permutation = torch.sort(errors, descending=True)
+            foreground_sorted = foreground[permutation]
+            losses.append(torch.dot(errors_sorted, _lovasz_gradient(foreground_sorted)))
+        if not losses:
+            return inputs.sum() * 0.0
+        return torch.stack(losses).mean()
+
+
+class BoundaryFScoreLoss(nn.Module):
+    """Differentiable multiclass boundary F-score loss using a 3x3 boundary band."""
+
+    def __init__(self, n_classes=2):
+        super().__init__()
+        self.classes = n_classes
+
+    @staticmethod
+    def _boundary(values):
+        return F.max_pool2d(1.0 - values, kernel_size=3, stride=1, padding=1) - (1.0 - values)
+
+    def forward(self, inputs, target):
+        if target.dim() == 4:
+            target = target.squeeze(1)
+        if inputs.shape[-2:] != target.shape[-2:]:
+            inputs = F.interpolate(inputs, size=target.shape[-2:], mode="bilinear", align_corners=False)
+        probabilities = F.softmax(inputs, dim=1)
+        one_hot = F.one_hot(target.long(), num_classes=self.classes).permute(0, 3, 1, 2).to(probabilities.dtype)
+        predicted_boundary = self._boundary(probabilities).flatten(2)
+        target_boundary = self._boundary(one_hot).flatten(2)
+        precision = (predicted_boundary * target_boundary).sum(2) / predicted_boundary.sum(2).clamp_min(1e-8)
+        recall = (predicted_boundary * target_boundary).sum(2) / target_boundary.sum(2).clamp_min(1e-8)
+        fscore = 2.0 * precision * recall / (precision + recall).clamp_min(1e-8)
+        return 1.0 - fscore.mean()

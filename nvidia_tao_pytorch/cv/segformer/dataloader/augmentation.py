@@ -158,20 +158,19 @@ class CDDataAugmentation:
             imgs = [img.filter(ImageFilter.GaussianBlur(radius=radius))
                     for img in imgs]
 
-        if self.random_color is not None and self.random_color.enable:
+        if (
+            self.random_color is not None
+            and self.random_color.enable
+            and random.random() < self.random_color.color_probability
+        ):
             color_jitter = transforms.ColorJitter(brightness=self.random_color.brightness,
                                                   contrast=self.random_color.contrast,
                                                   saturation=self.random_color.saturation,
                                                   hue=self.random_color.hue)
-            imgs_tf = []
-            for img in imgs:
-                tf = transforms.ColorJitter(
-                    color_jitter.brightness,
-                    color_jitter.contrast,
-                    color_jitter.saturation,
-                    color_jitter.hue)
-                imgs_tf.append(tf(img))
-            imgs = imgs_tf
+            # Reconstructing ColorJitter from its normalized attributes is
+            # invalid when a component is disabled: torchvision represents a
+            # zero component as ``None``, which its constructor does not accept.
+            imgs = [color_jitter(img) for img in imgs]
 
         if to_tensor:
             # to tensor

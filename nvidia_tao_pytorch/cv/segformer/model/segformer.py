@@ -162,6 +162,7 @@ def build_model(experiment_config,
     freeze_backbone = model_config.backbone['freeze_backbone']
     feat_downsample = model_config.backbone.feat_downsample
     pretrained_backbone_path = model_config.backbone.pretrained_backbone_path
+    activation_checkpoint = model_config.activation_checkpoint
 
     # We need these because the multiple select feature from these backbone has fixed feature dimensions
     channels_map = {
@@ -182,12 +183,15 @@ def build_model(experiment_config,
         "vit_base_dinov3": [768, 768, 768, 768],
         "vit_large_dinov3": [1024, 1024, 1024, 1024],
         "vit_huge_plus_dinov3": [1280, 1280, 1280, 1280],
+        "vit5_large_patch16_224": [1024, 1024, 1024, 1024],
         "vit_base_nvclip_16_siglip": [768, 768, 768, 768],
         "vit_huge_nvclip_14_siglip": [1280, 1280, 1280, 1280],
         "c_radio_v2_vit_base_patch16_224": [768, 768, 768, 768],
         "c_radio_v2_vit_large_patch16_224": [1024, 1024, 1024, 1024],
         "c_radio_v2_vit_huge_patch16_224": [1280, 1280, 1280, 1280],
         "c_radio_v3_vit_large_patch16_reg4_dinov2": [1024, 1024, 1024, 1024],
+        "c_radio_v4_vit_huge_patch16_224": [1280, 1280, 1280, 1280],
+        "c_radio_v4_vit_so400m_patch16_224": [1152, 1152, 1152, 1152],
     }
 
     if backbone in channels_map:
@@ -215,6 +219,7 @@ def build_model(experiment_config,
         in_index=in_index,
         feat_downsample=feat_downsample,
         pretrained_backbone_path=pretrained_backbone_path,
+        activation_checkpoint=activation_checkpoint,
         freeze_backbone=freeze_backbone
     )
 
