@@ -98,6 +98,30 @@ def _enable_lora_parameters(module):
     module.lora_B.requires_grad = True
 
 
+def _preflight_lora_towers(model, towers, resolved_modes):
+    """Reject unsupported LoRA architectures before changing model state."""
+    for tower_name, tower_config in towers:
+        if resolved_modes[tower_name] != 'lora':
+            continue
+        blocks = list(model.get_encoder_blocks(tower_name))
+        num_last_blocks = tower_config.num_last_blocks
+        if not 0 <= num_last_blocks <= len(blocks):
+            raise ValueError(
+                f"PEFT {tower_name}.num_last_blocks must be between 0 "
+                f"(all blocks) and {len(blocks)}, got {num_last_blocks}."
+            )
+        target_blocks = blocks if num_last_blocks == 0 else blocks[-num_last_blocks:]
+        if any(
+            isinstance(module, nn.MultiheadAttention)
+            for block in target_blocks for module in block.modules()
+        ):
+            raise NotImplementedError(
+                f"PEFT {tower_name} mode='lora' is not supported for "
+                "nn.MultiheadAttention-based towers (OpenCLIP). Use "
+                "mode='full' or mode='frozen'."
+            )
+
+
 def inject_lora(model, peft_config):
     """Apply explicit per-tower PEFT modes and inject LoRA where requested."""
     if not _config_value(peft_config, 'enabled', False):
@@ -107,6 +131,7 @@ def inject_lora(model, peft_config):
         ('text', _config_value(peft_config, 'text')),
     )
     resolved_modes = {name: resolve_tower_mode(config, name) for name, config in towers}
+    _preflight_lora_towers(model, towers, resolved_modes)
     for parameter in model.parameters():
         parameter.requires_grad = False
 
@@ -122,11 +147,6 @@ def inject_lora(model, peft_config):
         else:
             blocks = list(model.get_encoder_blocks(tower_name))
             num_last_blocks = tower_config.num_last_blocks
-            if not 0 <= num_last_blocks <= len(blocks):
-                raise ValueError(
-                    f"PEFT {tower_name}.num_last_blocks must be between 0 "
-                    f"(all blocks) and {len(blocks)}, got {num_last_blocks}."
-                )
             target_blocks = blocks if num_last_blocks == 0 else blocks[-num_last_blocks:]
             start_index = len(blocks) - len(target_blocks)
             available_linear_leaves = set()

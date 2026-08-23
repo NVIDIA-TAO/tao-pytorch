@@ -228,6 +228,43 @@ def test_lora_with_no_matching_projection_is_rejected():
         ))
 
 
+def test_lora_rejects_openclip_mha_without_mutating_the_model():
+    """OpenCLIP MHA cannot be safely replaced by the Linear-only LoRA wrapper."""
+    from open_clip.transformer import ResidualAttentionBlock
+
+    class _TinyOpenCLIP(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.vision_blocks = nn.ModuleList([ResidualAttentionBlock(8, 2)])
+            self.text_blocks = nn.ModuleList([ResidualAttentionBlock(8, 2)])
+            self.logit_scale = nn.Parameter(torch.tensor(1.0))
+
+        def get_encoder_blocks(self, tower):
+            return self.vision_blocks if tower == 'vision' else self.text_blocks
+
+        def vision_named_parameters(self):
+            yield from self.vision_blocks.named_parameters()
+
+        def text_named_parameters(self):
+            yield from self.text_blocks.named_parameters()
+
+        def named_logit_parameters(self):
+            yield 'logit_scale', self.logit_scale
+
+    model = _TinyOpenCLIP()
+    requires_grad = {
+        name: parameter.requires_grad for name, parameter in model.named_parameters()
+    }
+    with pytest.raises(NotImplementedError, match="mode='full' or mode='frozen'"):
+        inject_lora(model, _hybrid_config('lora', 'frozen', calibration=False))
+
+    assert isinstance(model.vision_blocks[0].attn, nn.MultiheadAttention)
+    assert isinstance(model.vision_blocks[0].attn.out_proj, nn.Linear)
+    assert {
+        name: parameter.requires_grad for name, parameter in model.named_parameters()
+    } == requires_grad
+
+
 @pytest.mark.parametrize('num_last_blocks', [-1, 3])
 def test_lora_rejects_block_counts_outside_the_tower_depth(num_last_blocks):
     """LoRA depth must be zero/all or within the encoder block count."""

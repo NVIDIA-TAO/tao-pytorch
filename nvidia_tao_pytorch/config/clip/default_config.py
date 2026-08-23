@@ -141,10 +141,11 @@ class CLIPLoRATargetConfig:
     target_modules: List[str] = LIST_FIELD(
         arrList=["q_proj", "k_proj", "v_proj", "out_proj"],
         default_value=["q_proj", "k_proj", "v_proj", "out_proj"],
-        description="Module name substrings to target for LoRA injection. "
+        description="Module leaf names to target for LoRA injection. "
                     "SigLIP2: 'q_proj', 'k_proj', 'v_proj', 'out_proj'. "
-                    "RADIO/OpenCLIP: 'qkv', 'proj' (fused attention). "
-                    "Matching is by substring on the module name within each block.",
+                    "RADIO: 'qkv', 'proj' (fused attention). OpenCLIP uses "
+                    "nn.MultiheadAttention and does not support LoRA mode yet; "
+                    "use mode 'full' or 'frozen'.",
         display_name="Target Modules",
     )
     num_last_blocks: int = INT_FIELD(
