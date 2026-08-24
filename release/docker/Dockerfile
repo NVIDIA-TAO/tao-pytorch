@@ -80,6 +80,17 @@ RUN cd /opt/nvidia/wheels && ls ./*.whl | xargs -I'{}' python -m pip install '{}
       find / -type f -name "gitlab-ci.yml" -exec rm -f {} + 2>/dev/null; \
       true; }
 
+# NGC Security scan related fixes (Python packages).
+# Force-upgrade AFTER the tao-core wheel install so tao-core / base-image pins that
+# reinstall vulnerable versions are overridden in the final release image.
+# - urllib3 2.6.3 -> 2.7.0 (CVE-2026-44431, CVE-2026-44432 — High; no prior pin)
+# - pydicom 3.0.1 -> 3.0.2 (GHSA-v856-2rf8-9f28 — High; requirements-pip pin is
+#   reinstalled to 3.0.1 by tao-core, so re-assert it here). pydicom is not directly
+#   imported by tao sources but is present in the image and flagged by the scanner.
+RUN PIP_CONSTRAINT="" python -m pip install --no-cache-dir --upgrade \
+        "urllib3>=2.7.0" \
+        "pydicom>=3.0.2"
+
 CMD if [ "$RUN_CLI" = "1" ]; then \
         /bin/bash; \
     else \
