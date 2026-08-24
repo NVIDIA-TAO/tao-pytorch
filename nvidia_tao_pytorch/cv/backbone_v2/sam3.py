@@ -7,13 +7,14 @@ from typing import Optional, Tuple, Union, Any
 import torch
 from torch import nn
 
+from nvidia_tao_pytorch.core.tlt_logging import logger
 from nvidia_tao_pytorch.cv.backbone_v2 import BACKBONE_REGISTRY
 from nvidia_tao_pytorch.cv.backbone_v2.backbone_base import BackboneBase
 
 try:
     from sam3.model_builder import build_sam3_image_model
-except Exception as e:
-    print(f'Failed to import SAM3. Error: {e}')
+except Exception as exc:
+    logger.debug("SAM3 is unavailable: %s", exc)
     build_sam3_image_model = None
 norm_t = Union[Tuple[float, float, float], torch.Tensor]
 
