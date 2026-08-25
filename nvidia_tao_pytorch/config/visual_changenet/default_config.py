@@ -166,7 +166,7 @@ class CNModelClassifyConfig:
         default_value=2.0,
         valid_min=0,
         valid_max="inf",
-        description="Evaluation threshold score for contrastive loss",
+        description="Score threshold separating PASS from FAIL in evaluation and in-training validation metrics. Euclidean distance for difference_module=euclidean; softmax probability in (0, 1) for difference_module=learnable.",
         automl_enabled="TRUE"
     )
     embedding_vectors: int = INT_FIELD(
