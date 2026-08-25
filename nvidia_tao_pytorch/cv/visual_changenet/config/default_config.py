@@ -58,7 +58,7 @@ class CNModelClassifyConfig:
     """CN Model Classification config."""
 
     train_margin_euclid: float = FLOAT_FIELD(value=2.0, default_value=2.0, valid_min=1, valid_max="inf", description="Contrastive loss training margin", automl_enabled="TRUE")
-    eval_margin: float = FLOAT_FIELD(value=2.0, default_value=2.0, valid_min=0, valid_max="inf", description="Evaluation threshold score for contrastive loss", automl_enabled="TRUE")
+    eval_margin: float = FLOAT_FIELD(value=2.0, default_value=2.0, valid_min=0, valid_max="inf", description="Score threshold separating PASS from FAIL in evaluation and in-training validation metrics. Euclidean distance for difference_module=euclidean; softmax probability in (0, 1) for difference_module=learnable.", automl_enabled="TRUE")
     embedding_vectors: int = INT_FIELD(value=5, default_value=5, valid_min=1, valid_max="inf", description="Number of embedding vectors - architecture 1", automl_enabled="TRUE")
     embed_dec: int = INT_FIELD(value=5, default_value=5, valid_min=1, valid_max="inf", description="Number of embedding vectors - architecture 2", automl_enabled="TRUE")
     learnable_difference_modules: int = INT_FIELD(value=4, default_value=4, valid_min=1, valid_max=4, description="Number of learnable difference modules", automl_enabled="TRUE")

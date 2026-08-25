@@ -19,6 +19,7 @@
 
 import logging
 import os
+import warnings
 import pytorch_lightning as pl
 import torch
 from torch.optim import lr_scheduler
@@ -72,8 +73,9 @@ class ChangeNetPlModel(TAOLightningModule):
         self._build_criterion()
 
         self.tensorboard = experiment_spec.train.tensorboard
-        self.train_metrics = AOIMetrics()
-        self.val_metrics = AOIMetrics()
+        metric_margin = self._resolve_metric_margin()
+        self.train_metrics = AOIMetrics(metric_margin)
+        self.val_metrics = AOIMetrics(metric_margin)
         self.dm = dm
 
         self.checkpoint_filename = 'changenet_model_classify'
@@ -103,6 +105,26 @@ class ChangeNetPlModel(TAOLightningModule):
                 )
             self.class_weights = torch.tensor(cls_weight)
             self.criterion = nn.CrossEntropyLoss(weight=self.class_weights)
+
+    def _resolve_metric_margin(self):
+        """Resolve the score threshold for in-training train/val AOIMetrics.
+
+        Uses model.classify.eval_margin so in-training validation matches the
+        standalone evaluate action. The learnable difference module emits softmax
+        probabilities in [0, 1]; a margin above 1.0 there can never be exceeded
+        and every sample would be scored PASS, so fall back to 0.5 with a warning.
+        """
+        margin = self.model_config.classify.eval_margin
+        if self.difference_module == "learnable" and margin > 1.0:
+            warnings.warn(
+                f"model.classify.eval_margin={margin} cannot threshold a softmax "
+                "probability (difference_module='learnable'); falling back to 0.5 "
+                "for in-training val_acc/val_fpr. Set eval_margin in (0, 1) to "
+                "silence this warning.",
+                UserWarning,
+            )
+            margin = 0.5
+        return margin
 
     def setup(self, stage):
         """Validate the configured training loss only when training is requested."""
