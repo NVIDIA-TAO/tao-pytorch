@@ -196,7 +196,9 @@ def _load_with_pyav(video_path, num_frames, start_time_sec, end_time_sec,
 
     with av.open(str(video_path)) as container:
         stream = container.streams.video[0]
-        stream.thread_type = "AUTO"
+        # Frame threading can hang when sampled decoding exits before EOF;
+        # keep decoding parallel within each frame instead.
+        stream.thread_type = "SLICE"
         rate = _pyav_stream_rate(stream)
         actual_frames = _pyav_stream_length(stream, rate)
         if actual_frames <= 0:
