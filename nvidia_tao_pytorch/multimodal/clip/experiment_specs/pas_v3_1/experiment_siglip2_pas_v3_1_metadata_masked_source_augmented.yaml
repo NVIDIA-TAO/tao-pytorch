@@ -1,0 +1,119 @@
+# Phase A: fresh SFT sanity baseline using the PAS V3.1 augmented population:
+# base data plus val/test-medium attribute-matched augmentation.
+#
+# The launcher must provide results_dir=<absolute run directory>. Keep this file
+# immutable after launch; use a new run id for a later sanity rerun.
+results_dir: ???
+
+train:
+  num_epochs: 20
+  num_gpus: 8
+  gpu_ids: [0, 1, 2, 3, 4, 5, 6, 7]
+  num_nodes: 1
+  seed: 1234
+  cudnn:
+    benchmark: false
+    deterministic: false
+  checkpoint_interval: 1
+  checkpoint_interval_unit: epoch
+  resume_training_checkpoint_path: null
+  grad_checkpointing: false
+  grad_clip_norm: 1.0
+  precision: fp16
+  pretrained_model_path: null
+  distributed_strategy: ddp
+  loss_type: siglip
+  siglip_loss_dist_impl: gather
+  siglip_loss_mask_mode: attribute_plus_accessory_match_ignore
+  triplet_loss_weight: 0.0
+  triplet_margin: 0.2
+  optim:
+    optimizer_type: adamw
+    vision_lr: 1e-6
+    text_lr: 1e-7
+    scheduler: cosine
+    betas: [0.9, 0.95]
+    eps: 1e-06
+    weight_decay: 1e-4
+    warmup_steps: 0
+  validation_interval: 1
+  val_check_interval: null
+
+dataset:
+  seed: 42
+  pin_memory: true
+  train:
+    type: custom
+    balance_query_types: false
+    unique_caption_per_batch: false
+    include_attribute_metadata: true
+    datasets:
+    - image_dir: /workspace/data/pas/NVIDIA_PAS_Filtered_06152026_V3.1_tao_ft_metadata_base_plus_val_test_medium_attr_matched_aug_val20_accessory_v2.1/images
+      image_list_file: /workspace/data/pas/NVIDIA_PAS_Filtered_06152026_V3.1_tao_ft_metadata_base_plus_val_test_medium_attr_matched_aug_val20_accessory_v2.1/train_list.txt
+      caption_dir: /workspace/data/pas/NVIDIA_PAS_Filtered_06152026_V3.1_tao_ft_metadata_base_plus_val_test_medium_attr_matched_aug_val20_accessory_v2.1/captions
+      caption_file_suffix: .txt
+      train_pairs_file: /workspace/data/pas/NVIDIA_PAS_Filtered_06152026_V3.1_tao_ft_metadata_base_plus_val_test_medium_attr_matched_aug_val20_accessory_v2.1/train_pairs.json
+    batch_size: 128
+    num_workers: 16
+  val:
+    datasets:
+    - image_dir: /workspace/data/pas/NVIDIA_PAS_Filtered_06152026_V3.1_tao_ft_metadata_base_plus_val_test_medium_attr_matched_aug_val20_accessory_v2.1/images
+      image_list_file: /workspace/data/pas/NVIDIA_PAS_Filtered_06152026_V3.1_tao_ft_metadata_base_plus_val_test_medium_attr_matched_aug_val20_accessory_v2.1/val_list.txt
+      caption_dir: /workspace/data/pas/NVIDIA_PAS_Filtered_06152026_V3.1_tao_ft_metadata_base_plus_val_test_medium_attr_matched_aug_val20_accessory_v2.1/captions
+      caption_file_suffix: .txt
+    metadata_match_eval: true
+    metadata_match_mode: scalar_plus_accessories
+    batch_size: 16
+    num_workers: 4
+  augmentation:
+    scale: [0.4, 1.0]
+    color_jitter: [0.8, 0.32, 0.32, 0.32, 0.08]
+    grayscale: 0.2
+
+model:
+  type: siglip2-so400m-patch16-256
+  canonicalize_text: false
+  # Preserve the pretrained SigLIP2 calibration from the source checkpoint.
+  init_logit_scale: null
+  init_logit_bias: null
+
+# Full SFT, without PEFT or preservation loss.
+peft:
+  enabled: false
+  method: lora
+  vision:
+    enabled: false
+    target_modules: [q_proj, k_proj, v_proj, out_proj]
+    num_last_blocks: 3
+    rank: 8
+    alpha: 16
+    dropout: 0.05
+  text:
+    enabled: false
+    target_modules: [q_proj, k_proj, v_proj, out_proj]
+    num_last_blocks: 3
+    rank: 8
+    alpha: 16
+    dropout: 0.05
+
+regularization:
+  enabled: false
+
+evaluate:
+  checkpoint: ???
+  batch_size: 128
+  pas_ground_truth_mode: scalar_plus_accessories
+
+inference:
+  checkpoint: ???
+  datasets: []
+  batch_size: 32
+
+export:
+  checkpoint: ???
+  onnx_file: ???
+  encoder_type: combined
+  input_height: 256
+  input_width: 256
+  batch_size: -1
+  opset_version: 17
