@@ -132,20 +132,26 @@ def test_inject_lora_limits_adaptation_to_requested_final_blocks():
     )
 
 
-def test_inject_lora_is_idempotent():
-    """A repeated injection keeps existing adapters in the optimizer."""
+def test_inject_lora_rejects_reinjection_before_mutation():
+    """A repeated injection fails before changing existing adapters."""
     model = _TinyCLIP()
     config = _peft_config()
-    first = inject_lora(model, config)
-    second = inject_lora(model, config)
-
-    assert len(first['injected_modules']) == 4
-    assert second['injected_modules'] == []
-    assert all(
-        parameter.requires_grad
+    inject_lora(model, config)
+    wrapped_projection = model.vision_blocks[1].q_proj
+    trainability = {
+        name: parameter.requires_grad
         for name, parameter in model.named_parameters()
-        if 'lora_' in name
-    )
+    }
+    config.vision.alpha = 8
+
+    with pytest.raises(RuntimeError, match='does not support re-injection'):
+        inject_lora(model, config)
+
+    assert model.vision_blocks[1].q_proj is wrapped_projection
+    assert trainability == {
+        name: parameter.requires_grad
+        for name, parameter in model.named_parameters()
+    }
 
 
 @pytest.mark.parametrize(

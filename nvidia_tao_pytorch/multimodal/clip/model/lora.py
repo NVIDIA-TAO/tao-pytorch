@@ -114,12 +114,6 @@ def _named_logit_parameters(model):
     return named_parameters
 
 
-def _enable_lora_parameters(module):
-    """Enable only the trainable adapter weights of one wrapped projection."""
-    module.lora_A.requires_grad = True
-    module.lora_B.requires_grad = True
-
-
 def _preflight_lora_towers(model, towers, resolved_modes):
     """Reject unsupported LoRA architectures before changing model state."""
     for tower_name, tower_config in towers:
@@ -191,6 +185,10 @@ def inject_lora(model, peft_config):
     """Apply explicit per-tower PEFT modes and inject LoRA where requested."""
     if not _config_value(peft_config, 'enabled', False):
         return None
+    if any(isinstance(module, LoRALinear) for module in model.modules()):
+        raise RuntimeError(
+            "inject_lora() does not support re-injection on an adapted model."
+        )
     towers = (
         ('vision', _config_value(peft_config, 'vision')),
         ('text', _config_value(peft_config, 'text')),
@@ -228,8 +226,6 @@ def inject_lora(model, peft_config):
                         module = LoRALinear(module, tower_config.rank, tower_config.alpha, tower_config.dropout)
                         setattr(parent, attribute, module)
                         injected.append((tower_name, f'block[{start_index + offset}].{name}'))
-                    if isinstance(module, LoRALinear):
-                        _enable_lora_parameters(module)
                         lora_param_count += module.lora_A.numel() + module.lora_B.numel()
         tower_trainable_params[tower_name] = sum(
             parameter.numel() for _, parameter in _tower_named_parameters(model, tower_name)
