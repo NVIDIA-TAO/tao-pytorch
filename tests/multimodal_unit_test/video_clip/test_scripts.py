@@ -30,6 +30,7 @@ import torch
 import torch.nn as nn
 
 from nvidia_tao_pytorch.multimodal.video_clip.model import pl_video_clip_model
+from nvidia_tao_pytorch.multimodal.video_clip.scripts import export as export_module
 from nvidia_tao_pytorch.multimodal.video_clip.scripts.inference import (
     _dedup_preserve_order,
     _embeddings_cache_ok,
@@ -38,6 +39,7 @@ from nvidia_tao_pytorch.multimodal.video_clip.scripts.inference import (
 from nvidia_tao_pytorch.multimodal.video_clip.scripts.export import (
     VALID_ENCODER_TYPES,
     _get_video_export_num_frames,
+    run_export,
 )
 from nvidia_tao_pytorch.multimodal.video_clip.utils.embedding_io import (
     read_embeddings_h5,
@@ -321,3 +323,50 @@ class TestExportHelpers:
 
         m.num_frames = 0  # non-positive -> None
         assert _get_video_export_num_frames(m) is None
+
+    def test_export_requires_trained_checkpoint(self):
+        """A null checkpoint fails before export setup begins."""
+        experiment = SimpleNamespace(
+            export=SimpleNamespace(checkpoint=None),
+        )
+
+        with pytest.raises(ValueError, match="trained checkpoint is required"):
+            run_export(experiment)
+
+    @pytest.mark.parametrize(
+        ("encoder_type", "existing_suffix"),
+        [
+            ("combined", ".onnx"),
+            ("separate", "_vision.onnx"),
+            ("separate", "_text.onnx"),
+        ],
+    )
+    def test_existing_output_fails_before_model_load(
+        self,
+        encoder_type,
+        existing_suffix,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Existing combined or separate outputs are rejected immediately."""
+        output_file = tmp_path / "model.onnx"
+        existing_file = tmp_path / f"model{existing_suffix}"
+        existing_file.touch()
+        experiment = SimpleNamespace(
+            encryption_key="",
+            export=SimpleNamespace(
+                checkpoint="model.ckpt",
+                gpu_id=0,
+                on_cpu=True,
+                onnx_file=str(output_file),
+                encoder_type=encoder_type,
+            ),
+        )
+        monkeypatch.setattr(
+            export_module.VideoCLIPPlModel,
+            "load_from_checkpoint",
+            lambda *args, **kwargs: pytest.fail("model was loaded"),
+        )
+
+        with pytest.raises(FileExistsError, match=str(existing_file)):
+            run_export(experiment)
