@@ -11,6 +11,7 @@ from os.path import abspath, dirname, exists, join
 
 from omegaconf import MISSING, OmegaConf
 from dataclasses import dataclass, is_dataclass
+from typing import Optional
 
 from nvidia_tao_pytorch.core.hydra.hydra_runner import hydra_runner
 from nvidia_tao_pytorch.core.tlt_logging import logging
@@ -147,7 +148,7 @@ class DefaultConfig:
     """This is a structured config for generating default specs."""
 
     # Minimalistic experiment manager.
-    results_dir: str = MISSING
+    results_dir: Optional[str] = None
     module_name: str = MISSING
 
 
@@ -171,6 +172,13 @@ def main(cfg: DefaultConfig) -> None:
         logging.error(error_msg)
         raise ValueError(error_msg)
 
+    module_path = f"nvidia_tao_pytorch.config.{cfg.module_name}.default_config"
+    if not cfg.results_dir:
+        imported_module = import_module_from_path(module_path)
+        experiment_config = get_experiment_config(imported_module)
+        print(OmegaConf.to_yaml(OmegaConf.structured(experiment_config)), end="")
+        return
+
     # Create results directory if it doesn't exist
     if not exists(cfg.results_dir):
         makedirs(cfg.results_dir, exist_ok=True)
@@ -183,7 +191,6 @@ def main(cfg: DefaultConfig) -> None:
         logging.warning(f"Output file already exists and will be overwritten: {output_path}")
 
     # Import the module and get the ExperimentConfig dataclass
-    module_path = f"nvidia_tao_pytorch.config.{cfg.module_name}.default_config"
     try:
         imported_module = import_module_from_path(module_path)
         experiment_config = get_experiment_config(imported_module)

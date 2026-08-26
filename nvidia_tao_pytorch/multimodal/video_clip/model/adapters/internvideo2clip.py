@@ -113,6 +113,7 @@ class InternVideo2CLIP(BaseCLIPAdapter):
         use_flash_attn=False,
         use_fused_rmsnorm=False,
         use_fused_mlp=False,
+        log_parameters=True,
     ):
         """Initialize InternVideo2-CLIP L14 from a whole-model or component ckpts.
 
@@ -179,7 +180,8 @@ class InternVideo2CLIP(BaseCLIPAdapter):
 
         self.backbone.temp.requires_grad = False
         self.tokenizer = InternVideo2Tokenizer(self.backbone.tokenizer)
-        self._log_parameters(freeze_vision_encoder, freeze_text_encoder)
+        if log_parameters:
+            self._log_parameters(freeze_vision_encoder, freeze_text_encoder)
 
     def _log_parameters(self, freeze_vision, freeze_text):
         """Log trainable parameter summary."""

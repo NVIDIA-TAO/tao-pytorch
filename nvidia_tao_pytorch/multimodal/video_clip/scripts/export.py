@@ -17,7 +17,9 @@
 """Export CLIP model to ONNX."""
 
 import copy
+import glob
 import os
+import shutil
 from typing import Optional, Tuple
 
 import numpy as np
@@ -886,7 +888,7 @@ def export_combined_encoder(
         return tmp_onnx_file
 
 
-def run_export(experiment_config: ExperimentConfig) -> None:
+def _run_export_impl(experiment_config: ExperimentConfig) -> None:
     """Run ONNX export for CLIP model.
 
     The encoder_type config option controls the export mode:
@@ -908,6 +910,8 @@ def run_export(experiment_config: ExperimentConfig) -> None:
 
     # Get export parameters
     model_path = export_config.checkpoint
+    if not model_path:
+        raise ValueError("A trained checkpoint is required for export")
     key = experiment_config.encryption_key
     TLTPyTorchCookbook.set_passphrase(key)
 
@@ -938,7 +942,7 @@ def run_export(experiment_config: ExperimentConfig) -> None:
 
     device = 'cpu' if on_cpu else 'cuda'
 
-    # Load model from checkpoint or build from HuggingFace pretrained weights
+    # Load the trained model checkpoint.
     if model_path:
         logging.info(f"Loading model from checkpoint: {model_path}")
         # Preservation regularization is training-only; skip the frozen-teacher
@@ -1069,6 +1073,26 @@ def run_export(experiment_config: ExperimentConfig) -> None:
         adaptor_name=getattr(experiment_config.model, 'adaptor_name', None),
     )
     logging.info(f"Tokenizer saved to {tokenizer_dir}")
+
+
+def run_export(experiment_config: ExperimentConfig) -> None:
+    """Export atomically enough that a failed attempt is safely retryable."""
+    export_config = experiment_config.export
+    model_path = export_config.checkpoint
+    if not model_path:
+        raise ValueError("A trained checkpoint is required for export")
+    output_file = export_config.onnx_file or f"{os.path.splitext(model_path)[0]}.onnx"
+    base_name = os.path.splitext(os.path.realpath(output_file))[0]
+    before = set(glob.glob(f"{base_name}*"))
+    try:
+        _run_export_impl(experiment_config)
+    except Exception:
+        for artifact in set(glob.glob(f"{base_name}*")) - before:
+            if os.path.isdir(artifact) and not os.path.islink(artifact):
+                shutil.rmtree(artifact)
+            else:
+                os.remove(artifact)
+        raise
 
 
 spec_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

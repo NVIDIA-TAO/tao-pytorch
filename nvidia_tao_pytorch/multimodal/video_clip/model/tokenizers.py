@@ -33,6 +33,7 @@ Functions:
     load_tokenizer: Load tokenizer from disk
 """
 
+import json
 import os
 from typing import List, Optional
 
@@ -193,7 +194,7 @@ def save_tokenizer(
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    inner_tokenizer = tokenizer._tokenizer
+    inner_tokenizer = getattr(tokenizer, '_tokenizer', tokenizer)
 
     if isinstance(inner_tokenizer, SigLIP2WrappedTokenizer):
         # SigLIP2: save the HuggingFace processor's tokenizer
@@ -231,13 +232,47 @@ def save_tokenizer(
             )
             ctx_len = text_cfg.get("context_length", 77)
 
-        hf_tokenizer = AutoTokenizer.from_pretrained(hf_tokenizer_name)
-        hf_tokenizer.model_max_length = ctx_len
-        hf_tokenizer.save_pretrained(output_dir)
-        logging.info(
-            "Saved equivalent HuggingFace tokenizer (%s) to %s",
-            hf_tokenizer_name, output_dir
-        )
+        raw_tokenizer = inner_tokenizer
+        while hasattr(raw_tokenizer, '_tokenizer'):
+            raw_tokenizer = raw_tokenizer._tokenizer
+        if hasattr(raw_tokenizer, 'tokenizer'):
+            raw_tokenizer = raw_tokenizer.tokenizer
+        if hasattr(raw_tokenizer, 'encoder') and hasattr(raw_tokenizer, 'bpe_ranks'):
+            with open(os.path.join(output_dir, 'vocab.json'), 'w', encoding='utf-8') as stream:
+                json.dump(raw_tokenizer.encoder, stream, ensure_ascii=False)
+            ranked_merges = sorted(raw_tokenizer.bpe_ranks, key=raw_tokenizer.bpe_ranks.get)
+            with open(os.path.join(output_dir, 'merges.txt'), 'w', encoding='utf-8') as stream:
+                stream.write('#version: 0.2\n')
+                stream.writelines(f"{left} {right}\n" for left, right in ranked_merges)
+            tokenizer_config = {
+                'tokenizer_class': 'CLIPTokenizer',
+                'model_max_length': ctx_len,
+                'bos_token': '<|startoftext|>',
+                'eos_token': '<|endoftext|>',
+                'unk_token': '<|endoftext|>',
+                'pad_token': '<|endoftext|>',
+            }
+            with open(os.path.join(output_dir, 'tokenizer_config.json'), 'w', encoding='utf-8') as stream:
+                json.dump(tokenizer_config, stream, indent=2)
+            with open(os.path.join(output_dir, 'special_tokens_map.json'), 'w', encoding='utf-8') as stream:
+                json.dump({key: tokenizer_config[key] for key in ('bos_token', 'eos_token', 'unk_token', 'pad_token')}, stream, indent=2)
+            logging.info("Saved in-memory OpenCLIP tokenizer to %s", output_dir)
+        else:
+            try:
+                hf_tokenizer = AutoTokenizer.from_pretrained(
+                    hf_tokenizer_name, local_files_only=True
+                )
+            except OSError as exc:
+                raise RuntimeError(
+                    "Tokenizer export is offline and the model did not expose serializable "
+                    f"tokenizer assets for {hf_tokenizer_name!r}"
+                ) from exc
+            hf_tokenizer.model_max_length = ctx_len
+            hf_tokenizer.save_pretrained(output_dir)
+            logging.info(
+                "Saved cached HuggingFace tokenizer (%s) to %s",
+                hf_tokenizer_name, output_dir
+            )
 
     return output_dir
 

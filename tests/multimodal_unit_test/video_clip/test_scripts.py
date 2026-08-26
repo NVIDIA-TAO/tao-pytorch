@@ -39,6 +39,7 @@ from nvidia_tao_pytorch.multimodal.video_clip.scripts.export import (
     VALID_ENCODER_TYPES,
     _get_video_export_num_frames,
 )
+from nvidia_tao_pytorch.multimodal.video_clip.scripts import export as export_module
 from nvidia_tao_pytorch.multimodal.video_clip.utils.embedding_io import (
     read_embeddings_h5,
     text_to_video_search,
@@ -321,3 +322,25 @@ class TestExportHelpers:
 
         m.num_frames = 0  # non-positive -> None
         assert _get_video_export_num_frames(m) is None
+
+    def test_export_requires_trained_checkpoint(self, tmp_path):
+        experiment = SimpleNamespace(export=SimpleNamespace(
+            checkpoint=None, onnx_file=str(tmp_path / "model.onnx")
+        ))
+        with pytest.raises(ValueError, match="trained checkpoint is required"):
+            export_module.run_export(experiment)
+
+    def test_failed_export_removes_partial_artifacts(self, monkeypatch, tmp_path):
+        output = tmp_path / "model.onnx"
+        experiment = SimpleNamespace(export=SimpleNamespace(
+            checkpoint="trained.pth", onnx_file=str(output)
+        ))
+        def fail(_experiment):
+            output.write_bytes(b"partial")
+            (tmp_path / "model_config.yaml").write_text("partial")
+            raise RuntimeError("late failure")
+        monkeypatch.setattr(export_module, "_run_export_impl", fail)
+        with pytest.raises(RuntimeError, match="late failure"):
+            export_module.run_export(experiment)
+        assert not output.exists()
+        assert not (tmp_path / "model_config.yaml").exists()

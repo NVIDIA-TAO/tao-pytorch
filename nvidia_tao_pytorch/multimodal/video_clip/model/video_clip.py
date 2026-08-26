@@ -108,11 +108,14 @@ def build_model(experiment_config,
         )
 
     if model_type in internvideo2clip_model_configs:
+        peft_cfg = getattr(experiment_config, 'peft', None)
+        peft_enabled = peft_cfg is not None and peft_cfg.enabled
         model, preprocess_train, preprocess_val, tokenizer = (
             build_internvideo2clip_model(
                 model_cfg=experiment_config.model,
                 logit_scale_init=init_logit_scale,
                 logit_bias_init=init_logit_bias,
+                log_parameters=not peft_enabled,
             ))
     elif model_type in radio_model_configs:
         adaptor_name = getattr(
