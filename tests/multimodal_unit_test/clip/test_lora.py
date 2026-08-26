@@ -4,6 +4,7 @@
 """Unit tests for CLIP LoRA and preservation-loss primitives."""
 
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -374,7 +375,10 @@ def test_lora_checkpoint_state_restores_exactly(tmp_path):
         if isinstance(module, LoRALinear):
             nn.init.normal_(module.lora_B)
     checkpoint = tmp_path / 'lora.ckpt'
-    torch.save(model.state_dict(), checkpoint)
+    state_dict = model.state_dict()
+    scaling_keys = [key for key in state_dict if key.endswith('.scaling')]
+    assert scaling_keys
+    torch.save(state_dict, checkpoint)
 
     resumed = _TinyCLIP().eval()
     inject_lora(resumed, config)
@@ -384,3 +388,105 @@ def test_lora_checkpoint_state_restores_exactly(tmp_path):
         resumed(image=image, text=text), model(image=image, text=text)
     ):
         torch.testing.assert_close(actual, expected)
+
+
+def test_lora_checkpoint_scaling_overrides_current_alpha():
+    """The checkpoint scale remains authoritative when current alpha differs."""
+    torch.manual_seed(13)
+    source = _TinyCLIP().eval()
+    source_config = _hybrid_config('frozen', 'lora')
+    inject_lora(source, source_config)
+    for module in source.modules():
+        if isinstance(module, LoRALinear):
+            nn.init.normal_(module.lora_B)
+    state_dict = source.state_dict()
+
+    resumed = _TinyCLIP().eval()
+    resumed_config = _hybrid_config('frozen', 'lora')
+    resumed_config.text.alpha = 8
+    inject_lora(resumed, resumed_config)
+    assert all(
+        module.scaling == 4
+        for module in resumed.modules()
+        if isinstance(module, LoRALinear)
+    )
+
+    resumed.load_state_dict(state_dict)
+
+    assert all(
+        module.scaling == 2
+        for module in resumed.modules()
+        if isinstance(module, LoRALinear)
+    )
+    image, text = torch.randn(2, 4), torch.randn(2, 4)
+    source_output = source(image=image, text=text)
+    resumed_output = resumed(image=image, text=text)
+    for actual, expected in zip(resumed_output, source_output):
+        torch.testing.assert_close(actual, expected)
+
+    merge_lora(resumed)
+    merged_output = resumed(image=image, text=text)
+    for actual, expected in zip(merged_output, source_output):
+        torch.testing.assert_close(actual, expected)
+
+
+def test_legacy_lora_checkpoint_uses_configured_scaling_with_warning():
+    """Pre-scaling checkpoints load strictly using the configured fallback."""
+    source = _TinyCLIP().eval()
+    config = _hybrid_config('frozen', 'lora')
+    inject_lora(source, config)
+    source_wrapper = nn.Module()
+    source_wrapper.model = source
+    legacy_state = {
+        key: value
+        for key, value in source_wrapper.state_dict().items()
+        if not key.endswith('.scaling')
+    }
+
+    resumed = _TinyCLIP().eval()
+    inject_lora(resumed, config)
+    resumed_wrapper = nn.Module()
+    resumed_wrapper.model = resumed
+    with patch(
+        'nvidia_tao_pytorch.multimodal.clip.model.lora.logging.warning'
+    ) as warning_mock:
+        resumed_wrapper.load_state_dict(legacy_state, strict=True)
+
+    warning_mock.assert_called_once()
+    assert 'legacy LoRA checkpoint' in warning_mock.call_args.args[0]
+    assert all(
+        module.scaling == 2
+        for module in resumed.modules()
+        if isinstance(module, LoRALinear)
+    )
+
+
+def test_lora_checkpoint_rejects_partially_missing_scaling():
+    """A partially missing scale is corruption rather than a legacy layout."""
+    source = _TinyCLIP().eval()
+    config = _hybrid_config('frozen', 'lora')
+    inject_lora(source, config)
+    state_dict = source.state_dict()
+    scaling_key = next(key for key in state_dict if key.endswith('.scaling'))
+    state_dict.pop(scaling_key)
+
+    resumed = _TinyCLIP().eval()
+    inject_lora(resumed, config)
+
+    with pytest.raises(RuntimeError, match='Missing key'):
+        resumed.load_state_dict(state_dict, strict=True)
+
+
+def test_lora_checkpoint_rejects_different_rank():
+    """LoRA matrix shapes continue to reject a different configured rank."""
+    source = _TinyCLIP().eval()
+    source_config = _hybrid_config('frozen', 'lora')
+    inject_lora(source, source_config)
+
+    resumed = _TinyCLIP().eval()
+    resumed_config = _hybrid_config('frozen', 'lora')
+    resumed_config.text.rank = 3
+    inject_lora(resumed, resumed_config)
+
+    with pytest.raises(RuntimeError, match='size mismatch'):
+        resumed.load_state_dict(source.state_dict())

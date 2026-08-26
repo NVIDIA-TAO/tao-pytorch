@@ -19,7 +19,14 @@ class LoRALinear(nn.Module):
         super().__init__()
         self.original = original
         self.rank = rank
-        self.scaling = alpha / rank
+        self.register_buffer(
+            'scaling',
+            torch.tensor(
+                alpha / rank,
+                dtype=torch.float32,
+                device=original.weight.device,
+            ),
+        )
         original.weight.requires_grad = False
         if original.bias is not None:
             original.bias.requires_grad = False
@@ -137,6 +144,49 @@ def _preflight_lora_towers(model, towers, resolved_modes):
             )
 
 
+def _restore_legacy_lora_scaling(
+    module,
+    state_dict,
+    prefix,
+    local_metadata,
+    strict,
+    missing_keys,
+    unexpected_keys,
+    error_msgs,
+):
+    """Supply configured scaling when loading a legacy LoRA checkpoint."""
+    del local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+    expected_scaling = []
+    for name, child in module.named_modules():
+        if not isinstance(child, LoRALinear):
+            continue
+        local_key = f'{name}.scaling' if name else 'scaling'
+        checkpoint_key = prefix + local_key
+        expected_scaling.append((checkpoint_key, child.scaling))
+    missing_scaling = [
+        (key, scaling)
+        for key, scaling in expected_scaling
+        if key not in state_dict
+    ]
+    if missing_scaling and len(missing_scaling) == len(expected_scaling):
+        for key, scaling in missing_scaling:
+            state_dict[key] = scaling.detach().clone()
+        logging.warning(
+            'Loading a legacy LoRA checkpoint without persisted scaling for '
+            '%s adapter(s); using scaling derived from the current PEFT rank '
+            'and alpha. These values must match the original training config.',
+            len(missing_scaling),
+        )
+
+
+def _register_lora_checkpoint_compatibility(model):
+    """Register one model-level hook for legacy LoRA scaling fallback."""
+    if getattr(model, '_lora_checkpoint_compatibility_registered', False):
+        return
+    model.register_load_state_dict_pre_hook(_restore_legacy_lora_scaling)
+    model._lora_checkpoint_compatibility_registered = True
+
+
 def inject_lora(model, peft_config):
     """Apply explicit per-tower PEFT modes and inject LoRA where requested."""
     if not _config_value(peft_config, 'enabled', False):
@@ -213,6 +263,8 @@ def inject_lora(model, peft_config):
             "train_logit_calibration is disabled. Select a full or lora tower, "
             "or enable calibration."
         )
+    if any(isinstance(module, LoRALinear) for module in model.modules()):
+        _register_lora_checkpoint_compatibility(model)
     logging.info(
         'PEFT modes requested: vision=%s, text=%s; trainable parameters: vision=%s, text=%s, logit=%s. '
         '%s LoRA modules adapted, %s / %s trainable (%.2f%%).',
