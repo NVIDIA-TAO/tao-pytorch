@@ -232,10 +232,10 @@ class CRADIO(BaseCLIPAdapter):
         )
 
     def get_encoder_blocks(self, tower):
-        """Return C-RADIO transformer blocks for a tower."""
+        """Return ordered list of transformer blocks for a given tower."""
         if tower == 'vision':
             return list(self.radio_model.model.blocks)
-        if tower == 'text':
+        elif tower == 'text':
             return list(self.text_model.encoder.layers)
         raise ValueError(f"Unknown tower: {tower}")
 

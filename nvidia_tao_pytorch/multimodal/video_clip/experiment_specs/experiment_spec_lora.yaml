@@ -107,14 +107,14 @@ peft:
   enabled: true
   method: lora
   vision:
-    enabled: true
+    mode: lora
     target_modules: [qkv, proj]
     num_last_blocks: 3
     rank: 8
     alpha: 16
     dropout: 0.05
   text:
-    enabled: false
+    mode: frozen
     target_modules: [qkv_proj, out_proj]
     num_last_blocks: 3
     rank: 8

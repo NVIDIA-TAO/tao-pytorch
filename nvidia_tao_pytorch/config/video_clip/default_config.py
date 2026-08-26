@@ -204,18 +204,21 @@ class VideoCLIPModelConfig:
 # =============================================================================
 @dataclass
 class VideoCLIPLoRATargetConfig:
-    """LoRA configuration for a single encoder tower (vision or text).
+    """Adaptation configuration for a single encoder tower (vision or text).
 
-    Controls which transformer blocks and attention modules receive
-    low-rank adapters. When enabled, only the LoRA parameters in the
-    selected blocks are trainable; all other backbone parameters are frozen.
+    Controls whether a tower is frozen, fully trainable, or adapted with LoRA.
     """
 
-    enabled: bool = BOOL_FIELD(
-        value=False,
-        default_value=False,
-        description="Enable LoRA adaptation for this encoder tower.",
-        display_name="Enabled",
+    mode: str = STR_FIELD(
+        value="frozen",
+        default_value="frozen",
+        valid_options="frozen,full,lora",
+        description=(
+            "Tower adaptation mode. 'frozen' leaves the tower fixed; 'full' "
+            "trains all tower parameters; 'lora' trains only injected LoRA "
+            "parameters."
+        ),
+        display_name="Adaptation Mode",
     )
     target_modules: List[str] = LIST_FIELD(
         arrList=["qkv", "proj"],

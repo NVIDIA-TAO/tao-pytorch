@@ -1,7 +1,25 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-"""LoRA injection and merge utilities for CLIP encoder projections."""
+"""LoRA injection and merging utilities for CLIP models.
+
+Supports the ``nn.Linear`` attention projections used by SigLIP2, RADIO, and
+VideoCLIP backbones. OpenCLIP's ``nn.MultiheadAttention`` projections are not
+currently supported in LoRA mode.
+"""
 
 import math
 
@@ -13,9 +31,22 @@ from nvidia_tao_pytorch.core.tlt_logging import logging
 
 
 class LoRALinear(nn.Module):
-    """Linear layer with a trainable low-rank residual."""
+    """Drop-in replacement for nn.Linear with low-rank adaptation.
+
+    Wraps an existing nn.Linear, freezing its weight and bias, and adds
+    trainable low-rank matrices A and B such that:
+
+        output = original_linear(x) + (x @ A^T @ B^T) * (alpha / rank)
+
+    Args:
+        original: The nn.Linear module to wrap.
+        rank: Low-rank dimension.
+        alpha: Scaling factor. Effective scale = alpha / rank.
+        dropout: Dropout probability applied to input before LoRA path.
+    """
 
     def __init__(self, original, rank=8, alpha=16, dropout=0.05):
+        """Initialize LoRALinear from an existing nn.Linear."""
         super().__init__()
         self.original = original
         self.rank = rank
@@ -27,39 +58,61 @@ class LoRALinear(nn.Module):
                 device=original.weight.device,
             ),
         )
+
+        in_features = original.in_features
+        out_features = original.out_features
+
+        # Freeze the original parameters.
         original.weight.requires_grad = False
         if original.bias is not None:
             original.bias.requires_grad = False
-        self.lora_A = nn.Parameter(torch.empty(
-            rank, original.in_features,
-            device=original.weight.device, dtype=original.weight.dtype,
-        ))
-        self.lora_B = nn.Parameter(torch.zeros(
-            original.out_features, rank,
-            device=original.weight.device, dtype=original.weight.dtype,
-        ))
+
+        # A projects down to the configured rank; B projects back to the
+        # original output width. Match the wrapped layer's device and dtype.
+        device = original.weight.device
+        dtype = original.weight.dtype
+        self.lora_A = nn.Parameter(
+            torch.empty(rank, in_features, device=device, dtype=dtype)
+        )
+        self.lora_B = nn.Parameter(
+            torch.zeros(out_features, rank, device=device, dtype=dtype)
+        )
         nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
-        self.lora_dropout = nn.Dropout(dropout) if dropout else nn.Identity()
+
+        self.lora_dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
     def forward(self, x):
-        """Apply the frozen base layer and its scaled LoRA residual."""
-        residual = F.linear(F.linear(self.lora_dropout(x), self.lora_A), self.lora_B)
-        return self.original(x) + residual * self.scaling
+        """Forward pass: original output + scaled LoRA residual."""
+        base_out = self.original(x)
+        lora_out = F.linear(
+            F.linear(self.lora_dropout(x), self.lora_A),
+            self.lora_B,
+        )
+        return base_out + lora_out * self.scaling
 
     def merge(self):
-        """Fold the LoRA residual into and return the wrapped linear layer."""
+        """Fold LoRA weights into the original linear and return it.
+
+        After merging, the original nn.Linear produces the adapted output
+        directly, with no LoRA overhead. Used before ONNX export.
+
+        Returns:
+            The original nn.Linear with merged weights.
+        """
         with torch.no_grad():
-            self.original.weight.add_((self.lora_B @ self.lora_A) * self.scaling)
+            # delta_W has shape (out_features, in_features).
+            delta = (self.lora_B @ self.lora_A) * self.scaling
+            self.original.weight.add_(delta)
         return self.original
 
 
 def _match_target(module_name, target_modules):
     """Match a configured projection name against a module leaf name."""
-    return module_name.rsplit('.', 1)[-1] in target_modules
+    leaf = module_name.rsplit('.', 1)[-1]
+    return leaf in target_modules
 
 
 VALID_TOWER_MODES = {'frozen', 'full', 'lora'}
-LEGACY_TOWER_MODE = 'legacy'
 
 
 def _config_value(config, name, default=None):
@@ -70,24 +123,24 @@ def _config_value(config, name, default=None):
 
 
 def resolve_tower_mode(tower_config, tower_name):
-    """Resolve a tower mode, including enabled-only legacy configurations."""
-    mode = _config_value(tower_config, 'mode', LEGACY_TOWER_MODE)
-    enabled = _config_value(tower_config, 'enabled')
-    if mode in (None, '???', LEGACY_TOWER_MODE):
-        return 'lora' if enabled else 'frozen'
+    """Validate and return the configured adaptation mode for one tower.
+
+    Args:
+        tower_config: Mapping or dataclass-like tower configuration.
+        tower_name: Tower name used in validation errors.
+
+    Returns:
+        One of ``frozen``, ``full``, or ``lora``.
+
+    Raises:
+        ValueError: If the configured mode is not supported.
+    """
+    mode = _config_value(tower_config, 'mode')
     if mode not in VALID_TOWER_MODES:
         raise ValueError(
             f"Invalid {tower_name} PEFT mode {mode!r}. Expected one of "
-            f"{sorted(VALID_TOWER_MODES | {LEGACY_TOWER_MODE})}."
+            f"{sorted(VALID_TOWER_MODES)}."
         )
-    if enabled is not None:
-        legacy_mode = 'lora' if enabled else 'frozen'
-        if mode != legacy_mode:
-            raise ValueError(
-                f"PEFT {tower_name}.mode={mode!r} conflicts with legacy "
-                f"{tower_name}.enabled={enabled!r}. Remove enabled or use "
-                f"mode={legacy_mode!r}."
-            )
     return mode
 
 
@@ -100,7 +153,7 @@ def _tower_named_parameters(model, tower_name):
 
 
 def _named_logit_parameters(model):
-    """Return logit parameters through the canonical API or legacy fallback."""
+    """Return logit parameters through the canonical API or adapter fallback."""
     getter = getattr(model, 'named_logit_parameters', None)
     if callable(getter):
         return list(getter())
@@ -182,7 +235,27 @@ def _register_lora_checkpoint_compatibility(model):
 
 
 def inject_lora(model, peft_config):
-    """Apply explicit per-tower PEFT modes and inject LoRA where requested."""
+    """Apply the configured adaptation mode to each CLIP encoder tower.
+
+    When PEFT is enabled, all model parameters are frozen first. Each tower is
+    then kept frozen, fully unfrozen, or given ``LoRALinear`` wrappers in its
+    configured final transformer blocks. Logit calibration parameters are
+    controlled independently by ``train_logit_calibration``.
+
+    Args:
+        model: CLIP or VideoCLIP adapter exposing tower blocks and parameters.
+        peft_config: PEFT configuration with ``vision`` and ``text`` targets.
+
+    Returns:
+        Injection statistics, including trainable parameter counts, requested
+        modes, and injected module names. Returns ``None`` when PEFT is disabled.
+
+    Raises:
+        RuntimeError: If the model already contains LoRA adapters.
+        TypeError: If the model does not expose a required tower API.
+        ValueError: If a mode, block depth, or target selection is invalid.
+        NotImplementedError: If LoRA is requested for an unsupported tower.
+    """
     if not _config_value(peft_config, 'enabled', False):
         return None
     if any(isinstance(module, LoRALinear) for module in model.modules()):
@@ -196,9 +269,12 @@ def inject_lora(model, peft_config):
     resolved_modes = {name: resolve_tower_mode(config, name) for name, config in towers}
     _preflight_lora_towers(model, towers, resolved_modes)
     logit_parameters = _named_logit_parameters(model)
+
+    # Establish a frozen baseline before applying each tower's requested mode.
     for parameter in model.parameters():
         parameter.requires_grad = False
 
+    # Unfreeze full towers or inject trainable low-rank adapters into LoRA towers.
     injected, lora_param_count = [], 0
     tower_trainable_params = {'vision': 0, 'text': 0}
     for tower_name, tower_config in towers:
@@ -272,13 +348,26 @@ def inject_lora(model, peft_config):
 
 
 def merge_lora(model):
-    """Replace every ``LoRALinear`` below ``model`` with its merged linear."""
+    """Merge all LoRA weights into the base model for export.
+
+    Walks the model and replaces every LoRALinear with its merged
+    nn.Linear. After this call the model has no LoRA modules and
+    is architecturally identical to a non-LoRA model.
+
+    Args:
+        model: A model potentially containing LoRALinear modules.
+
+    Returns:
+        Number of modules merged.
+    """
     merged_count = 0
-    for parent in model.modules():
-        for attribute, child in list(parent.named_children()):
+    for _, parent_module in model.named_modules():
+        for attr_name, child in list(parent_module.named_children()):
             if isinstance(child, LoRALinear):
-                setattr(parent, attribute, child.merge())
+                merged_linear = child.merge()
+                setattr(parent_module, attr_name, merged_linear)
                 merged_count += 1
-    if merged_count:
-        logging.info('Merged %s LoRA modules into base weights.', merged_count)
+
+    if merged_count > 0:
+        logging.info(f"Merged {merged_count} LoRA modules into base weights.")
     return merged_count

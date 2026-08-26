@@ -132,7 +132,7 @@ class TestVideoCLIPConfigDefaults:
     def test_disabled_by_default(self):
         peft = VideoCLIPPEFTConfig()
         assert peft.enabled is False
-        assert peft.vision.enabled is False and peft.text.enabled is False
+        assert peft.vision.mode == 'frozen' and peft.text.mode == 'frozen'
         assert VideoCLIPRegularizationConfig().enabled is False
 
     def test_target_modules_match_internvideo2(self):
@@ -177,9 +177,9 @@ class TestInjectLoRAVideoCLIP:
     def _peft(self, vision=True, text=True, num_last_blocks=3):
         peft = VideoCLIPPEFTConfig()
         peft.enabled = True
-        peft.vision.enabled = vision
+        peft.vision.mode = 'lora' if vision else 'frozen'
         peft.vision.num_last_blocks = num_last_blocks
-        peft.text.enabled = text
+        peft.text.mode = 'lora' if text else 'frozen'
         peft.text.num_last_blocks = num_last_blocks
         return peft
 

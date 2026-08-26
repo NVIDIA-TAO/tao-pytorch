@@ -148,9 +148,23 @@ class BaseCLIPAdapter(nn.Module, ABC):
         logging.info(f"{model_name}\n{table}\n{logit_info}")
 
     def get_encoder_blocks(self, tower: str):
-        """Return transformer blocks in forward order for LoRA injection."""
+        """Return an ordered list of transformer blocks for a given tower.
+
+        Used by LoRA injection to identify the last N blocks for adaptation.
+
+        Args:
+            tower: 'vision' or 'text'.
+
+        Returns:
+            List of nn.Module, one per transformer block, in forward order.
+
+        Raises:
+            ValueError: If tower is not 'vision' or 'text'.
+            NotImplementedError: If the subclass does not support this tower.
+        """
         raise NotImplementedError(
-            f"{self.__class__.__name__} does not implement encoder blocks for {tower!r}."
+            f"{self.__class__.__name__} does not implement "
+            f"get_encoder_blocks for tower='{tower}'."
         )
 
     @abstractmethod

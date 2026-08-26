@@ -598,6 +598,7 @@ class CLIPPlModel(TAOLightningModule):
             "train/lr", current_text_lr,
             on_step=True, on_epoch=False, prog_bar=True
         )
+
         # Handle preservation-loss dict ('total' present) vs scalar/standard.
         if isinstance(loss, dict) and 'total' in loss:
             loss_value = loss['total']
@@ -649,6 +650,7 @@ class CLIPPlModel(TAOLightningModule):
                     on_step=True, on_epoch=True, prog_bar=False,
                     sync_dist=True, batch_size=batch_size,
                 )
+
         self.log(
             "train_loss", loss_value,
             on_step=True, on_epoch=True, prog_bar=True,
