@@ -113,6 +113,7 @@ def build_model(experiment_config,
                 model_cfg=experiment_config.model,
                 logit_scale_init=init_logit_scale,
                 logit_bias_init=init_logit_bias,
+                log_parameters=not experiment_config.peft.enabled,
             ))
     elif model_type in radio_model_configs:
         adaptor_name = getattr(

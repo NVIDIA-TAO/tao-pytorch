@@ -44,6 +44,7 @@ def _experiment_config(model_type):
         ),
         dataset=SimpleNamespace(augmentation=None),
         train=SimpleNamespace(loss_type="internvideo2_vtc"),
+        peft=SimpleNamespace(enabled=False),
     )
 
 
@@ -75,3 +76,22 @@ class TestModelTypeGuard:
         built = build_model(_experiment_config("internvideo2-clip-l14"))
         assert built.model == "model"
         assert built.tokenizer == "tokenizer"
+
+    def test_peft_suppresses_pre_injection_parameter_report(self, monkeypatch):
+        """PEFT runs must not log counts before LoRA modules are injected."""
+        builder_kwargs = {}
+
+        def _build(**kwargs):
+            builder_kwargs.update(kwargs)
+            return "model", "preprocess_train", "preprocess_val", "tokenizer"
+
+        monkeypatch.setattr(
+            video_clip_module,
+            "build_internvideo2clip_model",
+            _build,
+        )
+        config = _experiment_config("internvideo2-clip-l14")
+        config.peft.enabled = True
+        build_model(config)
+
+        assert builder_kwargs["log_parameters"] is False
