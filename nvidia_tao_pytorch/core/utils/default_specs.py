@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 from os import makedirs, listdir
 from os.path import abspath, dirname, exists, join
+from typing import Optional
 
 from omegaconf import MISSING, OmegaConf
 from dataclasses import dataclass, is_dataclass
@@ -147,7 +148,7 @@ class DefaultConfig:
     """This is a structured config for generating default specs."""
 
     # Minimalistic experiment manager.
-    results_dir: str = MISSING
+    results_dir: Optional[str] = None
     module_name: str = MISSING
 
 
@@ -171,16 +172,16 @@ def main(cfg: DefaultConfig) -> None:
         logging.error(error_msg)
         raise ValueError(error_msg)
 
-    # Create results directory if it doesn't exist
-    if not exists(cfg.results_dir):
-        makedirs(cfg.results_dir, exist_ok=True)
-        logging.info(f"Created results directory: {cfg.results_dir}")
+    output_path = None
+    if cfg.results_dir:
+        # Create results directory if it doesn't exist
+        if not exists(cfg.results_dir):
+            makedirs(cfg.results_dir, exist_ok=True)
+            logging.info(f"Created results directory: {cfg.results_dir}")
 
-    # Set output file path
-    output_filename = "experiment.yaml"
-    output_path = join(cfg.results_dir, output_filename)
-    if exists(output_path):
-        logging.warning(f"Output file already exists and will be overwritten: {output_path}")
+        output_path = join(cfg.results_dir, "experiment.yaml")
+        if exists(output_path):
+            logging.warning(f"Output file already exists and will be overwritten: {output_path}")
 
     # Import the module and get the ExperimentConfig dataclass
     module_path = f"nvidia_tao_pytorch.config.{cfg.module_name}.default_config"
@@ -188,11 +189,14 @@ def main(cfg: DefaultConfig) -> None:
         imported_module = import_module_from_path(module_path)
         experiment_config = get_experiment_config(imported_module)
 
-        # Generate YAML from dataclass
-        dataclass_to_yaml(experiment_config, output_path)
-
-        # Success logging
-        logging.info(f"Default specification file for {cfg.module_name} generated at '{output_path}'")
+        if output_path:
+            dataclass_to_yaml(experiment_config, output_path)
+            logging.info(
+                f"Default specification file for {cfg.module_name} generated at '{output_path}'"
+            )
+        else:
+            config = OmegaConf.structured(experiment_config)
+            print(OmegaConf.to_yaml(config), end="")
 
     except ImportError as e:
         error_msg = f"Failed to import module '{module_path}': {str(e)}"
