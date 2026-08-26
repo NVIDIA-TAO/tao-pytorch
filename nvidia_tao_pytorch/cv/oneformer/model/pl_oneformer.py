@@ -926,7 +926,62 @@ class OneformerPlModule(TAOLightningModule):
         """Test step -- runs the same inference as validation_step."""
         metrics = self._eval_step(batch)
         self.test_step_outputs.setdefault(dataloader_idx, []).append(metrics)
+
+        # DEFT gap analysis: save per-image per-class IoU to a JSONL file.
+        # Only runs when evaluation_task == "semantic" and on rank 0.
+        if self.evaluation_task == "semantic" and self.trainer.is_global_zero:
+            self._save_per_image_iou(batch, metrics)
+
         return metrics
+
+    def _save_per_image_iou(self, batch, metrics):
+        """Write per-image per-class IoU records to results_dir/per_image_iou.jsonl."""
+        results_dir = self.cfg.evaluate.results_dir or self.cfg.results_dir
+        out_path = os.path.join(results_dir, "per_image_iou.jsonl")
+        os.makedirs(results_dir, exist_ok=True)
+
+        inputs = batch["images"]
+        image_ids = batch.get("image_ids", [None] * inputs.shape[0])
+        file_names = batch.get("file_names", [str(i) for i in image_ids])
+
+        # Re-run per-image (not batched) to get individual stats
+        tasks = [f"The task is {self.evaluation_task}" for _ in range(inputs.shape[0])]
+        with torch.no_grad():
+            outputs = self.model(inputs, tasks=tasks, texts=None)
+        mask_cls_results = outputs["pred_logits"]
+        mask_pred_results = outputs["pred_masks"]
+        mask_pred_resize = F.interpolate(
+            self.batch_semantic_inference(mask_cls_results, mask_pred_results),
+            size=(inputs.shape[-2], inputs.shape[-1]),
+            mode="bilinear", align_corners=False,
+        )
+        pred_semseg = torch.argmax(mask_pred_resize, dim=1).cpu().numpy()
+        gt_semseg = batch["sem_segs"].cpu().numpy()
+
+        # Build category id → name map from metadata
+        cat_names = getattr(self.metadata, "stuff_classes", None) or []
+
+        with open(out_path, "a") as f:
+            for i in range(inputs.shape[0]):
+                inter, union, _, _ = total_intersect_over_union(
+                    pred_semseg[i:i+1], gt_semseg[i:i+1],
+                    self.num_classes,
+                    ignore_index=2**self.n_bits - 1,
+                    reduce_zero_label=False,
+                )
+                class_iou = {}
+                for cls_id in range(self.num_classes):
+                    if union[cls_id] > 0:
+                        name = cat_names[cls_id] if cls_id < len(cat_names) else str(cls_id)
+                        class_iou[name] = round(float(inter[cls_id]) / float(union[cls_id]), 4)
+                miou = round(float(np.mean(list(class_iou.values()))), 4) if class_iou else 0.0
+                record = {
+                    "image_id": str(image_ids[i]) if image_ids[i] is not None else str(i),
+                    "file_name": str(file_names[i]) if i < len(file_names) else "",
+                    "miou": miou,
+                    "class_iou": class_iou,
+                }
+                f.write(json.dumps(record) + "\n")
 
     def on_test_epoch_end(self):
         """Test epoch end -- per-dataset and combined metrics."""

@@ -1,11 +1,10 @@
-results_dir: /lustre/fsw/portfolios/edgeai/users/hmvu/deft_khoi/results/oneformer_coco_test
-
+results_dir: /lustre/fsw/portfolios/edgeai/users/hmvu/deft_khoi/results/deft_seg_runs/my_experiment/iter0/eval/predictions
 dataset:
   train:
-    images: /lustre/fsw/portfolios/edgeai/users/sbtran/datasets/public_datasets/coco/train2017
-    annotations: /lustre/fsw/portfolios/edgeai/users/hmvu/datasets/coco/annotations/panoptic_train2017.json
-    panoptic: /lustre/fsw/portfolios/edgeai/users/hmvu/datasets/coco/panoptic_train2017
-    batch_size: 2
+    images: /lustre/fsw/portfolios/edgeai/users/sbtran/datasets/public_datasets/coco/val2017
+    annotations: /lustre/fsw/portfolios/edgeai/users/hmvu/datasets/coco/annotations/panoptic_val2017.json
+    panoptic: /lustre/fsw/portfolios/edgeai/users/hmvu/datasets/coco/panoptic_val2017
+    batch_size: 1
     num_workers: 4
   val:
     images: /lustre/fsw/portfolios/edgeai/users/sbtran/datasets/public_datasets/coco/val2017
@@ -22,16 +21,22 @@ dataset:
   image_size: 1024
   label_map: /lustre/fsw/portfolios/edgeai/users/hmvu/datasets/coco/labelmap.json
   cutmix_prob: 0.0
-
-
 model:
   backbone:
     name: D2SwinTransformer
     freeze_at: 0
     swin:
       embed_dim: 192
-      depths: [2, 2, 18, 2]
-      num_heads: [6, 12, 24, 48]
+      depths:
+      - 2
+      - 2
+      - 18
+      - 2
+      num_heads:
+      - 6
+      - 12
+      - 24
+      - 48
       window_size: 12
       mlp_ratio: 4.0
       patch_size: 4
@@ -43,8 +48,16 @@ model:
       attn_drop_rate: 0.0
       drop_rate: 0.0
       drop_path_rate: 0.3
-      out_features: [res2, res3, res4, res5]
-      out_indices: [0, 1, 2, 3]
+      out_features:
+      - res2
+      - res3
+      - res4
+      - res5
+      out_indices:
+      - 0
+      - 1
+      - 2
+      - 3
       use_checkpoint: false
   one_former:
     num_object_queries: 150
@@ -53,27 +66,28 @@ model:
   test:
     test_topk_per_image: 100
     object_mask_threshold: 0.8
-
+    overlap_threshold: 0.8
 train:
-  num_epochs: 2
-  num_gpus: 8
+  num_epochs: 1
+  num_gpus: 1
   num_nodes: 1
   pretrained_model: /lustre/fsw/portfolios/edgeai/users/hmvu/pretrained_backbone/oneformer/coco_miou=0.68.pth
-  pretrained_backbone:
+  pretrained_backbone: null
   precision: 16-mixed
-  iters_per_epoch: 100
-
+  iters_per_epoch: -1
 evaluate:
   checkpoint: /lustre/fsw/portfolios/edgeai/users/hmvu/pretrained_backbone/oneformer/coco_miou=0.68.pth
   num_gpus: 1
-  gpu_ids: [0]
-  results_dir: /lustre/fsw/portfolios/edgeai/users/hmvu/deft_khoi/results/oneformer_coco_test
+  gpu_ids:
+  - 0
+  results_dir: /lustre/fsw/portfolios/edgeai/users/hmvu/deft_khoi/results/deft_seg_runs/my_experiment/iter0/eval
   iou_per_class: true
-
-
+  task: semantic
 inference:
   mode: semantic
-  results_dir: /lustre/fsw/portfolios/edgeai/users/hmvu/deft_khoi/results/oneformer_coco_test/inference
-  images_dir: /lustre/fsw/portfolios/edgeai/users/hmvu/datasets/coco/images/val2017
-  image_size: [1024, 1024]
+  results_dir: /lustre/fsw/portfolios/edgeai/users/hmvu/deft_khoi/results/deft_seg_runs/my_experiment/iter0/eval/predictions
+  images_dir: /lustre/fsw/portfolios/edgeai/users/sbtran/datasets/public_datasets/coco/val2017
+  image_size:
+  - 1024
+  - 1024
   checkpoint: /lustre/fsw/portfolios/edgeai/users/hmvu/pretrained_backbone/oneformer/coco_miou=0.68.pth
