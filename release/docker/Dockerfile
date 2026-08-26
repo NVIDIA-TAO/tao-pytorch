@@ -3,8 +3,8 @@
 # FROM nvcr.io/nvstaging/tao/tao_pytorch_base_image@sha256:23c2385c3d9232cf0e8b4d37d13fc7e9c9db8fece5c0f6475e5f7924dc6ac06a
 # Select base image based on architecture
 ARG TARGETARCH # provided by Docker if using BuildKit. Else pass in explicitly.
-ARG X86_DIGEST=0dda18f23cbdb62177afa1805a900d29fa4feb7e81feaecf0208495e1db4ccbe
-ARG ARM64_DIGEST=0edf38a0afd615dbbe169e96d5f00e7f7e1bbd8818221b0103541f81b61c4327
+ARG X86_DIGEST=224a161014b5c7ac864e5d1055600d4d27c08a2e23e89bc6e5102a474d2ffae2
+ARG ARM64_DIGEST=2e095fb1db53458140769418dcd3c0cae46042a8554a94b5cb0bea86ec8811c0
 
 FROM nvcr.io/nvstaging/tao/tao_pytorch_base_image@sha256:${ARM64_DIGEST} AS base-arm64
 FROM nvcr.io/nvstaging/tao/tao_pytorch_base_image@sha256:${X86_DIGEST} AS base-amd64
@@ -69,6 +69,7 @@ ENV RUN_CLI=0
 # layers and overlay2 caps a container at 128, so every extra RUN/COPY layer counts;
 # collapsing these three steps into one keeps the release image buildable.
 RUN cd /opt/nvidia/wheels && ls ./*.whl | xargs -I'{}' python -m pip install '{}' && rm -f *.whl && \
+    python -c 'import importlib.util; from importlib.metadata import version; import av, onnxscript; assert version("av") == "17.1.0"; assert version("onnxscript") == "0.7.1"; assert importlib.util.find_spec("decord") is None; print(f"FC video dependencies: av={av.__version__}, onnxscript={onnxscript.__version__}, decord=absent")' && \
     ARCH_LIB_PATH="/usr/lib/$(uname -m)-linux-gnu" && \
     sed -i "s|export LD_LIBRARY_PATH=${ARCH_LIB_PATH}:\${LD_LIBRARY_PATH}|export LD_LIBRARY_PATH=\${LD_LIBRARY_PATH}:${ARCH_LIB_PATH}|g" /etc/bash.bashrc && \
     { find / -type d -name ".git" -exec rm -rf {} + 2>/dev/null; \

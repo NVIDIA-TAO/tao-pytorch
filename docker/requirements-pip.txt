@@ -7,8 +7,8 @@ beartype==0.22.9
 braceexpand
 # video decoder for video_clip: OpenCV is built WITH_FFMPEG=OFF and the restricted
 # ffmpeg (TAO-2183 / FF-4) has no pipe protocol or rawvideo muxer, so PyAV is the only
-# decoder in the image. This wheel is not what ships — see the --no-binary=av rebuild
-# in docker/Dockerfile.
+# decoder in the image. docker/Dockerfile source-builds this pin before installing
+# the complete requirements file, preventing pip from installing the bundled wheel.
 av==17.1.0
 einops
 # sam3 is installed --no-deps from its own Dockerfile layer: its setup.py
