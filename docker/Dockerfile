@@ -114,23 +114,26 @@ EOF
 RUN apt-get purge -y --auto-remove yasm nasm && rm -rf /var/lib/apt/lists/*
 
 COPY docker/requirements-pip.txt requirements-pip.txt
-RUN pip install --upgrade pip \
-  && pip install --no-build-isolation -r requirements-pip.txt \
-  && rm requirements-pip.txt
-
-# Rebuild PyAV against the approved system FFmpeg so no PyPI wheel can bring a
-# bundled av.libs/ copy of libx264/libx265. The requirements pin installs the
-# wheel; this replaces it with a source build linked against /usr/local, which
-# inherits the codec allow-list asserted above. Since h264_cuvid is then the only
-# registered H.264 decoder, generic h264 resolves to NVDEC with no extra library.
+# Build PyAV against the approved system FFmpeg before the bulk requirements install,
+# so pip sees the pinned version as already satisfied and never installs the PyPI wheel
+# with its bundled av.libs/ copy of libx264/libx265. Cython 3.2.4 rejects PyAV 17.1.0's
+# pyio callback declarations, so constrain only the isolated build environment to 3.1.x.
+# The resulting extension links against /usr/local and inherits the codec allow-list
+# asserted above. Since h264_cuvid is then the only registered H.264 decoder, generic
+# h264 resolves to NVDEC with no extra library.
 RUN <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
 export LD_LIBRARY_PATH="/usr/local/lib:${LD_LIBRARY_PATH:-}"
 
+av_requirement="$(grep -E '^av==' requirements-pip.txt)"
+test -n "${av_requirement}" || { echo "ERROR: PyAV pin missing from requirements-pip.txt" >&2; exit 1; }
+printf '%s\n' 'cython==3.1.6' > /tmp/pyav-build-constraints.txt
 pip uninstall -y av decord || true
-pip install --no-cache-dir --force-reinstall --no-deps --no-binary=av "av==17.1.0"
+pip install --no-cache-dir --force-reinstall --no-deps --no-binary=av \
+  --build-constraint /tmp/pyav-build-constraints.txt "${av_requirement}"
+rm /tmp/pyav-build-constraints.txt
 
 site_packages="$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
 bad_libs="$(find "${site_packages}" \
@@ -150,6 +153,10 @@ import av
 print("PyAV", av.__version__, "linked against the restricted system FFmpeg")
 PY_NO_DECORD
 EOF
+
+RUN pip install --upgrade pip \
+  && pip install --no-build-isolation -r requirements-pip.txt \
+  && rm requirements-pip.txt
 
 
 # Set platform-specific library path using uname
