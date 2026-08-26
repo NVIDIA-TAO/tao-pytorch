@@ -218,7 +218,7 @@ class RetrievalEvaluator:
                 ndcg_scores[k].append(compute_ndcg(sorted_labels, k))
 
             if self._compute_auc:
-                auc_scores.append(compute_auc(sims, sorted_labels))
+                auc_scores.append(compute_auc(sims[sorted_idx], sorted_labels))
 
         return RetrievalMetrics(
             recall_at_k={k: np.mean(v) for k, v in recall_scores.items() if v},

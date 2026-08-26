@@ -199,6 +199,37 @@ class TestRetrievalEvaluatorGPU:
 
 
 @pytest.mark.multimodal_unit
+class TestRetrievalAUCAlignment:
+    """AUC needs scores and labels in the same order, not merely in range.
+
+    ``compute_auc`` sorts its ``scores`` argument internally and indexes
+    ``labels`` with the result, so passing gallery-order scores alongside
+    rank-order labels pairs each score with the wrong item relevance. The
+    existing ``0.0 <= auc <= 1.0`` assertions cannot catch that, because an
+    inverted value is still in range.
+    """
+
+    def setup_method(self):
+        """Build a query whose ranking order differs from gallery order."""
+        self.gallery = np.eye(4, dtype=np.float32)
+        # sims proportional to [1, 2, 3, 4] -> ranking order [3, 2, 1, 0].
+        self.query = np.array([[1, 2, 3, 4]], dtype=np.float32)
+        self.evaluator = RetrievalEvaluator(
+            k_values=(1,), compute_auc=True, device="cpu"
+        )
+
+    def test_only_lowest_scoring_item_relevant_is_auc_zero(self):
+        """The sole relevant item ranks last, so AUC is 0."""
+        metrics = self.evaluator.evaluate(self.query, self.gallery, [[0]])
+        assert abs(metrics.auc - 0.0) < 1e-6
+
+    def test_only_highest_scoring_item_relevant_is_auc_one(self):
+        """The sole relevant item ranks first, so AUC is 1."""
+        metrics = self.evaluator.evaluate(self.query, self.gallery, [[3]])
+        assert abs(metrics.auc - 1.0) < 1e-6
+
+
+@pytest.mark.multimodal_unit
 class TestRetrievalEvaluator:
     """Tests for RetrievalEvaluator."""
 
