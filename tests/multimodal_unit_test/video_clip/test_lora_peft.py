@@ -25,7 +25,6 @@ fused-QKV blocks, and that the two config copies stay field-identical.
 """
 
 import pytest
-import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -193,7 +192,10 @@ class TestInjectLoRAVideoCLIP:
 
     def test_only_lora_and_logit_trainable(self):
         m = MockIV2Adapter()
-        inject_lora(m, self._peft())
+        stats = inject_lora(m, self._peft())
+        assert m.logit_scale.requires_grad
+        assert m.logit_bias.requires_grad
+        assert stats['logit_trainable_params'] == 2
         leftover = [
             n for n, p in m.named_parameters()
             if p.requires_grad and 'lora_A' not in n and 'lora_B' not in n

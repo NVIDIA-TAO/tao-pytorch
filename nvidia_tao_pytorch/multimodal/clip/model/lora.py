@@ -92,6 +92,21 @@ def _tower_named_parameters(model, tower_name):
     return list(getter())
 
 
+def _named_logit_parameters(model):
+    """Return logit parameters through the canonical API or legacy fallback."""
+    getter = getattr(model, 'named_logit_parameters', None)
+    if callable(getter):
+        return list(getter())
+
+    named_parameters = []
+    for name in ('logit_scale', 'logit_bias'):
+        getter = getattr(model, f'get_{name}_parameter', None)
+        parameter = getter() if callable(getter) else getattr(model, name, None)
+        if isinstance(parameter, nn.Parameter):
+            named_parameters.append((name, parameter))
+    return named_parameters
+
+
 def _enable_lora_parameters(module):
     """Enable only the trainable adapter weights of one wrapped projection."""
     module.lora_A.requires_grad = True
@@ -132,6 +147,7 @@ def inject_lora(model, peft_config):
     )
     resolved_modes = {name: resolve_tower_mode(config, name) for name, config in towers}
     _preflight_lora_towers(model, towers, resolved_modes)
+    logit_parameters = _named_logit_parameters(model)
     for parameter in model.parameters():
         parameter.requires_grad = False
 
@@ -179,7 +195,7 @@ def inject_lora(model, peft_config):
             )
 
     if _config_value(peft_config, 'train_logit_calibration', True):
-        for _, parameter in model.named_logit_parameters():
+        for _, parameter in logit_parameters:
             parameter.requires_grad = True
     total_params = sum(parameter.numel() for parameter in model.parameters())
     trainable_params = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
@@ -187,7 +203,9 @@ def inject_lora(model, peft_config):
         'total_params': total_params, 'trainable_params': trainable_params,
         'lora_params': lora_param_count, 'injected_modules': injected,
         'requested_modes': resolved_modes, 'tower_trainable_params': tower_trainable_params,
-        'logit_trainable_params': sum(parameter.numel() for _, parameter in model.named_logit_parameters() if parameter.requires_grad),
+        'logit_trainable_params': sum(
+            parameter.numel() for _, parameter in logit_parameters if parameter.requires_grad
+        ),
     }
     if trainable_params == 0:
         raise ValueError(
