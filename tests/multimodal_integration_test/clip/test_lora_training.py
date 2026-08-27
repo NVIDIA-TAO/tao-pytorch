@@ -164,10 +164,15 @@ class MockTransformerCLIP(BaseCLIPAdapter):
 # ---------------------------------------------------------------------------
 
 
+def _tower_mode(enabled):
+    """Map a boolean tower selector onto its explicit tower mode."""
+    return 'lora' if enabled else 'frozen'
+
+
 class MockLoRATargetConfig:
-    def __init__(self, enabled=True, target_modules=None,
+    def __init__(self, mode='lora', target_modules=None,
                  num_last_blocks=2, rank=4, alpha=8, dropout=0.0):
-        self.enabled = enabled
+        self.mode = mode
         self.target_modules = target_modules or [
             'q_proj', 'k_proj', 'v_proj', 'out_proj'
         ]
@@ -182,8 +187,10 @@ class MockPEFTConfig:
                  **kwargs):
         self.enabled = enabled
         self.method = 'lora'
-        self.vision = MockLoRATargetConfig(enabled=vision_enabled, **kwargs)
-        self.text = MockLoRATargetConfig(enabled=text_enabled, **kwargs)
+        self.vision = MockLoRATargetConfig(
+            mode=_tower_mode(vision_enabled), **kwargs)
+        self.text = MockLoRATargetConfig(
+            mode=_tower_mode(text_enabled), **kwargs)
 
 
 class MockRegConfig:
