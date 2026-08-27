@@ -989,8 +989,8 @@ class VideoCLIPExportConfig:
     checkpoint: Optional[str] = STR_FIELD(
         value=None,
         default_value=None,
-        description="Path to trained model checkpoint (.ckpt or .pth). "
-                    "If null, exports directly from HuggingFace pretrained weights.",
+        description="Required path to a trained TAO model checkpoint "
+                    "(.ckpt or .pth).",
         display_name="Checkpoint Path",
     )
     onnx_file: Optional[str] = STR_FIELD(
