@@ -19,6 +19,8 @@
 from dataclasses import dataclass
 from typing import Any, List, Optional
 
+from omegaconf import MISSING
+
 from nvidia_tao_pytorch.config.common.common_config import (
     CommonExperimentConfig,
     GenTrtEngineConfig,
@@ -818,9 +820,9 @@ class VideoCLIPRunConfig:
     base with their task-specific fields.
     """
 
-    checkpoint: Optional[str] = STR_FIELD(
-        value=None,
-        default_value=None,
+    checkpoint: str = STR_FIELD(
+        value=MISSING,
+        default_value="",
         description="Required path to a trained model checkpoint (.ckpt or .pth) "
                     "for evaluation or inference.",
         display_name="Checkpoint Path",
@@ -986,9 +988,9 @@ class VideoCLIPInferenceConfig(VideoCLIPRunConfig):
 class VideoCLIPExportConfig:
     """ONNX export configuration for VideoCLIP models."""
 
-    checkpoint: Optional[str] = STR_FIELD(
-        value=None,
-        default_value=None,
+    checkpoint: str = STR_FIELD(
+        value=MISSING,
+        default_value="",
         description="Required path to a trained TAO model checkpoint "
                     "(.ckpt or .pth).",
         display_name="Checkpoint Path",
