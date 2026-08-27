@@ -1,0 +1,42 @@
+encryption_key: tlt_encode
+
+results_dir: /tao-pt/tao-experiments/result/nvdinov2
+
+# Backbone architecture must match the checkpoint being evaluated.
+model:
+  distill:
+    enable: False
+    disable_masking: False
+    pretrained_non_distill_pl_model_path: null
+  backbone:
+    teacher_type: "vit_l"
+    student_type: "vit_l"
+    drop_path_rate: 0.4
+    patch_size: 14
+    img_size: 518
+  head:
+    num_layers: 3
+    hidden_dim: 2048
+    bottleneck_dim: 384
+
+evaluate:
+  checkpoint: /tao-pt/tao-experiments/result/nvdinov2/train/teacher_epoch_002_step_00600.pth
+  results_dir: ${results_dir}/evaluate
+  num_gpus: 1
+  # Directory for cached feature tensors (extract-once). Point at scratch; null disables.
+  cache_dir: null
+  knn:
+    enabled: True
+    dataset_type: image_folder      # or webdataset
+    train_root: /tao-pt/tao-experiments/data/imagenet/train
+    val_root: /tao-pt/tao-experiments/data/imagenet/val
+    k: 20                           # protocol constant — keep 20 for paper comparability
+    crop: 224
+    batch_size: 128
+    num_workers: 8
+    # NV-DINOv2's adapter does not normalize, so the dataset applies ImageNet stats.
+    imagenet_normalize: True
+    num_classes: 1000
+    amp: True
+    # For a quick smoke test, cap the train index (remove for full ImageNet KNN):
+    max_train_samples: 50000
