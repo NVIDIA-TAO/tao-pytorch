@@ -53,4 +53,6 @@ def test_save_openclip_tokenizer_offline_preserves_token_ids(
 
     torch.testing.assert_close(restored_ids, source_tokenizer(texts))
     assert restored_tokenizer.pad_token_id == 0
+    assert restored_tokenizer.convert_ids_to_tokens(0) == "<pad>"
+    assert restored_tokenizer.decode([0], skip_special_tokens=False) == "<pad>"
     assert restored_tokenizer.model_max_length == source_tokenizer.context_length

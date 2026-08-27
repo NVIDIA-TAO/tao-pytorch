@@ -203,6 +203,9 @@ def _save_openclip_tokenizer(tokenizer, output_dir):
     vocab = dict(tokenizer.encoder)
     # Alias OpenCLIP's padding ID without turning its real token ("!") into a
     # special token, which would change tokenization of ordinary punctuation.
+    # The duplicate ID intentionally makes the Hugging Face decoder map 0 to
+    # <pad>, not "!"; encoding fidelity and explicit padding take precedence
+    # over decode fidelity for this otherwise ambiguous ID.
     vocab["<pad>"] = 0
     with open(vocab_path, "w", encoding="utf-8") as vocab_file:
         json.dump(vocab, vocab_file, ensure_ascii=False)
