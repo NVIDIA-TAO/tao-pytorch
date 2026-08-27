@@ -319,11 +319,8 @@ WORKDIR /workspace
 ####################
 ## install xformers
 ####################
-# xformers comes from NVIDIA's internal GitLab PyPI registry. The local-version
-# segment (+nv26.3.1.<pipeline>) ties the wheel's torch/CUDA ABI to the base
-# image — bump in lockstep with PYTORCH_BASE_IMAGE upgrades.
-ARG XFORMERS_VERSION=0.0.33+nv26.3.1.49215124
-ARG XFORMERS_INDEX_URL=https://gitlab-master.nvidia.com/api/v4/projects/100660/packages/pypi/simple
+ARG XFORMERS_VERSION=0.0.33
+ARG XFORMERS_INDEX_URL=https://pypi.org/simple
 RUN pip install --no-deps "xformers==${XFORMERS_VERSION}" \
     --index-url "${XFORMERS_INDEX_URL}"
 
