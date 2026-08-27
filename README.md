@@ -94,7 +94,7 @@ python tools/update_readme_supported_commands.py
 | `mask2former` | `cv.mask2former` | `default_specs`, `evaluate`, `export`, `inference`, `quantize`, `train` |
 | `mask_grounding_dino` | `cv.mask_grounding_dino` | `default_specs`, `evaluate`, `export`, `inference`, `quantize`, `train` |
 | `ml_recog` | `cv.ml_recog` | `default_specs`, `evaluate`, `export`, `inference`, `train` |
-| `nvdinov2` | `ssl.nvdinov2` | `default_specs`, `export`, `inference`, `train` |
+| `nvdinov2` | `ssl.nvdinov2` | `default_specs`, `evaluate`, `export`, `inference`, `train` |
 | `ocdnet` | `cv.ocdnet` | `default_specs`, `evaluate`, `export`, `inference`, `prune`, `quantize`, `train` |
 | `ocrnet` | `cv.ocrnet` | `dataset_convert`, `default_specs`, `evaluate`, `export`, `inference`, `prune`, `quantize`, `train` |
 | `oneformer` | `cv.oneformer` | `default_specs`, `evaluate`, `export`, `inference`, `quantize`, `train` |
