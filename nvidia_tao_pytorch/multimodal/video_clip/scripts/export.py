@@ -18,6 +18,7 @@
 
 import copy
 import os
+import shutil
 from typing import Optional, Tuple
 
 import numpy as np
@@ -886,7 +887,48 @@ def export_combined_encoder(
         return tmp_onnx_file
 
 
-def run_export(experiment_config: ExperimentConfig) -> None:
+def _expected_export_artifacts(export_config):
+    """Return the explicit files and directories an export may create."""
+    model_path = export_config.checkpoint
+    if not model_path:
+        return set()
+
+    output_file = export_config.onnx_file
+    if output_file is None:
+        output_file = f"{os.path.splitext(model_path)[0]}.onnx"
+
+    encoder_type = getattr(export_config, 'encoder_type', 'combined')
+    if encoder_type not in VALID_ENCODER_TYPES:
+        return set()
+
+    base_name, ext = os.path.splitext(output_file)
+    if encoder_type == 'combined':
+        encoder_files = (output_file,)
+    else:
+        encoder_files = (
+            f"{base_name}_vision{ext}",
+            f"{base_name}_text{ext}",
+        )
+
+    artifacts = {
+        f"{base_name}_config.yaml",
+        f"{base_name}_tokenizer",
+    }
+    for encoder_file in encoder_files:
+        artifacts.add(encoder_file)
+        onnx_file = (
+            f"{os.path.splitext(encoder_file)[0]}.onnx"
+            if encoder_file.endswith('.etlt') else encoder_file
+        )
+        artifacts.update({
+            onnx_file,
+            f"{onnx_file}.data",
+            f"{os.path.splitext(onnx_file)[0]}_weights.bin",
+        })
+    return artifacts
+
+
+def _run_export_impl(experiment_config: ExperimentConfig) -> None:
     """Run ONNX export for CLIP model.
 
     The encoder_type config option controls the export mode:
@@ -1060,6 +1102,30 @@ def run_export(experiment_config: ExperimentConfig) -> None:
         adaptor_name=getattr(experiment_config.model, 'adaptor_name', None),
     )
     logging.info(f"Tokenizer saved to {tokenizer_dir}")
+
+
+def run_export(experiment_config: ExperimentConfig) -> None:
+    """Run export and remove artifacts created by a failed attempt."""
+    artifacts = _expected_export_artifacts(experiment_config.export)
+    existing_artifacts = {
+        path for path in artifacts if os.path.lexists(path)
+    }
+    try:
+        _run_export_impl(experiment_config)
+    except Exception:
+        for path in artifacts - existing_artifacts:
+            try:
+                if os.path.isdir(path) and not os.path.islink(path):
+                    shutil.rmtree(path)
+                elif os.path.lexists(path):
+                    os.remove(path)
+            except OSError as cleanup_error:
+                logging.warning(
+                    "Failed to clean partial export artifact %s: %s",
+                    path,
+                    cleanup_error,
+                )
+        raise
 
 
 spec_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

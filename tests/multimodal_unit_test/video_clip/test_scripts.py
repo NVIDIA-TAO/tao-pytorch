@@ -370,3 +370,91 @@ class TestExportHelpers:
 
         with pytest.raises(FileExistsError, match=str(existing_file)):
             run_export(experiment)
+
+    @pytest.mark.parametrize(
+        ("encoder_type", "partial_suffixes"),
+        [
+            (
+                "combined",
+                (".onnx", ".onnx.data", "_tokenizer"),
+            ),
+            (
+                "separate",
+                (
+                    "_vision.onnx",
+                    "_vision_weights.bin",
+                    "_text.onnx",
+                    "_config.yaml",
+                    "_tokenizer",
+                ),
+            ),
+        ],
+    )
+    def test_failed_export_removes_only_new_expected_artifacts(
+        self,
+        encoder_type,
+        partial_suffixes,
+        tmp_path,
+        monkeypatch,
+    ):
+        """A failed export is retryable without sweeping same-prefix files."""
+        output_file = tmp_path / "model.onnx"
+        unrelated_file = tmp_path / "model.notes"
+        unrelated_file.write_text("keep", encoding="utf-8")
+        experiment = SimpleNamespace(
+            export=SimpleNamespace(
+                checkpoint="model.ckpt",
+                onnx_file=str(output_file),
+                encoder_type=encoder_type,
+            ),
+        )
+
+        def _fail_after_writes(_experiment):
+            for suffix in partial_suffixes:
+                artifact = tmp_path / f"model{suffix}"
+                if suffix == "_tokenizer":
+                    artifact.mkdir()
+                    (artifact / "tokenizer.json").write_text(
+                        "partial", encoding="utf-8"
+                    )
+                else:
+                    artifact.write_text("partial", encoding="utf-8")
+            raise RuntimeError("parity mismatch")
+
+        monkeypatch.setattr(export_module, "_run_export_impl", _fail_after_writes)
+
+        with pytest.raises(RuntimeError, match="parity mismatch"):
+            run_export(experiment)
+
+        assert unrelated_file.read_text(encoding="utf-8") == "keep"
+        for suffix in partial_suffixes:
+            assert not (tmp_path / f"model{suffix}").exists()
+
+    def test_failed_export_preserves_preexisting_expected_artifact(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Rollback never removes an expected artifact it did not create."""
+        output_file = tmp_path / "model.onnx"
+        config_file = tmp_path / "model_config.yaml"
+        config_file.write_text("existing", encoding="utf-8")
+        experiment = SimpleNamespace(
+            export=SimpleNamespace(
+                checkpoint="model.ckpt",
+                onnx_file=str(output_file),
+                encoder_type="combined",
+            ),
+        )
+
+        def _fail_after_write(_experiment):
+            output_file.write_text("partial", encoding="utf-8")
+            raise RuntimeError("export failed")
+
+        monkeypatch.setattr(export_module, "_run_export_impl", _fail_after_write)
+
+        with pytest.raises(RuntimeError, match="export failed"):
+            run_export(experiment)
+
+        assert not output_file.exists()
+        assert config_file.read_text(encoding="utf-8") == "existing"
