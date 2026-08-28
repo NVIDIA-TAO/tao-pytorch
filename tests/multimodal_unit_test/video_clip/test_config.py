@@ -70,6 +70,12 @@ class TestVideoCLIPConfigSchema:
         assert issubclass(VideoCLIPEvaluateConfig, VideoCLIPRunConfig)
         assert issubclass(VideoCLIPInferenceConfig, VideoCLIPRunConfig)
 
+    @pytest.mark.parametrize("task", ["evaluate", "inference", "export"])
+    def test_checkpoint_is_required(self, task):
+        """Every checkpoint-backed task exposes a mandatory schema field."""
+        cfg = OmegaConf.structured(VideoCLIPExperimentConfig())
+        assert OmegaConf.is_missing(cfg[task], "checkpoint")
+
     def test_dataset_has_metrics_not_evaluation(self):
         """dataset.evaluation was renamed to dataset.metrics."""
         cfg = OmegaConf.structured(VideoCLIPExperimentConfig())

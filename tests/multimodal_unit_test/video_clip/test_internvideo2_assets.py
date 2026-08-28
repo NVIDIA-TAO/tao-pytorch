@@ -153,6 +153,38 @@ class TestInternVideo2Assets:
         assert seen, "expected hf_hub_download to be called"
         assert all(revision is None for _, revision in seen)
 
+    def test_hf_download_failure_reports_component_and_source(self, monkeypatch):
+        """HF failures should stop with enough context to report or retry."""
+        download_error = ConnectionError("network unavailable")
+
+        def fake_hf_hub_download(repo_id, filename, revision=None):
+            del repo_id, filename, revision
+            raise download_error
+
+        monkeypatch.setattr(
+            "huggingface_hub.hf_hub_download", fake_hf_hub_download
+        )
+
+        with pytest.raises(RuntimeError) as error:
+            resolve_internvideo2_l14_assets(SimpleNamespace(
+                vision_encoder=None,
+                text_encoder="apple/MobileCLIP-B-LT",
+                clip_head=None,
+                internvideo2clip_hf_id=DEFAULT_INTERNVIDEO2CLIP_HF_ID,
+            ))
+
+        message = str(error.value)
+        assert (
+            "Hugging Face download failed for InternVideo2 vision encoder"
+            in message
+        )
+        assert DEFAULT_INTERNVIDEO2CLIP_HF_ID in message
+        assert "stage1/L14/L14_dist_1B_stage2/pytorch_model.bin" in message
+        assert DEFAULT_INTERNVIDEO2CLIP_REVISION in message
+        assert "Stop and report" in message
+        assert "existing local checkpoint" in message
+        assert error.value.__cause__ is download_error
+
     def test_all_null_sources_return_architecture_only_assets(self):
         """All-null is the explicit random/architecture-only configuration."""
         assets = resolve_internvideo2_l14_assets(SimpleNamespace(
