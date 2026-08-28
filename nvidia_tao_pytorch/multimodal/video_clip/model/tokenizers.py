@@ -33,10 +33,11 @@ Functions:
     load_tokenizer: Load tokenizer from disk
 """
 
+import json
 import os
 from typing import List, Optional
 
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, CLIPTokenizer
 
 from nvidia_tao_pytorch.core.tlt_logging import logging
 from nvidia_tao_pytorch.cv.backbone_v2.text_utils import canonicalize_text
@@ -170,6 +171,64 @@ class OpenCLIPWrappedTokenizer:
         return {'input_ids': result}
 
 
+def _find_openclip_tokenizer(tokenizer):
+    """Find a wrapped OpenCLIP tokenizer with serializable BPE assets."""
+    visited = set()
+    while tokenizer is not None and id(tokenizer) not in visited:
+        visited.add(id(tokenizer))
+        if all(
+            hasattr(tokenizer, attribute)
+            for attribute in (
+                "encoder",
+                "decoder",
+                "bpe_ranks",
+                "context_length",
+                "sot_token_id",
+                "eot_token_id",
+            )
+        ):
+            return tokenizer
+        tokenizer = getattr(
+            tokenizer,
+            "_tokenizer",
+            getattr(tokenizer, "tokenizer", None),
+        )
+    return None
+
+
+def _save_openclip_tokenizer(tokenizer, output_dir):
+    """Save OpenCLIP BPE assets as an equivalent Hugging Face tokenizer."""
+    vocab_path = os.path.join(output_dir, "vocab.json")
+    merges_path = os.path.join(output_dir, "merges.txt")
+    vocab = dict(tokenizer.encoder)
+    # Alias OpenCLIP's padding ID without turning its real token ("!") into a
+    # special token, which would change tokenization of ordinary punctuation.
+    # The duplicate ID intentionally makes the Hugging Face decoder map 0 to
+    # <pad>, not "!"; encoding fidelity and explicit padding take precedence
+    # over decode fidelity for this otherwise ambiguous ID.
+    vocab["<pad>"] = 0
+    with open(vocab_path, "w", encoding="utf-8") as vocab_file:
+        json.dump(vocab, vocab_file, ensure_ascii=False)
+    with open(merges_path, "w", encoding="utf-8") as merges_file:
+        merges_file.write("#version: 0.2\n")
+        for first, second in sorted(
+            tokenizer.bpe_ranks,
+            key=tokenizer.bpe_ranks.get,
+        ):
+            merges_file.write(f"{first} {second}\n")
+
+    hf_tokenizer = CLIPTokenizer(
+        vocab_file=vocab_path,
+        merges_file=merges_path,
+        bos_token=tokenizer.decoder[tokenizer.sot_token_id],
+        eos_token=tokenizer.decoder[tokenizer.eot_token_id],
+        unk_token=tokenizer.decoder[tokenizer.eot_token_id],
+        pad_token="<pad>",
+        model_max_length=tokenizer.context_length,
+    )
+    hf_tokenizer.save_pretrained(output_dir)
+
+
 def save_tokenizer(
     tokenizer: CLIPCompatibleTokenizer,
     output_dir: str,
@@ -206,6 +265,12 @@ def save_tokenizer(
         hf_tokenizer.model_max_length = inner_tokenizer._max_length  # e.g. 64 for SigLIP2
         hf_tokenizer.save_pretrained(output_dir)
         logging.info("Saved SigLIP2 tokenizer to %s", output_dir)
+    elif openclip_tokenizer := _find_openclip_tokenizer(tokenizer):
+        _save_openclip_tokenizer(openclip_tokenizer, output_dir)
+        logging.info(
+            "Saved OpenCLIP tokenizer from loaded BPE assets to %s",
+            output_dir,
+        )
     else:
         # OpenCLIP-based (RADIO CLIP, OpenCLIP): save equivalent HuggingFace tokenizer
         from nvidia_tao_pytorch.multimodal.video_clip.utils.model_configs import (

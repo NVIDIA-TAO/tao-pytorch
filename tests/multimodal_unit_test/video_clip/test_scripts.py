@@ -30,6 +30,7 @@ import torch
 import torch.nn as nn
 
 from nvidia_tao_pytorch.multimodal.video_clip.model import pl_video_clip_model
+from nvidia_tao_pytorch.multimodal.video_clip.scripts import export as export_module
 from nvidia_tao_pytorch.multimodal.video_clip.scripts.inference import (
     _dedup_preserve_order,
     _embeddings_cache_ok,
@@ -38,6 +39,7 @@ from nvidia_tao_pytorch.multimodal.video_clip.scripts.inference import (
 from nvidia_tao_pytorch.multimodal.video_clip.scripts.export import (
     VALID_ENCODER_TYPES,
     _get_video_export_num_frames,
+    run_export,
 )
 from nvidia_tao_pytorch.multimodal.video_clip.utils.embedding_io import (
     read_embeddings_h5,
@@ -321,3 +323,138 @@ class TestExportHelpers:
 
         m.num_frames = 0  # non-positive -> None
         assert _get_video_export_num_frames(m) is None
+
+    def test_export_requires_trained_checkpoint(self):
+        """A null checkpoint fails before export setup begins."""
+        experiment = SimpleNamespace(
+            export=SimpleNamespace(checkpoint=None),
+        )
+
+        with pytest.raises(ValueError, match="trained checkpoint is required"):
+            run_export(experiment)
+
+    @pytest.mark.parametrize(
+        ("encoder_type", "existing_suffix"),
+        [
+            ("combined", ".onnx"),
+            ("separate", "_vision.onnx"),
+            ("separate", "_text.onnx"),
+        ],
+    )
+    def test_existing_output_fails_before_model_load(
+        self,
+        encoder_type,
+        existing_suffix,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Existing combined or separate outputs are rejected immediately."""
+        output_file = tmp_path / "model.onnx"
+        existing_file = tmp_path / f"model{existing_suffix}"
+        existing_file.touch()
+        experiment = SimpleNamespace(
+            encryption_key="",
+            export=SimpleNamespace(
+                checkpoint="model.ckpt",
+                gpu_id=0,
+                on_cpu=True,
+                onnx_file=str(output_file),
+                encoder_type=encoder_type,
+            ),
+        )
+        monkeypatch.setattr(
+            export_module.VideoCLIPPlModel,
+            "load_from_checkpoint",
+            lambda *args, **kwargs: pytest.fail("model was loaded"),
+        )
+
+        with pytest.raises(FileExistsError, match=str(existing_file)):
+            run_export(experiment)
+
+    @pytest.mark.parametrize(
+        ("encoder_type", "partial_suffixes"),
+        [
+            (
+                "combined",
+                (".onnx", ".onnx.data", "_tokenizer"),
+            ),
+            (
+                "separate",
+                (
+                    "_vision.onnx",
+                    "_vision_weights.bin",
+                    "_text.onnx",
+                    "_config.yaml",
+                    "_tokenizer",
+                ),
+            ),
+        ],
+    )
+    def test_failed_export_removes_only_new_expected_artifacts(
+        self,
+        encoder_type,
+        partial_suffixes,
+        tmp_path,
+        monkeypatch,
+    ):
+        """A failed export is retryable without sweeping same-prefix files."""
+        output_file = tmp_path / "model.onnx"
+        unrelated_file = tmp_path / "model.notes"
+        unrelated_file.write_text("keep", encoding="utf-8")
+        experiment = SimpleNamespace(
+            export=SimpleNamespace(
+                checkpoint="model.ckpt",
+                onnx_file=str(output_file),
+                encoder_type=encoder_type,
+            ),
+        )
+
+        def _fail_after_writes(_experiment):
+            for suffix in partial_suffixes:
+                artifact = tmp_path / f"model{suffix}"
+                if suffix == "_tokenizer":
+                    artifact.mkdir()
+                    (artifact / "tokenizer.json").write_text(
+                        "partial", encoding="utf-8"
+                    )
+                else:
+                    artifact.write_text("partial", encoding="utf-8")
+            raise RuntimeError("parity mismatch")
+
+        monkeypatch.setattr(export_module, "_run_export_impl", _fail_after_writes)
+
+        with pytest.raises(RuntimeError, match="parity mismatch"):
+            run_export(experiment)
+
+        assert unrelated_file.read_text(encoding="utf-8") == "keep"
+        for suffix in partial_suffixes:
+            assert not (tmp_path / f"model{suffix}").exists()
+
+    def test_failed_export_preserves_preexisting_expected_artifact(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Rollback never removes an expected artifact it did not create."""
+        output_file = tmp_path / "model.onnx"
+        config_file = tmp_path / "model_config.yaml"
+        config_file.write_text("existing", encoding="utf-8")
+        experiment = SimpleNamespace(
+            export=SimpleNamespace(
+                checkpoint="model.ckpt",
+                onnx_file=str(output_file),
+                encoder_type="combined",
+            ),
+        )
+
+        def _fail_after_write(_experiment):
+            output_file.write_text("partial", encoding="utf-8")
+            raise RuntimeError("export failed")
+
+        monkeypatch.setattr(export_module, "_run_export_impl", _fail_after_write)
+
+        with pytest.raises(RuntimeError, match="export failed"):
+            run_export(experiment)
+
+        assert not output_file.exists()
+        assert config_file.read_text(encoding="utf-8") == "existing"

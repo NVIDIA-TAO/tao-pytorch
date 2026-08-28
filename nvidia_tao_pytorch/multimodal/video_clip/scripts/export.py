@@ -18,6 +18,7 @@
 
 import copy
 import os
+import shutil
 from typing import Optional, Tuple
 
 import numpy as np
@@ -886,7 +887,48 @@ def export_combined_encoder(
         return tmp_onnx_file
 
 
-def run_export(experiment_config: ExperimentConfig) -> None:
+def _expected_export_artifacts(export_config):
+    """Return the explicit files and directories an export may create."""
+    model_path = export_config.checkpoint
+    if not model_path:
+        return set()
+
+    output_file = export_config.onnx_file
+    if output_file is None:
+        output_file = f"{os.path.splitext(model_path)[0]}.onnx"
+
+    encoder_type = getattr(export_config, 'encoder_type', 'combined')
+    if encoder_type not in VALID_ENCODER_TYPES:
+        return set()
+
+    base_name, ext = os.path.splitext(output_file)
+    if encoder_type == 'combined':
+        encoder_files = (output_file,)
+    else:
+        encoder_files = (
+            f"{base_name}_vision{ext}",
+            f"{base_name}_text{ext}",
+        )
+
+    artifacts = {
+        f"{base_name}_config.yaml",
+        f"{base_name}_tokenizer",
+    }
+    for encoder_file in encoder_files:
+        artifacts.add(encoder_file)
+        onnx_file = (
+            f"{os.path.splitext(encoder_file)[0]}.onnx"
+            if encoder_file.endswith('.etlt') else encoder_file
+        )
+        artifacts.update({
+            onnx_file,
+            f"{onnx_file}.data",
+            f"{os.path.splitext(onnx_file)[0]}_weights.bin",
+        })
+    return artifacts
+
+
+def _run_export_impl(experiment_config: ExperimentConfig) -> None:
     """Run ONNX export for CLIP model.
 
     The encoder_type config option controls the export mode:
@@ -898,8 +940,15 @@ def run_export(experiment_config: ExperimentConfig) -> None:
     experiment_config : ExperimentConfig
         Experiment configuration containing export settings.
     """
-    register_checkpoint_safe_globals()
     export_config = experiment_config.export
+    model_path = export_config.checkpoint
+    if not model_path:
+        raise ValueError(
+            "A trained checkpoint is required for export. Set "
+            "export.checkpoint to a valid TAO checkpoint."
+        )
+
+    register_checkpoint_safe_globals()
     gpu_id = export_config.gpu_id
     on_cpu = export_config.on_cpu
 
@@ -907,7 +956,6 @@ def run_export(experiment_config: ExperimentConfig) -> None:
         torch.cuda.set_device(gpu_id)
 
     # Get export parameters
-    model_path = export_config.checkpoint
     key = experiment_config.encryption_key
     TLTPyTorchCookbook.set_passphrase(key)
 
@@ -923,13 +971,26 @@ def run_export(experiment_config: ExperimentConfig) -> None:
 
     # Set default output filename if checkpoint provided
     if output_file is None:
-        if model_path:
-            split_name = os.path.splitext(model_path)[0]
-            output_file = f"{split_name}.onnx"
-        else:
-            raise ValueError(
-                "onnx_file must be specified when exporting without checkpoint"
+        split_name = os.path.splitext(model_path)[0]
+        output_file = f"{split_name}.onnx"
+
+    vision_file = None
+    text_file = None
+    if encoder_type == 'combined':
+        if os.path.exists(output_file):
+            raise FileExistsError(
+                f"Output ONNX file already exists: {output_file}"
             )
+    else:
+        base_name = os.path.splitext(output_file)[0]
+        ext = os.path.splitext(output_file)[1]
+        vision_file = f"{base_name}_vision{ext}"
+        text_file = f"{base_name}_text{ext}"
+        for encoder_file in (vision_file, text_file):
+            if os.path.exists(encoder_file):
+                raise FileExistsError(
+                    f"Output ONNX file already exists: {encoder_file}"
+                )
 
     # Create output directory
     output_root = os.path.dirname(os.path.realpath(output_file))
@@ -938,28 +999,19 @@ def run_export(experiment_config: ExperimentConfig) -> None:
 
     device = 'cpu' if on_cpu else 'cuda'
 
-    # Load model from checkpoint or build from HuggingFace pretrained weights
-    if model_path:
-        logging.info(f"Loading model from checkpoint: {model_path}")
-        # Preservation regularization is training-only; skip the frozen-teacher
-        # deep copy so export does not carry a second copy of the backbone.
-        restore_config = copy.deepcopy(experiment_config)
-        restore_reg = getattr(restore_config, "regularization", None)
-        if restore_reg is not None and getattr(restore_reg, "enabled", False):
-            restore_reg.enabled = False
-        # pylint: disable=no-value-for-parameter
-        pl_model = VideoCLIPPlModel.load_from_checkpoint(
-            model_path,
-            map_location=device,
-            experiment_spec=restore_config
-        )
-    else:
-        logging.info(
-            f"No checkpoint provided. Building model from HuggingFace "
-            f"pretrained weights: {experiment_config.model.type}"
-        )
-        pl_model = VideoCLIPPlModel(experiment_config)
-        pl_model = pl_model.to(device)
+    logging.info(f"Loading model from checkpoint: {model_path}")
+    # Preservation regularization is training-only; skip the frozen-teacher
+    # deep copy so export does not carry a second copy of the backbone.
+    restore_config = copy.deepcopy(experiment_config)
+    restore_reg = getattr(restore_config, "regularization", None)
+    if restore_reg is not None and getattr(restore_reg, "enabled", False):
+        restore_reg.enabled = False
+    # pylint: disable=no-value-for-parameter
+    pl_model = VideoCLIPPlModel.load_from_checkpoint(
+        model_path,
+        map_location=device,
+        experiment_spec=restore_config
+    )
 
     # Match the vision dummy-input resolution to the model when the user left
     # the export defaults untouched. IV2-CLIP uses image_size=224 while the
@@ -993,10 +1045,6 @@ def run_export(experiment_config: ExperimentConfig) -> None:
 
     # Export based on encoder_type
     if encoder_type == 'combined':
-        if os.path.exists(output_file):
-            raise FileExistsError(
-                f"Output ONNX file already exists: {output_file}"
-            )
         logging.info("Exporting combined (vision + text) encoder")
         export_combined_encoder(
             pl_model,
@@ -1007,21 +1055,6 @@ def run_export(experiment_config: ExperimentConfig) -> None:
         )
 
     else:  # separate
-        base_name = os.path.splitext(output_file)[0]
-        ext = os.path.splitext(output_file)[1]
-
-        vision_file = f"{base_name}_vision{ext}"
-        text_file = f"{base_name}_text{ext}"
-
-        if os.path.exists(vision_file):
-            raise FileExistsError(
-                f"Output ONNX file already exists: {vision_file}"
-            )
-        if os.path.exists(text_file):
-            raise FileExistsError(
-                f"Output ONNX file already exists: {text_file}"
-            )
-
         logging.info(
             "Exporting vision and text encoders as separate ONNX files"
         )
@@ -1069,6 +1102,30 @@ def run_export(experiment_config: ExperimentConfig) -> None:
         adaptor_name=getattr(experiment_config.model, 'adaptor_name', None),
     )
     logging.info(f"Tokenizer saved to {tokenizer_dir}")
+
+
+def run_export(experiment_config: ExperimentConfig) -> None:
+    """Run export and remove artifacts created by a failed attempt."""
+    artifacts = _expected_export_artifacts(experiment_config.export)
+    existing_artifacts = {
+        path for path in artifacts if os.path.lexists(path)
+    }
+    try:
+        _run_export_impl(experiment_config)
+    except Exception:
+        for path in artifacts - existing_artifacts:
+            try:
+                if os.path.isdir(path) and not os.path.islink(path):
+                    shutil.rmtree(path)
+                elif os.path.lexists(path):
+                    os.remove(path)
+            except OSError as cleanup_error:
+                logging.warning(
+                    "Failed to clean partial export artifact %s: %s",
+                    path,
+                    cleanup_error,
+                )
+        raise
 
 
 spec_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

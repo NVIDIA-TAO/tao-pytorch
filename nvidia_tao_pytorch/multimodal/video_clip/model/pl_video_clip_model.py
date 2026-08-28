@@ -121,6 +121,12 @@ class VideoCLIPPlModel(TAOLightningModule):
         self.lora_stats = None
         if self.peft_enabled:
             self.lora_stats = inject_lora(self.model, peft_cfg)
+            trainable = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+            total = sum(p.numel() for p in self.model.parameters())
+            logging.info(
+                "LoRA trainable parameter summary: %s trainable / %s total (%.4f%%)",
+                f"{trainable:,}", f"{total:,}", 100.0 * trainable / max(total, 1),
+            )
 
         # Check if retrieval validation is configured (video_text only).
         val_cfg = getattr(self.experiment_spec.dataset, 'val', None)

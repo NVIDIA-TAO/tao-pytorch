@@ -403,6 +403,7 @@ def build_internvideo2clip_model(
     model_cfg,
     logit_scale_init=4.605170185988092,
     logit_bias_init=0.0,
+    log_parameters=True,
 ):
     """Build InternVideo2-CLIP L14 with preprocessing and tokenizer."""
     model = InternVideo2CLIP(
@@ -420,6 +421,7 @@ def build_internvideo2clip_model(
         use_flash_attn=model_cfg.use_flash_attn,
         use_fused_rmsnorm=model_cfg.use_fused_rmsnorm,
         use_fused_mlp=model_cfg.use_fused_mlp,
+        log_parameters=log_parameters,
     )
     transform = InternVideo2FrameTransform(image_size=model_cfg.image_size)
     return model, transform, transform, model.tokenizer

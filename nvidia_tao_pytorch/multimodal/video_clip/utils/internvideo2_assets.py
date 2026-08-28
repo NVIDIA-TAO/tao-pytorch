@@ -132,9 +132,18 @@ def _hf_download(repo_id, filename, label):
         )
     # No cache_dir/local_files_only: rely on ambient HF_HOME; cache-aware
     # (downloads only if missing). Token via the standard HF_TOKEN env if set.
-    resolved = hf_hub_download(
-        repo_id=repo_id, filename=filename, revision=revision,
-    )
+    try:
+        resolved = hf_hub_download(
+            repo_id=repo_id, filename=filename, revision=revision,
+        )
+    except (OSError, ValueError) as exc:
+        source_revision = revision or "main"
+        raise RuntimeError(
+            f"Hugging Face download failed for {label}: repo={repo_id}, "
+            f"file={filename}, revision={source_revision}. Stop and report "
+            "this error, or set the corresponding model field to an existing "
+            "local checkpoint before retrying."
+        ) from exc
     return _require_file(resolved, label)
 
 
