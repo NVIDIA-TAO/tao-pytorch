@@ -1,0 +1,113 @@
+# Fixed PAS V3.1.1 SigLIP2-256 + LoRA + Partial-negative Alignment profile.
+#
+# This is the non-AutoML, non-RandLoRA, non-384 configuration that produced
+# the recorded PA run. Replace only the data and results paths. Keep the model,
+# optimizer, LoRA, loss, split, and selection settings unchanged for a
+# reproduction run.
+results_dir: ???
+
+model:
+  type: siglip2-so400m-patch16-256
+  canonicalize_text: false
+  init_logit_scale: null
+  init_logit_bias: null
+
+dataset:
+  seed: 42
+  pin_memory: true
+  train:
+    type: custom
+    balance_query_types: false
+    unique_caption_per_batch: false
+    include_attribute_metadata: true
+    datasets:
+    - image_dir: /workspace/data/pas/images
+      image_list_file: /workspace/data/pas/train_list.txt
+      caption_dir: /workspace/data/pas/captions
+      caption_file_suffix: .txt
+      train_pairs_file: /workspace/data/pas/train_pairs.json
+    batch_size: 128
+    num_workers: 16
+  val:
+    datasets:
+    - image_dir: /workspace/data/pas/images
+      image_list_file: /workspace/data/pas/val_list.txt
+      caption_dir: /workspace/data/pas/captions
+      caption_file_suffix: .txt
+      attribute_pairs_file: /workspace/data/pas/val_pairs.json
+    metadata_match_eval: true
+    metadata_match_mode: scalar_plus_accessories
+    batch_size: 16
+    num_workers: 4
+  augmentation:
+    scale: [0.4, 1.0]
+    color_jitter: [0.8, 0.32, 0.32, 0.32, 0.08]
+    grayscale: 0.2
+
+train:
+  num_epochs: 20
+  num_gpus: 8
+  gpu_ids: [0, 1, 2, 3, 4, 5, 6, 7]
+  num_nodes: 1
+  seed: 1234
+  precision: fp16
+  distributed_strategy: ddp
+  grad_checkpointing: false
+  grad_clip_norm: 1.0
+  checkpoint_interval: 1
+  checkpoint_interval_unit: epoch
+  validation_interval: 1
+  checkpointer:
+    enable_topk: true
+    replace_periodic: true
+    monitor: val/pas/overall_mAP
+    mode: max
+    save_top_k: 1
+    filename: model_best_{epoch:03d}
+    auto_insert_metric_name: false
+  loss_type: siglip
+  siglip_loss_dist_impl: gather
+  siglip_loss_mask_mode: attribute_plus_accessory_match_positive
+  compatible_positive_weight: 0.5
+  compatible_positive_normalization: per_query
+  triplet_loss_weight: 0.0
+  pa_loss_weight: 0.01232533396889774
+  pa_margin: 0.1976525764912367
+  pa_inverse_temperature: 1.9850472486080717
+  pa_top_ratio: 0.07580481977201999
+  optim:
+    optimizer_type: adamw
+    vision_lr: 9.13971426614473e-06
+    text_lr: 2.9080338560326244e-05
+    weight_decay: 0.002249987748436666
+    betas: [0.9, 0.95]
+    eps: 1.0e-06
+    warmup_steps: 0
+    scheduler: cosine
+
+peft:
+  enabled: true
+  method: lora
+  train_logit_calibration: true
+  vision:
+    mode: lora
+    target_modules: [q_proj, k_proj, v_proj, out_proj]
+    num_last_blocks: 24
+    rank: 64
+    alpha: 128
+    dropout: 0.10093809460006695
+  text:
+    mode: lora
+    target_modules: [q_proj, k_proj, v_proj, out_proj]
+    num_last_blocks: 24
+    rank: 64
+    alpha: 128
+    dropout: 0.009450008726896691
+
+regularization:
+  enabled: false
+
+evaluate:
+  checkpoint: ???
+  batch_size: 128
+  pas_ground_truth_mode: scalar_plus_accessories

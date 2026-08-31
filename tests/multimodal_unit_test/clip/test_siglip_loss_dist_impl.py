@@ -47,8 +47,10 @@ def _build_siglip_loss(
                 train=SimpleNamespace(
                     include_attribute_metadata=include_attribute_metadata,
                     type=dataset_type,
+                    datasets=[SimpleNamespace()],
                 ),
             ),
+            train=CLIPTrainConfig(),
         ),
     )
     CLIPPlModel._build_criterion(model)
@@ -69,6 +71,9 @@ class TestSigLipLossDistImpl:
             "siglip_loss_mask_mode"
         ]
         assert "attribute_plus_accessory_match_ignore" in (
+            mask_field.metadata["valid_options"].split(",")
+        )
+        assert "attribute_plus_accessory_match_positive" in (
             mask_field.metadata["valid_options"].split(",")
         )
 
@@ -124,6 +129,17 @@ class TestSigLipLossDistImpl:
 
         assert isinstance(loss, MetadataMaskedSigLipLoss)
         assert loss.accessory_aware is True
+
+    def test_positive_mask_mode_promotes_compatible_pairs(self):
+        """Test positive mode is wired to the metadata-aware loss."""
+        loss = _build_siglip_loss(
+            "local",
+            mask_mode="attribute_plus_accessory_match_positive",
+        )
+
+        assert isinstance(loss, MetadataMaskedSigLipLoss)
+        assert loss.accessory_aware is True
+        assert loss.compatible_as_positive is True
 
     @pytest.mark.parametrize(
         "mask_mode",
