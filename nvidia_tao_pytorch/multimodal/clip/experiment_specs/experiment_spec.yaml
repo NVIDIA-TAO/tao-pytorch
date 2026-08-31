@@ -10,10 +10,17 @@ train:
   pretrained_model_path: null
   loss_type: siglip  # siglip or clip
   siglip_loss_dist_impl: gather  # metadata masking supports local or gather
-  # none, attribute_match_ignore, or attribute_plus_accessory_match_ignore
+  # none, attribute_match_ignore, attribute_plus_accessory_match_ignore,
+  # attribute_match_positive, or attribute_plus_accessory_match_positive
   siglip_loss_mask_mode: none
+  compatible_positive_weight: 1.0
+  compatible_positive_normalization: per_pair  # per_pair or per_query
   triplet_loss_weight: 0.0  # set > 0 to enable triplet loss
   triplet_margin: 0.2
+  pa_loss_weight: 0.0  # set > 0 to enable Partial-negative Alignment
+  pa_margin: 0.2
+  pa_inverse_temperature: 10.0
+  pa_top_ratio: 0.5
   optim:
     optimizer_type: adamw  # adamw, lamb, or sgd
     vision_lr: 1e-4

@@ -750,3 +750,70 @@ class TestMetadataMaskedSigLipLoss:
                 image_attr_values=attr_values,
                 text_attr_values=attr_values,
             )
+
+
+def test_positive_mode_promotes_compatible_off_diagonal_terms():
+    """Compatible metadata pairs become weighted positives when enabled."""
+    labels = torch.tensor([
+        [1.0, -1.0, -1.0],
+        [-1.0, 1.0, -1.0],
+        [-1.0, -1.0, 1.0],
+    ])
+    metadata_match = torch.tensor([
+        [True, True, False],
+        [True, True, False],
+        [False, False, True],
+    ])
+    valid_terms = torch.eye(3, dtype=torch.bool) | ~metadata_match
+    loss = MetadataMaskedSigLipLoss(
+        compatible_as_positive=True,
+        compatible_positive_weight=0.5,
+    )
+
+    targets, valid, weights, promoted = loss.get_targets_and_term_weights(
+        labels=labels,
+        valid_terms=valid_terms,
+        metadata_match=metadata_match,
+        positive_text_indices=torch.arange(3),
+    )
+
+    assert promoted[0, 1] and promoted[1, 0]
+    assert targets[0, 1] == 1 and targets[1, 0] == 1
+    assert valid[0, 1] and valid[1, 0]
+    assert weights[0, 1] == 0.5 and weights[1, 0] == 0.5
+
+
+def test_positive_mode_per_query_normalizes_promoted_weight():
+    """Per-query weighting keeps total promoted weight bounded."""
+    labels = -torch.ones(3, 3)
+    labels.fill_diagonal_(1)
+    metadata_match = torch.ones(3, 3, dtype=torch.bool)
+    valid_terms = torch.eye(3, dtype=torch.bool)
+    loss = MetadataMaskedSigLipLoss(
+        compatible_as_positive=True,
+        compatible_positive_weight=0.6,
+        compatible_positive_normalization="per_query",
+    )
+
+    _, _, weights, promoted = loss.get_targets_and_term_weights(
+        labels=labels,
+        valid_terms=valid_terms,
+        metadata_match=metadata_match,
+        positive_text_indices=torch.arange(3),
+    )
+
+    for column in range(3):
+        assert torch.isclose(
+            weights[:, column].masked_select(promoted[:, column]).sum(),
+            torch.tensor(0.6),
+        )
+
+
+def test_positive_mode_validates_weight_and_normalization():
+    """Invalid compatible-positive controls fail before training."""
+    with pytest.raises(ValueError, match="non-negative"):
+        MetadataMaskedSigLipLoss(compatible_positive_weight=-0.1)
+    with pytest.raises(ValueError, match="per_pair.*per_query"):
+        MetadataMaskedSigLipLoss(
+            compatible_positive_normalization="unsupported"
+        )

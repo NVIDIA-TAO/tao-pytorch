@@ -30,6 +30,9 @@ from nvidia_tao_pytorch.multimodal.clip.model.logit_calibration import (  # noqa
 from nvidia_tao_pytorch.multimodal.clip.loss.masked_siglip_loss import (  # noqa: E402
     MetadataMaskedSigLipLoss,
 )
+from nvidia_tao_pytorch.multimodal.clip.loss.partial_negative_alignment_loss import (  # noqa: E402
+    partial_negative_alignment_loss,
+)
 from nvidia_tao_pytorch.multimodal.clip.utils.utils import (  # noqa: E402
     build_optimizer,
     compute_lr,
@@ -266,6 +269,18 @@ class CLIPPlModel(TAOLightningModule):
         self.triplet_margin = getattr(
             self.experiment_spec.train, "triplet_margin", 0.2
         )
+        self.pa_loss_weight = getattr(
+            self.experiment_spec.train, "pa_loss_weight", 0.0
+        )
+        self.pa_margin = getattr(
+            self.experiment_spec.train, "pa_margin", 0.2
+        )
+        self.pa_inverse_temperature = getattr(
+            self.experiment_spec.train, "pa_inverse_temperature", 10.0
+        )
+        self.pa_top_ratio = getattr(
+            self.experiment_spec.train, "pa_top_ratio", 0.5
+        )
 
         # PEFT and regularization setup
         peft_cfg = getattr(self.experiment_spec, 'peft', None)
@@ -339,6 +354,8 @@ class CLIPPlModel(TAOLightningModule):
             if siglip_mask_mode in (
                 "attribute_match_ignore",
                 "attribute_plus_accessory_match_ignore",
+                "attribute_match_positive",
+                "attribute_plus_accessory_match_positive",
             ):
                 train_data_cfg = self.experiment_spec.dataset.train
                 if not getattr(
@@ -354,6 +371,19 @@ class CLIPPlModel(TAOLightningModule):
                         f"siglip_loss_mask_mode={siglip_mask_mode!r} requires "
                         "dataset.train.type='custom', got "
                         f"{train_data_type!r}."
+                    )
+                compatible_as_positive = siglip_mask_mode.endswith(
+                    "_positive"
+                )
+                if (
+                    compatible_as_positive and
+                    len(train_data_cfg.datasets) != 1
+                ):
+                    raise ValueError(
+                        f"siglip_loss_mask_mode={siglip_mask_mode!r} "
+                        "currently requires exactly one custom source "
+                        "dataset so compatible positives cannot cross "
+                        "dataset identities."
                     )
                 if self.siglip_loss_dist_impl not in ("local", "gather"):
                     raise NotImplementedError(
@@ -376,13 +406,27 @@ class CLIPPlModel(TAOLightningModule):
                         self.trainer.world_size,
                         siglip_loss_world_size,
                     )
+                train_cfg = getattr(self.experiment_spec, "train", None)
                 self.loss = MetadataMaskedSigLipLoss(
                     dist_impl=self.siglip_loss_dist_impl,
                     world_size=siglip_loss_world_size,
                     rank=siglip_loss_rank,
                     accessory_aware=(
-                        siglip_mask_mode ==
-                        "attribute_plus_accessory_match_ignore"
+                        siglip_mask_mode in (
+                            "attribute_plus_accessory_match_ignore",
+                            "attribute_plus_accessory_match_positive",
+                        )
+                    ),
+                    compatible_as_positive=compatible_as_positive,
+                    compatible_positive_weight=getattr(
+                        train_cfg,
+                        "compatible_positive_weight",
+                        1.0,
+                    ),
+                    compatible_positive_normalization=getattr(
+                        train_cfg,
+                        "compatible_positive_normalization",
+                        "per_pair",
                     ),
                 )
                 self.criterion = self.loss
@@ -630,6 +674,37 @@ class CLIPPlModel(TAOLightningModule):
             loss_value = contrastive_loss
             preservation_active = False
 
+        if (
+            isinstance(self.loss, MetadataMaskedSigLipLoss) and
+            self.loss.compatible_as_positive
+        ):
+            self.log(
+                "train/compatible_positive_pairs_per_rank",
+                self.loss.last_compatible_positive_pairs,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=False,
+                sync_dist=True,
+                batch_size=batch_size,
+            )
+
+        # PA treats metadata-compatible matches as positives rather than
+        # mining them as negatives.
+        compatible_mask = None
+        if self.pa_loss_weight > 0:
+            if isinstance(self.loss, MetadataMaskedSigLipLoss):
+                metadata = _get_attribute_metadata_from_batch(
+                    batch,
+                    context="metadata-aware ranking loss",
+                    require_accessories=self.loss.accessory_aware,
+                )
+                compatible_mask = self.loss.get_metadata_match_mask(
+                    image_attr_values=metadata["image_attr_values"],
+                    text_attr_values=metadata["text_attr_values"],
+                    image_accessory_ids=metadata.get("image_accessory_ids"),
+                    text_accessory_ids=metadata.get("text_accessory_ids"),
+                )
+
         # Optional batch-hard triplet loss, applied on top of the target.
         if self.triplet_loss_weight > 0:
             triplet_loss = _batch_hard_image_text_triplet_loss(
@@ -644,6 +719,27 @@ class CLIPPlModel(TAOLightningModule):
                 sync_dist=True, batch_size=batch_size,
             )
             if not preservation_active:
+                self.log(
+                    "train/contrastive_loss", contrastive_loss,
+                    on_step=True, on_epoch=True, prog_bar=False,
+                    sync_dist=True, batch_size=batch_size,
+                )
+        if self.pa_loss_weight > 0:
+            pa_loss = partial_negative_alignment_loss(
+                image_features,
+                text_features,
+                self.pa_margin,
+                self.pa_inverse_temperature,
+                self.pa_top_ratio,
+                compatible_mask=compatible_mask,
+            )
+            loss_value = loss_value + self.pa_loss_weight * pa_loss
+            self.log(
+                "train/pa_loss", pa_loss,
+                on_step=True, on_epoch=True, prog_bar=False,
+                sync_dist=True, batch_size=batch_size,
+            )
+            if not preservation_active and self.triplet_loss_weight <= 0:
                 self.log(
                     "train/contrastive_loss", contrastive_loss,
                     on_step=True, on_epoch=True, prog_bar=False,

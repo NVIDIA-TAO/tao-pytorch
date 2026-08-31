@@ -606,19 +606,43 @@ class CLIPTrainConfig(TrainConfig):
         default_value="none",
         valid_options=(
             "none,attribute_match_ignore,"
-            "attribute_plus_accessory_match_ignore"
+            "attribute_plus_accessory_match_ignore,"
+            "attribute_match_positive,"
+            "attribute_plus_accessory_match_positive"
         ),
         description=(
             "Optional metadata-based masking mode for SigLIP loss. "
             "'none' keeps existing behavior; 'attribute_match_ignore' ignores "
             "off-diagonal negatives whose attributes match the text query; "
             "'attribute_plus_accessory_match_ignore' additionally requires "
-            "all query accessories to be present in the image. "
+            "all query accessories to be present in the image. The positive "
+            "variants promote compatible off-diagonal pairs to positives and "
+            "currently require exactly one custom source dataset. "
             "Metadata masking supports siglip_loss_dist_impl='local' or "
             "'gather' and requires "
             "include_attribute_metadata=True on the custom training dataset."
         ),
         display_name="SigLIP Loss Mask Mode",
+    )
+    compatible_positive_weight: float = FLOAT_FIELD(
+        value=1.0,
+        default_value=1.0,
+        valid_min=0.0,
+        description=(
+            "Weight for metadata-compatible off-diagonal terms when a "
+            "positive SigLIP metadata mode is selected."
+        ),
+        display_name="Compatible Positive Weight",
+    )
+    compatible_positive_normalization: str = STR_FIELD(
+        value="per_pair",
+        default_value="per_pair",
+        valid_options="per_pair,per_query",
+        description=(
+            "Apply compatible_positive_weight to every promoted pair or "
+            "divide it across all promoted images for each text query."
+        ),
+        display_name="Compatible Positive Normalization",
     )
     triplet_loss_weight: float = FLOAT_FIELD(
         value=0.0,
@@ -636,6 +660,38 @@ class CLIPTrainConfig(TrainConfig):
         valid_min=0.0,
         description="Margin for auxiliary batch-hard image-text triplet loss.",
         display_name="Triplet Margin",
+    )
+    pa_loss_weight: float = FLOAT_FIELD(
+        value=0.0,
+        default_value=0.0,
+        valid_min=0.0,
+        description=(
+            "Weight for the Partial-negative Alignment auxiliary loss. "
+            "Set to 0 to disable."
+        ),
+        display_name="PA Loss Weight",
+    )
+    pa_margin: float = FLOAT_FIELD(
+        value=0.2,
+        default_value=0.2,
+        valid_min=0.0,
+        description="Margin for Partial-negative Alignment loss.",
+        display_name="PA Margin",
+    )
+    pa_inverse_temperature: float = FLOAT_FIELD(
+        value=10.0,
+        default_value=10.0,
+        valid_min=0.000001,
+        description="Inverse temperature (1/tau) for PA hard-negative mining.",
+        display_name="PA Inverse Temperature",
+    )
+    pa_top_ratio: float = FLOAT_FIELD(
+        value=0.5,
+        default_value=0.5,
+        valid_min=0.000001,
+        valid_max=1.0,
+        description="Fraction of highest-similarity valid negatives used by PA.",
+        display_name="PA Top Negative Ratio",
     )
 
     precision: str = STR_FIELD(
