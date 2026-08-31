@@ -69,6 +69,7 @@ ENV RUN_CLI=0
 # layers and overlay2 caps a container at 128, so every extra RUN/COPY layer counts;
 # collapsing these three steps into one keeps the release image buildable.
 RUN cd /opt/nvidia/wheels && ls ./*.whl | xargs -I'{}' python -m pip install '{}' && rm -f *.whl && \
+    python -m pip install 'av==17.1.0' 'onnxscript==0.7.1' && \
     python -c 'import importlib.util; from importlib.metadata import version; import av, onnxscript; assert version("av") == "17.1.0"; assert version("onnxscript") == "0.7.1"; assert importlib.util.find_spec("decord") is None; print(f"FC video dependencies: av={av.__version__}, onnxscript={onnxscript.__version__}, decord=absent")' && \
     ARCH_LIB_PATH="/usr/lib/$(uname -m)-linux-gnu" && \
     sed -i "s|export LD_LIBRARY_PATH=${ARCH_LIB_PATH}:\${LD_LIBRARY_PATH}|export LD_LIBRARY_PATH=\${LD_LIBRARY_PATH}:${ARCH_LIB_PATH}|g" /etc/bash.bashrc && \
