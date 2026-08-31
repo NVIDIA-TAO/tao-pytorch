@@ -160,8 +160,9 @@ class MockPEFTConfig:
                  dropout=0.0):
         self.enabled = enabled
         self.method = 'lora'
+        self.train_logit_calibration = True
         self.vision = MockLoRATargetConfig(
-            enabled=vision_enabled,
+            mode='lora' if vision_enabled else 'frozen',
             target_modules=target_modules or ['q_proj', 'k_proj', 'v_proj', 'out_proj'],
             num_last_blocks=num_last_blocks,
             rank=rank,
@@ -169,7 +170,7 @@ class MockPEFTConfig:
             dropout=dropout,
         )
         self.text = MockLoRATargetConfig(
-            enabled=text_enabled,
+            mode='lora' if text_enabled else 'frozen',
             target_modules=['q_proj', 'k_proj', 'v_proj', 'out_proj'],
             num_last_blocks=2,
             rank=rank,
@@ -181,9 +182,9 @@ class MockPEFTConfig:
 class MockLoRATargetConfig:
     """Mock CLIPLoRATargetConfig."""
 
-    def __init__(self, enabled=True, target_modules=None, num_last_blocks=3,
+    def __init__(self, mode='lora', target_modules=None, num_last_blocks=3,
                  rank=4, alpha=8, dropout=0.0):
-        self.enabled = enabled
+        self.mode = mode
         self.target_modules = target_modules or ['q_proj', 'k_proj', 'v_proj', 'out_proj']
         self.num_last_blocks = num_last_blocks
         self.rank = rank

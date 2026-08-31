@@ -121,14 +121,14 @@ train:
 #   enabled: true
 #   method: lora
 #   vision:                      # InternVideo2 vision tower (24 blocks)
-#     enabled: true
+#     mode: lora
 #     target_modules: [qkv, proj]
 #     num_last_blocks: 3         # 0 = all blocks
 #     rank: 8
 #     alpha: 16
 #     dropout: 0.05
 #   text:                        # MobileCLIP text tower (12 blocks)
-#     enabled: false
+#     mode: frozen
 #     target_modules: [qkv_proj, out_proj]
 #     num_last_blocks: 3
 #     rank: 8

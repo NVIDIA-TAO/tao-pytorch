@@ -165,9 +165,9 @@ class MockTransformerCLIP(BaseCLIPAdapter):
 
 
 class MockLoRATargetConfig:
-    def __init__(self, enabled=True, target_modules=None,
+    def __init__(self, mode='lora', target_modules=None,
                  num_last_blocks=2, rank=4, alpha=8, dropout=0.0):
-        self.enabled = enabled
+        self.mode = mode
         self.target_modules = target_modules or [
             'q_proj', 'k_proj', 'v_proj', 'out_proj'
         ]
@@ -182,8 +182,10 @@ class MockPEFTConfig:
                  **kwargs):
         self.enabled = enabled
         self.method = 'lora'
-        self.vision = MockLoRATargetConfig(enabled=vision_enabled, **kwargs)
-        self.text = MockLoRATargetConfig(enabled=text_enabled, **kwargs)
+        self.vision = MockLoRATargetConfig(
+            mode='lora' if vision_enabled else 'frozen', **kwargs)
+        self.text = MockLoRATargetConfig(
+            mode='lora' if text_enabled else 'frozen', **kwargs)
 
 
 class MockRegConfig:

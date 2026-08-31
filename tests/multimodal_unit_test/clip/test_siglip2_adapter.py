@@ -3,10 +3,13 @@
 
 """Unit tests for SigLIP2 adapter with mocked model loading."""
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 import pytest
 import torch
 import torch.nn as nn
+
+from nvidia_tao_pytorch.multimodal.clip.model.adapters.siglip2 import SigLIP2
+from nvidia_tao_pytorch.multimodal.clip.model.lora import LoRALinear
 
 
 class MockSigLIP2Vision(nn.Module):
@@ -203,3 +206,98 @@ class TestSigLIP2BuilderFunctions:
 
         assert abs(default_scale - 2.3026) < 1e-4
         assert abs(default_bias - (-10.0)) < 1e-4
+
+
+@pytest.mark.multimodal_unit
+class TestSigLIP2GradientCheckpointing:
+    """Test gradient checkpointing for frozen SigLIP2 LoRA towers."""
+
+    def test_adapter_configures_both_towers_and_disables_checkpointing(self):
+        """The HF root propagates non-reentrant checkpointing to both towers."""
+        from transformers import Siglip2Config, Siglip2Model
+
+        config = Siglip2Config(
+            text_config={
+                'vocab_size': 32,
+                'hidden_size': 16,
+                'intermediate_size': 32,
+                'num_hidden_layers': 1,
+                'num_attention_heads': 4,
+                'max_position_embeddings': 8,
+            },
+            vision_config={
+                'hidden_size': 16,
+                'intermediate_size': 32,
+                'num_hidden_layers': 1,
+                'num_attention_heads': 4,
+                'patch_size': 2,
+                'num_channels': 3,
+            },
+        )
+        model = Siglip2Model(config)
+        adapter = MagicMock()
+        adapter.backbone.inner = model
+
+        with patch.object(
+            model,
+            'gradient_checkpointing_enable',
+            wraps=model.gradient_checkpointing_enable,
+        ) as enable_mock:
+            SigLIP2.set_grad_checkpointing(adapter, enable=True)
+
+        enable_mock.assert_called_once_with(
+            gradient_checkpointing_kwargs={'use_reentrant': False}
+        )
+        assert model.text_model.encoder.gradient_checkpointing
+        assert model.vision_model.encoder.gradient_checkpointing
+
+        with patch.object(
+            model,
+            'gradient_checkpointing_disable',
+            wraps=model.gradient_checkpointing_disable,
+        ) as disable_mock:
+            SigLIP2.set_grad_checkpointing(adapter, enable=False)
+
+        disable_mock.assert_called_once_with()
+        assert not model.text_model.encoder.gradient_checkpointing
+        assert not model.vision_model.encoder.gradient_checkpointing
+
+    def test_frozen_checkpointed_text_tower_preserves_lora_gradients(self):
+        """Non-reentrant checkpointing keeps LoRA gradients on a frozen tower."""
+        from transformers import Siglip2TextConfig, Siglip2TextModel
+
+        config = Siglip2TextConfig(
+            vocab_size=32,
+            hidden_size=16,
+            intermediate_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            max_position_embeddings=8,
+        )
+        model = Siglip2TextModel(config).train()
+        model.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs={'use_reentrant': False}
+        )
+        for parameter in model.parameters():
+            parameter.requires_grad = False
+        attention = model.text_model.encoder.layers[0].self_attn
+        attention.q_proj = LoRALinear(
+            attention.q_proj, rank=2, alpha=4, dropout=0.0
+        )
+
+        input_ids = torch.randint(0, config.vocab_size, (2, 8))
+        attention_mask = torch.ones_like(input_ids)
+        output = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+        ).last_hidden_state
+        output.sum().backward()
+
+        lora_gradients = [
+            parameter.grad
+            for name, parameter in model.named_parameters()
+            if 'lora_' in name
+        ]
+        assert lora_gradients
+        assert all(gradient is not None for gradient in lora_gradients)
+        assert any(torch.count_nonzero(gradient) for gradient in lora_gradients)

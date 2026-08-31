@@ -25,7 +25,6 @@ fused-QKV blocks, and that the two config copies stay field-identical.
 """
 
 import pytest
-import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -133,7 +132,7 @@ class TestVideoCLIPConfigDefaults:
     def test_disabled_by_default(self):
         peft = VideoCLIPPEFTConfig()
         assert peft.enabled is False
-        assert peft.vision.enabled is False and peft.text.enabled is False
+        assert peft.vision.mode == 'frozen' and peft.text.mode == 'frozen'
         assert VideoCLIPRegularizationConfig().enabled is False
 
     def test_target_modules_match_internvideo2(self):
@@ -178,9 +177,9 @@ class TestInjectLoRAVideoCLIP:
     def _peft(self, vision=True, text=True, num_last_blocks=3):
         peft = VideoCLIPPEFTConfig()
         peft.enabled = True
-        peft.vision.enabled = vision
+        peft.vision.mode = 'lora' if vision else 'frozen'
         peft.vision.num_last_blocks = num_last_blocks
-        peft.text.enabled = text
+        peft.text.mode = 'lora' if text else 'frozen'
         peft.text.num_last_blocks = num_last_blocks
         return peft
 
@@ -193,7 +192,10 @@ class TestInjectLoRAVideoCLIP:
 
     def test_only_lora_and_logit_trainable(self):
         m = MockIV2Adapter()
-        inject_lora(m, self._peft())
+        stats = inject_lora(m, self._peft())
+        assert m.logit_scale.requires_grad
+        assert m.logit_bias.requires_grad
+        assert stats['logit_trainable_params'] == 2
         leftover = [
             n for n, p in m.named_parameters()
             if p.requires_grad and 'lora_A' not in n and 'lora_B' not in n

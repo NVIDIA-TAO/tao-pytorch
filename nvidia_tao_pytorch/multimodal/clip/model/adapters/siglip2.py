@@ -169,18 +169,13 @@ class SigLIP2(BaseCLIPAdapter):
 
     def set_grad_checkpointing(self, enable=True):
         """Enable gradient checkpointing for memory efficiency."""
-        vision = self.backbone.inner.vision_model
-        if hasattr(vision, 'gradient_checkpointing_enable'):
-            if enable:
-                vision.gradient_checkpointing_enable()
-            else:
-                vision.gradient_checkpointing_disable()
-        text = self.backbone.inner.text_model
-        if hasattr(text, 'gradient_checkpointing_enable'):
-            if enable:
-                text.gradient_checkpointing_enable()
-            else:
-                text.gradient_checkpointing_disable()
+        model = self.backbone.inner
+        if enable:
+            model.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs={'use_reentrant': False}
+            )
+        else:
+            model.gradient_checkpointing_disable()
 
     def encode_image(self, image, normalize=True):
         """Encode images using backbone_v2 SigLIP2.
