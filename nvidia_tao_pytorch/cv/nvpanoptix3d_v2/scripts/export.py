@@ -21,16 +21,70 @@ from nvidia_tao_pytorch.core.decorators.workflow import monitor_status
 from nvidia_tao_pytorch.core.hydra.hydra_runner import hydra_runner
 from nvidia_tao_pytorch.core.tlt_logging import logging
 
-from nvidia_tao_pytorch.config.nvpanoptix3d_v2.default_config import ExperimentConfig
-from nvidia_tao_pytorch.cv.nvpanoptix3d_v2.model.build_pl_model import PANOPTIC, load_pl_model
-from nvidia_tao_pytorch.cv.nvpanoptix3d_v2.export.onnx_exporter import (
-    INPUT_NAME,
-    NVPanoptix3Dv2PanopticExportWrapper,
-    ONNXExporter,
-    encode_vocabulary,
-    export_safe_metric_scale_head,
-    write_vocabulary_sidecar,
-)
+# The NVPanoptix3Dv2 config, dataloader, model, and export packages are
+# delivered by companion patches in this feature series, so they may not be
+# present on disk yet. Import them defensively -- mirroring the deferred-import
+# convention already used elsewhere in this series -- so this script stays
+# importable (and statically checkable) in the meantime. Each symbol falls back
+# to a placeholder that raises a descriptive ImportError the moment it is
+# actually used, rather than failing later with an opaque always-False
+# comparison or ``NoneType`` error far from the real cause. Once the companion
+# packages land the ``try`` branch simply succeeds and behavior is unchanged.
+try:
+    from nvidia_tao_pytorch.config.nvpanoptix3d_v2.default_config import ExperimentConfig
+    from nvidia_tao_pytorch.cv.nvpanoptix3d_v2.model.build_pl_model import PANOPTIC, load_pl_model
+    from nvidia_tao_pytorch.cv.nvpanoptix3d_v2.export.onnx_exporter import (
+        INPUT_NAME,
+        NVPanoptix3Dv2PanopticExportWrapper,
+        ONNXExporter,
+        encode_vocabulary,
+        export_safe_metric_scale_head,
+        write_vocabulary_sidecar,
+    )
+except ImportError as _nvp2_import_error:  # pragma: no cover - only before the companion packages land
+    class _MissingNVPanoptix3Dv2Symbol:
+        """Placeholder for a symbol whose module has not landed yet.
+
+        Calling the placeholder or comparing it against another value raises a
+        descriptive ImportError naming the symbol and its module. ``__repr__``
+        stays safe so tracebacks and debuggers can render it without a
+        secondary failure.
+        """
+
+        def __init__(self, symbol, module, cause):
+            """Record the symbol name, its owning module, and the original error."""
+            self._symbol = symbol
+            self._module = module
+            self._cause = cause
+
+        def _raise(self, *_args, **_kwargs):
+            """Raise a descriptive ImportError naming the missing symbol."""
+            raise ImportError(
+                f"'{self._symbol}' requires the '{self._module}' module, which is not "
+                f"available in this installation. Original import error: {self._cause}"
+            ) from self._cause
+
+        __call__ = _raise
+        __eq__ = _raise
+        __ne__ = _raise
+
+        def __repr__(self):
+            """Render safely so tracebacks do not raise a second error."""
+            return f"<missing symbol {self._symbol!r} from {self._module!r}>"
+
+    _CONFIG_MODULE = "nvidia_tao_pytorch.config.nvpanoptix3d_v2.default_config"
+    _MODEL_MODULE = "nvidia_tao_pytorch.cv.nvpanoptix3d_v2.model.build_pl_model"
+    _EXPORT_MODULE = "nvidia_tao_pytorch.cv.nvpanoptix3d_v2.export.onnx_exporter"
+
+    ExperimentConfig = _MissingNVPanoptix3Dv2Symbol("ExperimentConfig", _CONFIG_MODULE, _nvp2_import_error)
+    PANOPTIC = _MissingNVPanoptix3Dv2Symbol("PANOPTIC", _MODEL_MODULE, _nvp2_import_error)
+    load_pl_model = _MissingNVPanoptix3Dv2Symbol("load_pl_model", _MODEL_MODULE, _nvp2_import_error)
+    INPUT_NAME = _MissingNVPanoptix3Dv2Symbol("INPUT_NAME", _EXPORT_MODULE, _nvp2_import_error)
+    NVPanoptix3Dv2PanopticExportWrapper = _MissingNVPanoptix3Dv2Symbol("NVPanoptix3Dv2PanopticExportWrapper", _EXPORT_MODULE, _nvp2_import_error)
+    ONNXExporter = _MissingNVPanoptix3Dv2Symbol("ONNXExporter", _EXPORT_MODULE, _nvp2_import_error)
+    encode_vocabulary = _MissingNVPanoptix3Dv2Symbol("encode_vocabulary", _EXPORT_MODULE, _nvp2_import_error)
+    export_safe_metric_scale_head = _MissingNVPanoptix3Dv2Symbol("export_safe_metric_scale_head", _EXPORT_MODULE, _nvp2_import_error)
+    write_vocabulary_sidecar = _MissingNVPanoptix3Dv2Symbol("write_vocabulary_sidecar", _EXPORT_MODULE, _nvp2_import_error)
 
 
 def resolve_export_vocabulary(experiment_config):
@@ -51,9 +105,17 @@ def resolve_export_vocabulary(experiment_config):
         logging.info(f"Exporting against {len(classes)} classes from {categories_json}")
         return classes, categories
 
-    from nvidia_tao_pytorch.cv.nvpanoptix3d_v2.dataloader.panoptic.pl_data_module import (
-        resolve_vocabulary,
-    )
+    # Deferred import: the panoptic data module ships with the companion
+    # dataloader patch (see the module-level note above).
+    try:
+        from nvidia_tao_pytorch.cv.nvpanoptix3d_v2.dataloader.panoptic.pl_data_module import (
+            resolve_vocabulary,
+        )
+    except ImportError as err:  # pragma: no cover - only before the companion packages land
+        raise ImportError(
+            "'resolve_vocabulary' requires the 'nvidia_tao_pytorch.cv.nvpanoptix3d_v2.dataloader.panoptic.pl_data_module' "
+            "module, which is not available in this installation."
+        ) from err
     vocabulary = resolve_vocabulary(experiment_config.dataset.panoptic)
 
     classes = list(vocabulary["classes"])
