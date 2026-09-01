@@ -34,16 +34,43 @@ from nvidia_tao_pytorch.cv.nvpanoptix3d_v2.model.reasoning.reasoning_model impor
     SegToSAMPromptProjector,
     set_requires_grad,
 )
-from nvidia_tao_pytorch.cv.nvpanoptix3d_v2.utils.reasoning.masks import (
-    gather_view_masks,
-)
-from nvidia_tao_pytorch.cv.nvpanoptix3d_v2.utils.reasoning.score import (
-    CanonicalPointCloudMetrics,
-    score_batch_on_canonical_points,
-)
-from nvidia_tao_pytorch.cv.nvpanoptix3d_v2.utils.reasoning.losses import (
-    NVPanoptix3Dv2ReasoningLoss,
-)
+# The ``nvidia_tao_pytorch.cv.nvpanoptix3d_v2.utils`` package is delivered by a
+# follow-up patch in this feature series, so it may not be present on disk yet.
+# Import it defensively -- mirroring the deferred-import convention already used
+# by ``build_pl_model.pl_module_class`` -- so this module stays importable (and
+# statically checkable) in the meantime. Each symbol falls back to a placeholder
+# that raises a descriptive ImportError if it is ever actually used, rather than
+# failing later with an opaque ``NoneType`` error far from the real cause. Once
+# the utils package lands the ``try`` branch simply succeeds and behavior is
+# unchanged.
+try:
+    from nvidia_tao_pytorch.cv.nvpanoptix3d_v2.utils.reasoning.masks import (
+        gather_view_masks,
+    )
+    from nvidia_tao_pytorch.cv.nvpanoptix3d_v2.utils.reasoning.score import (
+        CanonicalPointCloudMetrics,
+        score_batch_on_canonical_points,
+    )
+    from nvidia_tao_pytorch.cv.nvpanoptix3d_v2.utils.reasoning.losses import (
+        NVPanoptix3Dv2ReasoningLoss,
+    )
+except ImportError as _utils_import_error:  # pragma: no cover - only before utils lands
+    def _missing_reasoning_util(symbol, cause=_utils_import_error):
+        """Build a placeholder for *symbol* that raises a descriptive ImportError."""
+        def _raise(*_args, **_kwargs):
+            """Raise an ImportError naming the symbol and the missing package."""
+            raise ImportError(
+                f"'{symbol}' requires the "
+                f"'nvidia_tao_pytorch.cv.nvpanoptix3d_v2.utils.reasoning' package, "
+                f"which is not available in this installation. "
+                f"Original import error: {cause}"
+            )
+        return _raise
+
+    gather_view_masks = _missing_reasoning_util("gather_view_masks")
+    CanonicalPointCloudMetrics = _missing_reasoning_util("CanonicalPointCloudMetrics")
+    score_batch_on_canonical_points = _missing_reasoning_util("score_batch_on_canonical_points")
+    NVPanoptix3Dv2ReasoningLoss = _missing_reasoning_util("NVPanoptix3Dv2ReasoningLoss")
 
 logger = logging.getLogger(__name__)
 
