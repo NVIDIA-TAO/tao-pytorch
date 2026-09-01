@@ -24,12 +24,39 @@ from nvidia_tao_pytorch.cv.nvpanoptix3d_v2.model.panoptic.feature_fusion import 
 from nvidia_tao_pytorch.cv.nvpanoptix3d_v2.model.panoptic.panoptic_decoder import NVPanoptix3Dv2PanopticDecoder
 from nvidia_tao_pytorch.cv.nvpanoptix3d_v2.model.panoptic.loftup import LoftUpUpscaler
 from nvidia_tao_pytorch.cv.nvpanoptix3d_v2.model.metric_scale_head import MetricScaleHead
-from nvidia_tao_pytorch.cv.nvpanoptix3d_v2.utils.panoptic.losses import NVPanoptix3Dv2PanopticLoss
-from nvidia_tao_pytorch.cv.nvpanoptix3d_v2.utils.panoptic.engine_eval import panoptic_inference
-from nvidia_tao_pytorch.cv.nvpanoptix3d_v2.utils.panoptic.mAP import (
-    evaluate_instance_map_segvggt,
-    prepare_instance_map_sample,
-)
+# The ``nvidia_tao_pytorch.cv.nvpanoptix3d_v2.utils`` package is delivered by a
+# follow-up patch in this feature series, so it may not be present on disk yet.
+# Import it defensively -- mirroring the deferred-import convention already used
+# by ``build_pl_model.pl_module_class`` -- so this module stays importable (and
+# statically checkable) in the meantime. Each symbol falls back to a placeholder
+# that raises a descriptive ImportError if it is ever actually used, rather than
+# failing later with an opaque ``NoneType`` error far from the real cause. Once
+# the utils package lands the ``try`` branch simply succeeds and behavior is
+# unchanged.
+try:
+    from nvidia_tao_pytorch.cv.nvpanoptix3d_v2.utils.panoptic.losses import NVPanoptix3Dv2PanopticLoss
+    from nvidia_tao_pytorch.cv.nvpanoptix3d_v2.utils.panoptic.engine_eval import panoptic_inference
+    from nvidia_tao_pytorch.cv.nvpanoptix3d_v2.utils.panoptic.mAP import (
+        evaluate_instance_map_segvggt,
+        prepare_instance_map_sample,
+    )
+except ImportError as _utils_import_error:  # pragma: no cover - only before utils lands
+    def _missing_panoptic_util(symbol, cause=_utils_import_error):
+        """Build a placeholder for *symbol* that raises a descriptive ImportError."""
+        def _raise(*_args, **_kwargs):
+            """Raise an ImportError naming the symbol and the missing package."""
+            raise ImportError(
+                f"'{symbol}' requires the "
+                f"'nvidia_tao_pytorch.cv.nvpanoptix3d_v2.utils.panoptic' package, "
+                f"which is not available in this installation. "
+                f"Original import error: {cause}"
+            )
+        return _raise
+
+    NVPanoptix3Dv2PanopticLoss = _missing_panoptic_util("NVPanoptix3Dv2PanopticLoss")
+    panoptic_inference = _missing_panoptic_util("panoptic_inference")
+    evaluate_instance_map_segvggt = _missing_panoptic_util("evaluate_instance_map_segvggt")
+    prepare_instance_map_sample = _missing_panoptic_util("prepare_instance_map_sample")
 
 logger = logging.getLogger(__name__)
 
