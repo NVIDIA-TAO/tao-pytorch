@@ -19,8 +19,10 @@ from nvidia_tao_pytorch.cv.nvpanoptix3d.export.symbolic_funcs import (
     cartesian_prod_onnx,
     upsample_bicubic2d_aa,
 )
-from nvidia_tao_pytorch.cv.nvpanoptix3d.export.utils import load_2d_model
-from nvidia_tao_pytorch.cv.nvpanoptix3d.model.vggt.layers.attention import Attention, MemEffAttention
+from nvidia_tao_pytorch.cv.nvpanoptix3d.export.utils import (
+    load_2d_model,
+    patch_xformers_attention_for_export,
+)
 
 
 class MaskFormerModelWrapper(nn.Module):
@@ -136,18 +138,15 @@ class ONNXExporter:
     def _patch_xformers_attention_for_export(model: nn.Module) -> None:
         """Patch xformers attention modules for ONNX export tracing.
 
-        xformers memory_efficient_attention relies on CUTLASS ops with
-        c10::SymInt arguments that the legacy JIT tracer cannot export.
-        For each MemEffAttention module in the model, this method replaces
-        ``forward`` with ``Attention.forward`` so export uses the
-        scaled-dot-product-attention path that is traceable.
+        Thin wrapper kept for backwards compatibility; the implementation now
+        lives in :func:`nvidia_tao_pytorch.cv.nvpanoptix3d.export.utils.patch_xformers_attention_for_export`
+        so the NVPanoptix3D and NVPanoptix3Dv2 exporters share a single
+        attention-patching path.
 
         Args:
             model: Model tree whose MemEffAttention modules are patched in-place.
         """
-        for module in model.modules():
-            if isinstance(module, MemEffAttention):
-                module.forward = Attention.forward.__get__(module, Attention)
+        patch_xformers_attention_for_export(model)
 
     def export_model(
         self,
