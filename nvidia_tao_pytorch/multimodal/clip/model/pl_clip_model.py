@@ -339,6 +339,8 @@ class CLIPPlModel(TAOLightningModule):
             if siglip_mask_mode in (
                 "attribute_match_ignore",
                 "attribute_plus_accessory_match_ignore",
+                "attribute_match_positive",
+                "attribute_plus_accessory_match_positive",
             ):
                 train_data_cfg = self.experiment_spec.dataset.train
                 if not getattr(
@@ -354,6 +356,19 @@ class CLIPPlModel(TAOLightningModule):
                         f"siglip_loss_mask_mode={siglip_mask_mode!r} requires "
                         "dataset.train.type='custom', got "
                         f"{train_data_type!r}."
+                    )
+                compatible_as_positive = siglip_mask_mode.endswith(
+                    "_positive"
+                )
+                if (
+                    compatible_as_positive and
+                    len(train_data_cfg.datasets) != 1
+                ):
+                    raise ValueError(
+                        f"siglip_loss_mask_mode={siglip_mask_mode!r} "
+                        "currently requires exactly one custom source "
+                        "dataset so compatible positives cannot cross "
+                        "dataset identities."
                     )
                 if self.siglip_loss_dist_impl not in ("local", "gather"):
                     raise NotImplementedError(
@@ -376,13 +391,27 @@ class CLIPPlModel(TAOLightningModule):
                         self.trainer.world_size,
                         siglip_loss_world_size,
                     )
+                train_cfg = getattr(self.experiment_spec, "train", None)
                 self.loss = MetadataMaskedSigLipLoss(
                     dist_impl=self.siglip_loss_dist_impl,
                     world_size=siglip_loss_world_size,
                     rank=siglip_loss_rank,
                     accessory_aware=(
-                        siglip_mask_mode ==
-                        "attribute_plus_accessory_match_ignore"
+                        siglip_mask_mode in (
+                            "attribute_plus_accessory_match_ignore",
+                            "attribute_plus_accessory_match_positive",
+                        )
+                    ),
+                    compatible_as_positive=compatible_as_positive,
+                    compatible_positive_weight=getattr(
+                        train_cfg,
+                        "compatible_positive_weight",
+                        1.0,
+                    ),
+                    compatible_positive_normalization=getattr(
+                        train_cfg,
+                        "compatible_positive_normalization",
+                        "per_pair",
                     ),
                 )
                 self.criterion = self.loss
@@ -630,6 +659,20 @@ class CLIPPlModel(TAOLightningModule):
             )
             loss_value = contrastive_loss
             preservation_active = False
+
+        if (
+            isinstance(self.loss, MetadataMaskedSigLipLoss) and
+            self.loss.compatible_as_positive
+        ):
+            self.log(
+                "train/compatible_positive_pairs_per_rank",
+                self.loss.last_compatible_positive_pairs,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=False,
+                sync_dist=True,
+                batch_size=batch_size,
+            )
 
         # Optional batch-hard triplet loss, applied on top of the target.
         if self.triplet_loss_weight > 0:

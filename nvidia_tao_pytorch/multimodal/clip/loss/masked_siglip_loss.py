@@ -27,13 +27,13 @@ from nvidia_tao_pytorch.multimodal.clip.loss.metadata_mask import (
 
 
 class MetadataMaskedSigLipLoss(nn.Module):
-    """SigLIP loss that ignores metadata-compatible off-diagonal negatives.
+    """SigLIP loss with metadata-aware off-diagonal pair handling.
 
     The normalization intentionally mirrors OpenCLIP's SigLipLoss: valid loss
     terms are summed and divided by local image batch size, not by the number
     of valid terms. In gather mode, each rank keeps local image rows, gathers
-    text rows from every rank, and masks metadata-compatible cross-rank image
-    text pairs instead of treating them as negatives.
+    text rows from every rank, and applies the configured metadata behavior to
+    compatible cross-rank image-text pairs.
     """
 
     def __init__(
@@ -42,6 +42,9 @@ class MetadataMaskedSigLipLoss(nn.Module):
         world_size: int = 1,
         rank: int = 0,
         accessory_aware: bool = False,
+        compatible_as_positive: bool = False,
+        compatible_positive_weight: float = 1.0,
+        compatible_positive_normalization: str = "per_pair",
     ):
         """Initialize metadata-masked SigLIP loss.
 
@@ -52,7 +55,13 @@ class MetadataMaskedSigLipLoss(nn.Module):
             rank: Distributed rank used to place the local positive diagonal
                 inside gathered text chunks.
             accessory_aware: Also require query accessories to be present in
-                an image before ignoring a metadata-compatible off-diagonal.
+                an image before handling a metadata-compatible off-diagonal.
+            compatible_as_positive: Promote compatible off-diagonal pairs to
+                positives instead of only ignoring them.
+            compatible_positive_weight: Weight assigned to promoted terms.
+            compatible_positive_normalization: ``per_pair`` applies the full
+                weight to every promoted pair. ``per_query`` divides the
+                weight by the global promoted-image count for each text.
         """
         super().__init__()
         if dist_impl not in ("local", "gather"):
@@ -76,6 +85,20 @@ class MetadataMaskedSigLipLoss(nn.Module):
         self.world_size = world_size
         self.rank = rank
         self.accessory_aware = accessory_aware
+        if compatible_positive_weight < 0:
+            raise ValueError(
+                "compatible_positive_weight must be non-negative, got "
+                f"{compatible_positive_weight}."
+            )
+        if compatible_positive_normalization not in ("per_pair", "per_query"):
+            raise ValueError(
+                "compatible_positive_normalization must be 'per_pair' or "
+                f"'per_query', got {compatible_positive_normalization!r}."
+            )
+        self.compatible_as_positive = compatible_as_positive
+        self.compatible_positive_weight = compatible_positive_weight
+        self.compatible_positive_normalization = compatible_positive_normalization
+        self.last_compatible_positive_pairs = torch.tensor(0)
 
     @staticmethod
     def _resolve_positive_text_indices(
@@ -149,21 +172,14 @@ class MetadataMaskedSigLipLoss(nn.Module):
         ] = 1
         return labels
 
-    def get_valid_term_mask(
+    def get_metadata_match_mask(
         self,
         image_attr_values: torch.Tensor,
         text_attr_values: torch.Tensor,
         image_accessory_ids: torch.Tensor | None = None,
         text_accessory_ids: torch.Tensor | None = None,
-        positive_text_indices: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Build a valid-term mask aligned to logits ``[B_image, B_text]``.
-
-        Metadata-compatible off-diagonal pairs are excluded from the loss. In
-        accessory-aware mode, both scalar attributes and required accessories
-        must match before a pair is excluded. Paired positives always remain
-        valid.
-        """
+        """Build metadata compatibility aligned to ``[B_image, B_text]``."""
         metadata_match = build_attribute_match_mask(
             image_attr_values=image_attr_values,
             text_attr_values=text_attr_values,
@@ -179,7 +195,47 @@ class MetadataMaskedSigLipLoss(nn.Module):
                 text_accessory_ids=text_accessory_ids,
             )
             metadata_match = metadata_match & accessory_match
-        metadata_match = metadata_match.T
+        return metadata_match.T
+
+    def get_query_evidence_mask(
+        self,
+        text_attr_values: torch.Tensor,
+        text_accessory_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Return which text queries specify a metadata constraint."""
+        query_has_evidence = (text_attr_values >= 0).any(dim=-1)
+        if self.accessory_aware:
+            if text_accessory_ids is None:
+                raise ValueError(
+                    "Accessory-aware SigLIP masking requires "
+                    "text_accessory_ids."
+                )
+            query_has_evidence = query_has_evidence | (
+                text_accessory_ids > 0
+            ).any(dim=-1)
+        return query_has_evidence
+
+    def get_valid_term_mask(
+        self,
+        image_attr_values: torch.Tensor,
+        text_attr_values: torch.Tensor,
+        image_accessory_ids: torch.Tensor | None = None,
+        text_accessory_ids: torch.Tensor | None = None,
+        positive_text_indices: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Build a valid-term mask aligned to logits ``[B_image, B_text]``.
+
+        Metadata-compatible off-diagonal pairs are excluded from the loss. In
+        accessory-aware mode, both scalar attributes and required accessories
+        must match before a pair is excluded. Paired positives always remain
+        valid.
+        """
+        metadata_match = self.get_metadata_match_mask(
+            image_attr_values=image_attr_values,
+            text_attr_values=text_attr_values,
+            image_accessory_ids=image_accessory_ids,
+            text_accessory_ids=text_accessory_ids,
+        )
         batch_size = image_attr_values.shape[0]
         valid_terms = ~metadata_match
         positive_text_indices = self._resolve_positive_text_indices(
@@ -193,6 +249,55 @@ class MetadataMaskedSigLipLoss(nn.Module):
             positive_text_indices,
         ] = True
         return valid_terms
+
+    def get_targets_and_term_weights(
+        self,
+        labels: torch.Tensor,
+        valid_terms: torch.Tensor,
+        metadata_match: torch.Tensor,
+        positive_text_indices: torch.Tensor,
+        query_has_evidence: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Promote compatible pairs and return weighted SigLIP targets."""
+        term_weights = torch.ones_like(labels)
+        promoted = torch.zeros_like(valid_terms)
+        if not self.compatible_as_positive:
+            return labels, valid_terms, term_weights, promoted
+
+        if query_has_evidence is None:
+            raise ValueError(
+                "Positive metadata masking requires query_has_evidence."
+            )
+        if query_has_evidence.shape != (labels.shape[1],):
+            raise ValueError(
+                "query_has_evidence must have shape [B_text], got "
+                f"{tuple(query_has_evidence.shape)}."
+            )
+        query_has_evidence = query_has_evidence.to(
+            device=labels.device,
+            dtype=torch.bool,
+        )
+        promoted = metadata_match & query_has_evidence.unsqueeze(0)
+        promoted[
+            torch.arange(labels.shape[0], device=labels.device),
+            positive_text_indices,
+        ] = False
+        labels = labels.clone()
+        valid_terms = valid_terms.clone()
+        labels[promoted] = 1
+        valid_terms[promoted] = True
+
+        if self.compatible_positive_normalization == "per_pair":
+            term_weights[promoted] = self.compatible_positive_weight
+        else:
+            per_query_count = promoted.sum(dim=0, dtype=labels.dtype)
+            if self.dist_impl == "gather" and self.world_size > 1:
+                dist.all_reduce(per_query_count, op=dist.ReduceOp.SUM)
+            normalized = (
+                self.compatible_positive_weight / per_query_count.clamp_min(1)
+            ).expand(labels.shape[0], -1)
+            term_weights[promoted] = normalized[promoted]
+        return labels, valid_terms, term_weights, promoted
 
     def _validate_distributed_context(self) -> None:
         """Ensure configured gather coordinates match the default group."""
@@ -296,9 +401,10 @@ class MetadataMaskedSigLipLoss(nn.Module):
         Gather mode keeps image rows local while collecting text features and
         metadata across ranks and requires every rank to contribute the same
         local text batch size. Metadata-compatible off-diagonal pairs are
-        excluded, paired positives are retained, and the valid loss terms are
-        normalized by the local image batch size. When ``output_dict`` is
-        true, the scalar is returned under ``contrastive_loss``.
+        excluded or promoted to weighted positives, paired positives are
+        retained with unit weight, and valid loss terms are normalized by the
+        local image batch size. When ``output_dict`` is true, the scalar is
+        returned under ``contrastive_loss``.
 
         Args:
             image_features: Local image features with shape ``[B, D]``.
@@ -393,8 +499,34 @@ class MetadataMaskedSigLipLoss(nn.Module):
             text_accessory_ids=candidate_text_accessory_ids,
             positive_text_indices=positive_text_indices,
         )
-        loss = -F.logsigmoid(labels * logits).masked_select(valid_terms).sum()
+        metadata_match = self.get_metadata_match_mask(
+            image_attr_values=image_attr_values,
+            text_attr_values=candidate_text_attr_values,
+            image_accessory_ids=image_accessory_ids,
+            text_accessory_ids=candidate_text_accessory_ids,
+        )
+        query_has_evidence = None
+        if self.compatible_as_positive:
+            query_has_evidence = self.get_query_evidence_mask(
+                text_attr_values=candidate_text_attr_values,
+                text_accessory_ids=candidate_text_accessory_ids,
+            )
+        labels, valid_terms, term_weights, promoted = (
+            self.get_targets_and_term_weights(
+                labels=labels,
+                valid_terms=valid_terms,
+                metadata_match=metadata_match,
+                positive_text_indices=positive_text_indices,
+                query_has_evidence=query_has_evidence,
+            )
+        )
+        self.last_compatible_positive_pairs = promoted.sum().detach()
+        loss_terms = -F.logsigmoid(labels * logits) * term_weights
+        loss = loss_terms.masked_select(valid_terms).sum()
         loss = loss / local_batch
         if output_dict:
-            return {"contrastive_loss": loss}
+            output = {"contrastive_loss": loss}
+            if self.compatible_as_positive:
+                output["compatible_positive_pairs"] = promoted.sum()
+            return output
         return loss

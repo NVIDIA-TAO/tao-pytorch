@@ -136,12 +136,10 @@ def _run_two_rank_gloo_gradient_check(rank, world_size, init_method):
         reference_text_features = all_text_features.clone().requires_grad_()
         per_rank_losses = []
         for image_rank in range(world_size):
-            logits = (
-                logit_scale
-                * image_features[image_rank:image_rank + 1]
+            logits = logit_scale * (
+                image_features[image_rank:image_rank + 1]
                 @ reference_text_features.T
-                + logit_bias
-            )
+            ) + logit_bias
             labels = -torch.ones_like(logits)
             labels[0, image_rank] = 1
             per_rank_losses.append(-F.logsigmoid(labels * logits).sum())
@@ -294,7 +292,6 @@ class TestMetadataMaskedSigLipLoss:
 
     def test_keeps_diagonal_positive_even_when_metadata_matches(self):
         """Test diagonal positives remain valid when metadata matches."""
-        image_features, text_features = _features()
         attr_values = torch.tensor([
             [1, 1],
             [1, 1],
@@ -310,6 +307,216 @@ class TestMetadataMaskedSigLipLoss:
             valid_terms,
             torch.eye(3, dtype=torch.bool),
         )
+
+    def test_positive_mode_builds_targets_mask_and_per_pair_weights(self):
+        """Test compatible off-diagonals are weighted, not paired positives."""
+        labels = torch.tensor([
+            [1.0, -1.0, -1.0],
+            [-1.0, 1.0, -1.0],
+            [-1.0, -1.0, 1.0],
+        ])
+        metadata_match = torch.tensor([
+            [True, True, False],
+            [False, True, False],
+            [True, False, True],
+        ])
+        valid_terms = ~metadata_match | torch.eye(3, dtype=torch.bool)
+        loss_fn = MetadataMaskedSigLipLoss(
+            compatible_as_positive=True,
+            compatible_positive_weight=0.5,
+        )
+
+        targets, valid, weights, promoted = (
+            loss_fn.get_targets_and_term_weights(
+                labels=labels,
+                valid_terms=valid_terms,
+                metadata_match=metadata_match,
+                positive_text_indices=torch.arange(3),
+                query_has_evidence=torch.ones(3, dtype=torch.bool),
+            )
+        )
+
+        expected_promoted = torch.tensor([
+            [False, True, False],
+            [False, False, False],
+            [True, False, False],
+        ])
+        expected_targets = torch.tensor([
+            [1.0, 1.0, -1.0],
+            [-1.0, 1.0, -1.0],
+            [1.0, -1.0, 1.0],
+        ])
+        expected_weights = torch.tensor([
+            [1.0, 0.5, 1.0],
+            [1.0, 1.0, 1.0],
+            [0.5, 1.0, 1.0],
+        ])
+        assert torch.equal(promoted, expected_promoted)
+        assert torch.equal(targets, expected_targets)
+        assert torch.all(valid)
+        assert torch.equal(weights, expected_weights)
+        assert torch.equal(targets.diag(), torch.ones(3))
+        assert torch.equal(weights.diag(), torch.ones(3))
+
+    def test_positive_mode_per_query_normalizes_total_promoted_weight(self):
+        """Test each query shares one configured weight across its positives."""
+        labels = -torch.ones(3, 4)
+        positive_text_indices = torch.tensor([0, 1, 2])
+        labels[torch.arange(3), positive_text_indices] = 1
+        metadata_match = torch.tensor([
+            [True, True, True, False],
+            [True, True, False, True],
+            [True, False, True, True],
+        ])
+        loss_fn = MetadataMaskedSigLipLoss(
+            compatible_as_positive=True,
+            compatible_positive_weight=0.6,
+            compatible_positive_normalization="per_query",
+        )
+
+        _, _, weights, promoted = loss_fn.get_targets_and_term_weights(
+            labels=labels,
+            valid_terms=~metadata_match,
+            metadata_match=metadata_match,
+            positive_text_indices=positive_text_indices,
+            query_has_evidence=torch.ones(4, dtype=torch.bool),
+        )
+
+        expected_promoted_weights = torch.tensor([
+            [0.0, 0.6, 0.6, 0.0],
+            [0.3, 0.0, 0.0, 0.3],
+            [0.3, 0.0, 0.0, 0.3],
+        ])
+        assert torch.allclose(weights * promoted, expected_promoted_weights)
+        assert torch.allclose(
+            (weights * promoted).sum(dim=0),
+            torch.full((4,), 0.6),
+        )
+
+    def test_positive_mode_with_no_compatible_pairs_keeps_diagonal(self):
+        """Test zero promoted pairs are safe and retain paired positives."""
+        image_features, text_features = _features()
+        attr_values = torch.tensor([[1], [2], [3]])
+        loss_fn = MetadataMaskedSigLipLoss(
+            compatible_as_positive=True,
+            compatible_positive_weight=0.5,
+            compatible_positive_normalization="per_query",
+        )
+
+        actual = loss_fn(
+            image_features,
+            text_features,
+            torch.tensor(2.0),
+            torch.tensor(-0.5),
+            image_attr_values=attr_values,
+            text_attr_values=attr_values,
+        )
+
+        expected = _manual_siglip_loss(
+            image_features,
+            text_features,
+            torch.tensor(2.0),
+            torch.tensor(-0.5),
+        )
+        assert torch.allclose(actual, expected)
+        assert loss_fn.last_compatible_positive_pairs.item() == 0
+
+    def test_positive_mode_metadata_free_queries_keep_only_diagonal(self):
+        """Test unconstrained queries never promote vacuous metadata matches."""
+        image_features, text_features = _features()
+        image_attr_values = torch.tensor([[1], [2], [3]])
+        text_attr_values = -torch.ones((3, 1), dtype=torch.long)
+        image_accessory_ids = torch.zeros((3, 1), dtype=torch.long)
+        text_accessory_ids = torch.zeros((3, 1), dtype=torch.long)
+        loss_fn = MetadataMaskedSigLipLoss(
+            accessory_aware=True,
+            compatible_as_positive=True,
+            compatible_positive_weight=0.5,
+            compatible_positive_normalization="per_query",
+        )
+
+        metadata_match = loss_fn.get_metadata_match_mask(
+            image_attr_values=image_attr_values,
+            text_attr_values=text_attr_values,
+            image_accessory_ids=image_accessory_ids,
+            text_accessory_ids=text_accessory_ids,
+        )
+        query_has_evidence = loss_fn.get_query_evidence_mask(
+            text_attr_values=text_attr_values,
+            text_accessory_ids=text_accessory_ids,
+        )
+        labels = loss_fn.get_ground_truth(
+            device=image_features.device,
+            dtype=image_features.dtype,
+            batch_size=3,
+        )
+        valid_terms = loss_fn.get_valid_term_mask(
+            image_attr_values=image_attr_values,
+            text_attr_values=text_attr_values,
+            image_accessory_ids=image_accessory_ids,
+            text_accessory_ids=text_accessory_ids,
+        )
+        targets, valid, weights, promoted = (
+            loss_fn.get_targets_and_term_weights(
+                labels=labels,
+                valid_terms=valid_terms,
+                metadata_match=metadata_match,
+                positive_text_indices=torch.arange(3),
+                query_has_evidence=query_has_evidence,
+            )
+        )
+
+        assert torch.all(metadata_match)
+        assert not torch.any(query_has_evidence)
+        assert not torch.any(promoted)
+        assert torch.equal(targets, labels)
+        assert torch.equal(valid, torch.eye(3, dtype=torch.bool))
+        assert torch.equal(weights, torch.ones_like(labels))
+
+        actual = loss_fn(
+            image_features,
+            text_features,
+            torch.tensor(2.0),
+            torch.tensor(-0.5),
+            image_attr_values=image_attr_values,
+            text_attr_values=text_attr_values,
+            image_accessory_ids=image_accessory_ids,
+            text_accessory_ids=text_accessory_ids,
+        )
+        expected = _manual_siglip_loss(
+            image_features,
+            text_features,
+            torch.tensor(2.0),
+            torch.tensor(-0.5),
+            valid_terms=torch.eye(3, dtype=torch.bool),
+        )
+        assert torch.allclose(actual, expected)
+        assert loss_fn.last_compatible_positive_pairs.item() == 0
+
+    def test_ignore_mode_keeps_existing_targets_mask_and_weights(self):
+        """Test normalized-positive controls do not alter legacy ignore mode."""
+        labels = torch.tensor([[1.0, -1.0], [-1.0, 1.0]])
+        metadata_match = torch.ones(2, 2, dtype=torch.bool)
+        valid_terms = torch.eye(2, dtype=torch.bool)
+        loss_fn = MetadataMaskedSigLipLoss(
+            compatible_as_positive=False,
+            compatible_positive_weight=0.5,
+            compatible_positive_normalization="per_query",
+        )
+
+        targets, valid, weights, promoted = (
+            loss_fn.get_targets_and_term_weights(
+                labels=labels,
+                valid_terms=valid_terms,
+                metadata_match=metadata_match,
+                positive_text_indices=torch.arange(2),
+            )
+        )
+
+        assert targets is labels
+        assert valid is valid_terms
+        assert torch.equal(weights, torch.ones_like(labels))
+        assert not torch.any(promoted)
 
     def test_unknown_image_metadata_keeps_paired_positive(self):
         """Test metadata uncertainty never changes the paired label."""
@@ -546,6 +753,121 @@ class TestMetadataMaskedSigLipLoss:
         )
         assert torch.allclose(loss, expected)
 
+    def test_gather_promotes_cross_rank_compatible_pairs(self, monkeypatch):
+        """Test gathered compatible pairs use rectangular weighted targets."""
+        image_features = torch.tensor([
+            [0.10, 0.20, 0.30],
+            [0.30, 0.20, 0.10],
+        ])
+        text_features = torch.tensor([
+            [0.20, 0.10, 0.30],
+            [0.10, 0.30, 0.20],
+        ])
+        remote_text_features = torch.tensor([
+            [0.40, 0.10, 0.20],
+            [0.30, 0.40, 0.10],
+        ])
+        image_attr_values = torch.tensor([[1], [2]])
+        text_attr_values = torch.tensor([[1], [2]])
+        remote_text_attr_values = torch.tensor([[1], [3]])
+
+        _mock_distributed_context(monkeypatch)
+        monkeypatch.setattr(
+            loss_module.dist_nn,
+            "all_gather",
+            lambda tensor: (tensor, remote_text_features),
+        )
+
+        def fake_all_gather(gathered, tensor):
+            if tensor.ndim == 1:
+                gathered[0].fill_(text_features.shape[0])
+                gathered[1].fill_(remote_text_features.shape[0])
+                return
+            gathered[0].copy_(tensor)
+            gathered[1].copy_(remote_text_attr_values)
+
+        monkeypatch.setattr(torch.distributed, "all_gather", fake_all_gather)
+
+        loss_fn = MetadataMaskedSigLipLoss(
+            dist_impl="gather",
+            world_size=2,
+            rank=0,
+            compatible_as_positive=True,
+            compatible_positive_weight=0.5,
+        )
+        output = loss_fn(
+            image_features,
+            text_features,
+            torch.tensor(2.0),
+            torch.tensor(-0.5),
+            image_attr_values=image_attr_values,
+            text_attr_values=text_attr_values,
+            output_dict=True,
+        )
+
+        all_text_features = torch.cat(
+            [text_features, remote_text_features], dim=0
+        )
+        logits = 2.0 * image_features @ all_text_features.T - 0.5
+        labels = torch.tensor([
+            [1.0, -1.0, 1.0, -1.0],
+            [-1.0, 1.0, -1.0, -1.0],
+        ])
+        weights = torch.ones_like(labels)
+        weights[0, 2] = 0.5
+        expected = (-F.logsigmoid(labels * logits) * weights).sum() / 2
+
+        assert output["contrastive_loss"].ndim == 0
+        assert torch.allclose(output["contrastive_loss"], expected)
+        assert output["compatible_positive_pairs"].item() == 1
+        assert loss_fn.last_compatible_positive_pairs.item() == 1
+
+    def test_gather_per_query_normalizes_with_global_compatible_counts(
+        self, monkeypatch
+    ):
+        """Test per-query weights use global counts with rectangular shapes."""
+        labels = -torch.ones(2, 4)
+        positive_text_indices = torch.tensor([2, 3])
+        labels[torch.arange(2), positive_text_indices] = 1
+        metadata_match = torch.tensor([
+            [True, False, True, False],
+            [False, True, False, True],
+        ])
+        reduced_shapes = []
+
+        def fake_all_reduce(tensor, op):
+            assert op == dist.ReduceOp.SUM
+            reduced_shapes.append(tuple(tensor.shape))
+            tensor.add_(torch.tensor([1.0, 0.0, 2.0, 0.0]))
+
+        monkeypatch.setattr(loss_module.dist, "all_reduce", fake_all_reduce)
+        loss_fn = MetadataMaskedSigLipLoss(
+            dist_impl="gather",
+            world_size=2,
+            rank=1,
+            compatible_as_positive=True,
+            compatible_positive_weight=0.5,
+            compatible_positive_normalization="per_query",
+        )
+
+        targets, valid, weights, promoted = (
+            loss_fn.get_targets_and_term_weights(
+                labels=labels,
+                valid_terms=~metadata_match,
+                metadata_match=metadata_match,
+                positive_text_indices=positive_text_indices,
+                query_has_evidence=torch.ones(4, dtype=torch.bool),
+            )
+        )
+
+        assert reduced_shapes == [(4,)]
+        assert targets.shape == valid.shape == weights.shape == promoted.shape
+        assert targets.shape == (2, 4)
+        assert weights[0, 0] == 0.25
+        assert weights[1, 1] == 0.5
+        assert targets[0, 2] == 1 and targets[1, 3] == 1
+        assert weights[0, 2] == 1 and weights[1, 3] == 1
+
     @pytest.mark.skipif(
         not dist.is_available() or not dist.is_gloo_available(),
         reason="Two-rank gradient test requires torch.distributed with Gloo.",
@@ -749,4 +1071,13 @@ class TestMetadataMaskedSigLipLoss:
                 torch.tensor(-0.5),
                 image_attr_values=attr_values,
                 text_attr_values=attr_values,
+            )
+
+    def test_positive_mode_validates_weight_and_normalization(self):
+        """Test invalid normalized-positive controls fail at construction."""
+        with pytest.raises(ValueError, match="non-negative"):
+            MetadataMaskedSigLipLoss(compatible_positive_weight=-0.1)
+        with pytest.raises(ValueError, match="per_pair.*per_query"):
+            MetadataMaskedSigLipLoss(
+                compatible_positive_normalization="unsupported"
             )
