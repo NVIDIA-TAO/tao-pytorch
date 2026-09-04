@@ -596,19 +596,43 @@ class CLIPTrainConfig(TrainConfig):
         default_value="none",
         valid_options=(
             "none,attribute_match_ignore,"
-            "attribute_plus_accessory_match_ignore"
+            "attribute_plus_accessory_match_ignore,"
+            "attribute_match_positive,"
+            "attribute_plus_accessory_match_positive"
         ),
         description=(
             "Optional metadata-based masking mode for SigLIP loss. "
             "'none' keeps existing behavior; 'attribute_match_ignore' ignores "
             "off-diagonal negatives whose attributes match the text query; "
             "'attribute_plus_accessory_match_ignore' additionally requires "
-            "all query accessories to be present in the image. "
+            "all query accessories to be present in the image. The positive "
+            "variants promote compatible off-diagonal pairs to positives and "
+            "currently require exactly one custom source dataset. "
             "Metadata masking supports siglip_loss_dist_impl='local' or "
             "'gather' and requires "
             "include_attribute_metadata=True on the custom training dataset."
         ),
         display_name="SigLIP Loss Mask Mode",
+    )
+    compatible_positive_weight: float = FLOAT_FIELD(
+        value=1.0,
+        default_value=1.0,
+        valid_min=0.0,
+        description=(
+            "Weight for metadata-compatible off-diagonal terms when a "
+            "positive SigLIP metadata mode is selected."
+        ),
+        display_name="Compatible Positive Weight",
+    )
+    compatible_positive_normalization: str = STR_FIELD(
+        value="per_pair",
+        default_value="per_pair",
+        valid_options="per_pair,per_query",
+        description=(
+            "Apply compatible_positive_weight to every promoted pair or "
+            "divide it across all promoted images for each text query."
+        ),
+        display_name="Compatible Positive Normalization",
     )
     triplet_loss_weight: float = FLOAT_FIELD(
         value=0.0,
