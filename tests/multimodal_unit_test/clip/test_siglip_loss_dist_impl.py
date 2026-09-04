@@ -34,6 +34,9 @@ def _build_siglip_loss(
     mask_mode="none",
     include_attribute_metadata=True,
     dataset_type="custom",
+    dataset_count=1,
+    compatible_positive_weight=1.0,
+    compatible_positive_normalization="per_pair",
 ):
     """Build the SigLIP criterion without constructing the full model."""
     model = SimpleNamespace(
@@ -47,6 +50,13 @@ def _build_siglip_loss(
                 train=SimpleNamespace(
                     include_attribute_metadata=include_attribute_metadata,
                     type=dataset_type,
+                    datasets=[SimpleNamespace() for _ in range(dataset_count)],
+                ),
+            ),
+            train=SimpleNamespace(
+                compatible_positive_weight=compatible_positive_weight,
+                compatible_positive_normalization=(
+                    compatible_positive_normalization
                 ),
             ),
         ),
@@ -71,6 +81,16 @@ class TestSigLipLossDistImpl:
         assert "attribute_plus_accessory_match_ignore" in (
             mask_field.metadata["valid_options"].split(",")
         )
+        assert "attribute_match_positive" in (
+            mask_field.metadata["valid_options"].split(",")
+        )
+        assert "attribute_plus_accessory_match_positive" in (
+            mask_field.metadata["valid_options"].split(",")
+        )
+        train_config = CLIPTrainConfig()
+        assert train_config.siglip_loss_mask_mode == "none"
+        assert train_config.compatible_positive_weight == 1.0
+        assert train_config.compatible_positive_normalization == "per_pair"
 
     def test_local_siglip_loss_uses_single_rank_loss_world(self):
         """Test local mode disables cross-rank negative exchange."""
@@ -125,11 +145,37 @@ class TestSigLipLossDistImpl:
         assert isinstance(loss, MetadataMaskedSigLipLoss)
         assert loss.accessory_aware is True
 
+    def test_positive_mask_mode_wires_weight_and_normalization(self):
+        """Test positive mode forwards normalized-positive configuration."""
+        loss = _build_siglip_loss(
+            "local",
+            mask_mode="attribute_plus_accessory_match_positive",
+            compatible_positive_weight=0.5,
+            compatible_positive_normalization="per_query",
+        )
+
+        assert isinstance(loss, MetadataMaskedSigLipLoss)
+        assert loss.accessory_aware is True
+        assert loss.compatible_as_positive is True
+        assert loss.compatible_positive_weight == 0.5
+        assert loss.compatible_positive_normalization == "per_query"
+
+    def test_positive_mask_mode_rejects_multiple_source_datasets(self):
+        """Test positive matches cannot cross dataset metadata vocabularies."""
+        with pytest.raises(ValueError, match="exactly one custom source"):
+            _build_siglip_loss(
+                "local",
+                mask_mode="attribute_match_positive",
+                dataset_count=2,
+            )
+
     @pytest.mark.parametrize(
         "mask_mode",
         [
             "attribute_match_ignore",
             "attribute_plus_accessory_match_ignore",
+            "attribute_match_positive",
+            "attribute_plus_accessory_match_positive",
         ],
     )
     def test_masked_siglip_requires_training_metadata(self, mask_mode):
@@ -144,12 +190,21 @@ class TestSigLipLossDistImpl:
                 include_attribute_metadata=False,
             )
 
-    def test_masked_siglip_requires_custom_dataset(self):
+    @pytest.mark.parametrize(
+        "mask_mode",
+        [
+            "attribute_match_ignore",
+            "attribute_plus_accessory_match_ignore",
+            "attribute_match_positive",
+            "attribute_plus_accessory_match_positive",
+        ],
+    )
+    def test_masked_siglip_requires_custom_dataset(self, mask_mode):
         """Test masked loss rejects loaders that cannot emit metadata."""
         with pytest.raises(ValueError, match="dataset.train.type='custom'"):
             _build_siglip_loss(
                 "local",
-                mask_mode="attribute_match_ignore",
+                mask_mode=mask_mode,
                 dataset_type="wds",
             )
 
@@ -163,12 +218,23 @@ class TestSigLipLossDistImpl:
 
         assert isinstance(loss, SigLipLoss)
 
-    def test_masked_siglip_loss_rejects_unsupported_distributed_mode(self):
+    @pytest.mark.parametrize(
+        "mask_mode",
+        [
+            "attribute_match_ignore",
+            "attribute_plus_accessory_match_ignore",
+            "attribute_match_positive",
+            "attribute_plus_accessory_match_positive",
+        ],
+    )
+    def test_masked_siglip_loss_rejects_unsupported_distributed_mode(
+        self, mask_mode
+    ):
         """Test masked SigLIP rejects modes without metadata exchange."""
         with pytest.raises(NotImplementedError, match="local.*gather"):
             _build_siglip_loss(
                 "bidir",
-                mask_mode="attribute_match_ignore",
+                mask_mode=mask_mode,
             )
 
     def test_masked_siglip_backward_requires_metadata(self):
