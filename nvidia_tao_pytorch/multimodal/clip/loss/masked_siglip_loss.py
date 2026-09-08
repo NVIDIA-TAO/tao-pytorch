@@ -44,7 +44,7 @@ class MetadataMaskedSigLipLoss(nn.Module):
         accessory_aware: bool = False,
         compatible_as_positive: bool = False,
         compatible_positive_weight: float = 1.0,
-        compatible_positive_normalization: str = "per_pair",
+        compatible_positive_normalization: str = "per_query",
     ):
         """Initialize metadata-masked SigLIP loss.
 

@@ -411,7 +411,7 @@ class CLIPPlModel(TAOLightningModule):
                     compatible_positive_normalization=getattr(
                         train_cfg,
                         "compatible_positive_normalization",
-                        "per_pair",
+                        "per_query",
                     ),
                 )
                 self.criterion = self.loss

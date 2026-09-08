@@ -627,8 +627,8 @@ class CLIPTrainConfig(TrainConfig):
         display_name="Compatible Positive Weight",
     )
     compatible_positive_normalization: str = STR_FIELD(
-        value="per_pair",
-        default_value="per_pair",
+        value="per_query",
+        default_value="per_query",
         valid_options="per_pair,per_query",
         description=(
             "Apply compatible_positive_weight to every promoted pair with "

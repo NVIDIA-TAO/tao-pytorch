@@ -36,7 +36,7 @@ def _build_siglip_loss(
     dataset_type="custom",
     dataset_count=1,
     compatible_positive_weight=1.0,
-    compatible_positive_normalization="per_pair",
+    compatible_positive_normalization="per_query",
 ):
     """Build the SigLIP criterion without constructing the full model."""
     model = SimpleNamespace(
@@ -90,7 +90,7 @@ class TestSigLipLossDistImpl:
         train_config = CLIPTrainConfig()
         assert train_config.siglip_loss_mask_mode == "none"
         assert train_config.compatible_positive_weight == 1.0
-        assert train_config.compatible_positive_normalization == "per_pair"
+        assert train_config.compatible_positive_normalization == "per_query"
 
     def test_local_siglip_loss_uses_single_rank_loss_world(self):
         """Test local mode disables cross-rank negative exchange."""

@@ -533,6 +533,7 @@ class TestMetadataMaskedSigLipLoss:
         loss_fn = MetadataMaskedSigLipLoss(
             compatible_as_positive=True,
             compatible_positive_weight=0.5,
+            compatible_positive_normalization="per_pair",
         )
 
         targets, valid, weights, promoted = (
@@ -1003,6 +1004,7 @@ class TestMetadataMaskedSigLipLoss:
             rank=0,
             compatible_as_positive=True,
             compatible_positive_weight=0.5,
+            compatible_positive_normalization="per_pair",
         )
         output = loss_fn(
             image_features,
