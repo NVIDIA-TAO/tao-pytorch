@@ -160,6 +160,169 @@ def _run_two_rank_gloo_gradient_check(rank, world_size, init_method):
         dist.destroy_process_group()
 
 
+def _run_two_rank_gloo_positive_per_query_check(
+    rank, world_size, init_method
+):
+    """Compare distributed positive/per-query behavior with a global loss."""
+    dist.init_process_group(
+        backend="gloo",
+        init_method=init_method,
+        rank=rank,
+        world_size=world_size,
+        timeout=timedelta(seconds=30),
+    )
+    try:
+        images_per_rank = 3
+        image_features = torch.tensor([
+            [0.40, -0.20, 0.10],
+            [0.10, 0.50, -0.30],
+            [-0.20, 0.30, 0.60],
+            [0.70, -0.10, 0.20],
+            [-0.40, 0.20, 0.50],
+            [0.30, 0.60, -0.20],
+        ])
+        text_features = torch.tensor([
+            [0.30, 0.70, -0.10],
+            [-0.60, 0.20, 0.40],
+            [0.50, -0.30, 0.20],
+            [0.20, 0.40, 0.60],
+            [-0.10, 0.80, 0.30],
+            [0.60, 0.10, -0.40],
+        ])
+        # Interleaving attributes puts compatible images for every text query
+        # on both ranks. Each query has two promoted off-diagonal pairs.
+        attr_values = torch.tensor([[1], [2], [1], [2], [1], [2]])
+        logit_scale = torch.tensor(1.7)
+        logit_bias = torch.tensor(-0.2)
+        local_slice = slice(
+            rank * images_per_rank,
+            (rank + 1) * images_per_rank,
+        )
+        local_images = image_features[local_slice].clone().requires_grad_()
+        local_texts = text_features[local_slice].clone().requires_grad_()
+        local_attrs = attr_values[local_slice]
+
+        distributed_loss = MetadataMaskedSigLipLoss(
+            dist_impl="gather",
+            world_size=world_size,
+            rank=rank,
+            compatible_as_positive=True,
+            compatible_positive_weight=0.5,
+            compatible_positive_normalization="per_query",
+        )
+
+        positive_text_indices = (
+            torch.arange(images_per_rank) + rank * images_per_rank
+        )
+        labels = distributed_loss.get_ground_truth(
+            device=local_images.device,
+            dtype=local_images.dtype,
+            batch_size=images_per_rank,
+            num_texts=text_features.shape[0],
+            positive_text_indices=positive_text_indices,
+        )
+        metadata_match = distributed_loss.get_metadata_match_mask(
+            image_attr_values=local_attrs,
+            text_attr_values=attr_values,
+        )
+        valid_terms = distributed_loss.get_valid_term_mask(
+            image_attr_values=local_attrs,
+            text_attr_values=attr_values,
+            positive_text_indices=positive_text_indices,
+        )
+        query_has_evidence = distributed_loss.get_query_evidence_mask(
+            text_attr_values=attr_values,
+        )
+        targets, valid_terms, weights, promoted = (
+            distributed_loss.get_targets_and_term_weights(
+                labels=labels,
+                valid_terms=valid_terms,
+                metadata_match=metadata_match,
+                positive_text_indices=positive_text_indices,
+                query_has_evidence=query_has_evidence,
+            )
+        )
+
+        global_loss = MetadataMaskedSigLipLoss(
+            compatible_as_positive=True,
+            compatible_positive_weight=0.5,
+            compatible_positive_normalization="per_query",
+        )
+        global_labels = global_loss.get_ground_truth(
+            device=image_features.device,
+            dtype=image_features.dtype,
+            batch_size=image_features.shape[0],
+            num_texts=text_features.shape[0],
+        )
+        global_metadata_match = global_loss.get_metadata_match_mask(
+            image_attr_values=attr_values,
+            text_attr_values=attr_values,
+        )
+        global_valid_terms = global_loss.get_valid_term_mask(
+            image_attr_values=attr_values,
+            text_attr_values=attr_values,
+        )
+        global_targets = global_loss.get_targets_and_term_weights(
+            labels=global_labels,
+            valid_terms=global_valid_terms,
+            metadata_match=global_metadata_match,
+            positive_text_indices=torch.arange(image_features.shape[0]),
+            query_has_evidence=global_loss.get_query_evidence_mask(
+                text_attr_values=attr_values,
+            ),
+        )
+
+        for local_tensor, expected in zip(
+            (targets, valid_terms, weights, promoted),
+            global_targets,
+        ):
+            gathered = [
+                torch.empty_like(local_tensor) for _ in range(world_size)
+            ]
+            dist.all_gather(gathered, local_tensor)
+            assert torch.equal(torch.cat(gathered, dim=0), expected)
+
+        actual_loss = distributed_loss(
+            local_images,
+            local_texts,
+            logit_scale,
+            logit_bias,
+            image_attr_values=local_attrs,
+            text_attr_values=local_attrs,
+        )
+        reference_images = image_features.clone().requires_grad_()
+        reference_texts = text_features.clone().requires_grad_()
+        reference_loss = global_loss(
+            reference_images,
+            reference_texts,
+            logit_scale,
+            logit_bias,
+            image_attr_values=attr_values,
+            text_attr_values=attr_values,
+        )
+
+        gathered_losses = [
+            torch.empty_like(actual_loss) for _ in range(world_size)
+        ]
+        dist.all_gather(gathered_losses, actual_loss.detach())
+        assert torch.allclose(torch.stack(gathered_losses).mean(), reference_loss)
+
+        # Scaling by world size models DDP's averaging of rank-local parameter
+        # gradients and makes feature gradients comparable to the global mean.
+        (actual_loss / world_size).backward()
+        reference_loss.backward()
+        assert torch.allclose(
+            local_images.grad,
+            reference_images.grad[local_slice],
+        )
+        assert torch.allclose(
+            local_texts.grad,
+            reference_texts.grad[local_slice],
+        )
+    finally:
+        dist.destroy_process_group()
+
+
 def _run_two_rank_gloo_uneven_batch_check(rank, world_size, init_method):
     """Verify uneven local batches fail before feature/metadata gathers."""
     dist.init_process_group(
@@ -868,6 +1031,43 @@ class TestMetadataMaskedSigLipLoss:
         assert targets[0, 2] == 1 and targets[1, 3] == 1
         assert weights[0, 2] == 1 and weights[1, 3] == 1
 
+    def test_per_query_count_uses_float32_for_bfloat16_labels(self):
+        """Test BF16 does not round the compatible count before division."""
+        batch_size = 258
+        labels = -torch.ones(
+            batch_size,
+            batch_size,
+            dtype=torch.bfloat16,
+        )
+        positive_text_indices = torch.arange(batch_size)
+        labels[torch.arange(batch_size), positive_text_indices] = 1
+        metadata_match = torch.zeros(
+            batch_size,
+            batch_size,
+            dtype=torch.bool,
+        )
+        metadata_match[:, 0] = True
+
+        loss_fn = MetadataMaskedSigLipLoss(
+            compatible_as_positive=True,
+            compatible_positive_weight=0.5,
+            compatible_positive_normalization="per_query",
+        )
+        _, _, weights, promoted = loss_fn.get_targets_and_term_weights(
+            labels=labels,
+            valid_terms=~metadata_match,
+            metadata_match=metadata_match,
+            positive_text_indices=positive_text_indices,
+            query_has_evidence=torch.ones(batch_size, dtype=torch.bool),
+        )
+
+        expected = torch.tensor(0.5 / 257, dtype=torch.bfloat16)
+        incorrectly_rounded = torch.tensor(0.5 / 256, dtype=torch.bfloat16)
+        assert promoted[:, 0].sum() == 257
+        assert expected != incorrectly_rounded
+        assert torch.all(weights[1:, 0] == expected)
+        assert weights[0, 0] == 1
+
     @pytest.mark.skipif(
         not dist.is_available() or not dist.is_gloo_available(),
         reason="Two-rank gradient test requires torch.distributed with Gloo.",
@@ -879,6 +1079,24 @@ class TestMetadataMaskedSigLipLoss:
 
         mp.spawn(
             _run_two_rank_gloo_gradient_check,
+            args=(world_size, init_method),
+            nprocs=world_size,
+            join=True,
+        )
+
+    @pytest.mark.skipif(
+        not dist.is_available() or not dist.is_gloo_available(),
+        reason="Two-rank positive-mode test requires Gloo.",
+    )
+    def test_gather_positive_per_query_matches_global_reference(
+        self, tmp_path
+    ):
+        """Test real distributed targets, loss, and gradients."""
+        world_size = 2
+        init_method = f"file://{tmp_path / 'gloo_positive_init'}"
+
+        mp.spawn(
+            _run_two_rank_gloo_positive_per_query_check,
             args=(world_size, init_method),
             nprocs=world_size,
             join=True,

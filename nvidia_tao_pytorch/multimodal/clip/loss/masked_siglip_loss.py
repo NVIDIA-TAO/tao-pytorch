@@ -290,12 +290,16 @@ class MetadataMaskedSigLipLoss(nn.Module):
         if self.compatible_positive_normalization == "per_pair":
             term_weights[promoted] = self.compatible_positive_weight
         else:
-            per_query_count = promoted.sum(dim=0, dtype=labels.dtype)
+            # Keep compatible-pair counts exact under mixed precision. BF16
+            # cannot represent every integer above 256, so accumulating in the
+            # feature/label dtype can change the per-query denominator.
+            per_query_count = promoted.sum(dim=0, dtype=torch.float32)
             if self.dist_impl == "gather" and self.world_size > 1:
                 dist.all_reduce(per_query_count, op=dist.ReduceOp.SUM)
             normalized = (
                 self.compatible_positive_weight / per_query_count.clamp_min(1)
-            ).expand(labels.shape[0], -1)
+            ).to(dtype=term_weights.dtype)
+            normalized = normalized.expand(labels.shape[0], -1)
             term_weights[promoted] = normalized[promoted]
         return labels, valid_terms, term_weights, promoted
 
