@@ -362,6 +362,52 @@ def _run_two_rank_gloo_uneven_batch_check(rank, world_size, init_method):
 class TestMetadataMaskedSigLipLoss:
     """Test metadata-masked SigLIP loss behavior."""
 
+    @pytest.mark.parametrize("compatible_as_positive", [False, True])
+    def test_forward_builds_metadata_match_once(
+        self, monkeypatch, compatible_as_positive
+    ):
+        """Test ignore and positive forward paths reuse compatibility work."""
+        image_features, text_features = _features()
+        attr_values = torch.tensor([
+            [1, 1],
+            [1, 1],
+            [2, 2],
+        ])
+        accessory_ids = torch.tensor([
+            [1, 0],
+            [1, 0],
+            [2, 0],
+        ])
+        loss_fn = MetadataMaskedSigLipLoss(
+            accessory_aware=True,
+            compatible_as_positive=compatible_as_positive,
+        )
+        original = loss_fn.get_metadata_match_mask
+        call_count = 0
+
+        def counted_metadata_match(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(
+            loss_fn,
+            "get_metadata_match_mask",
+            counted_metadata_match,
+        )
+        loss_fn(
+            image_features,
+            text_features,
+            torch.tensor(2.0),
+            torch.tensor(-0.5),
+            image_attr_values=attr_values,
+            text_attr_values=attr_values,
+            image_accessory_ids=accessory_ids,
+            text_accessory_ids=accessory_ids,
+        )
+
+        assert call_count == 1
+
     def test_matches_regular_siglip_without_off_diagonal_metadata_matches(
         self,
     ):

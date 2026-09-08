@@ -222,20 +222,23 @@ class MetadataMaskedSigLipLoss(nn.Module):
         image_accessory_ids: torch.Tensor | None = None,
         text_accessory_ids: torch.Tensor | None = None,
         positive_text_indices: torch.Tensor | None = None,
+        metadata_match: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Build a valid-term mask aligned to logits ``[B_image, B_text]``.
 
         Metadata-compatible off-diagonal pairs are excluded from the loss. In
         accessory-aware mode, both scalar attributes and required accessories
         must match before a pair is excluded. Paired positives always remain
-        valid.
+        valid. A precomputed ``metadata_match`` can be supplied when the caller
+        also needs the compatibility mask for positive target construction.
         """
-        metadata_match = self.get_metadata_match_mask(
-            image_attr_values=image_attr_values,
-            text_attr_values=text_attr_values,
-            image_accessory_ids=image_accessory_ids,
-            text_accessory_ids=text_accessory_ids,
-        )
+        if metadata_match is None:
+            metadata_match = self.get_metadata_match_mask(
+                image_attr_values=image_attr_values,
+                text_attr_values=text_attr_values,
+                image_accessory_ids=image_accessory_ids,
+                text_accessory_ids=text_accessory_ids,
+            )
         batch_size = image_attr_values.shape[0]
         valid_terms = ~metadata_match
         positive_text_indices = self._resolve_positive_text_indices(
@@ -496,18 +499,19 @@ class MetadataMaskedSigLipLoss(nn.Module):
             num_texts=candidate_text_features.shape[0],
             positive_text_indices=positive_text_indices,
         )
+        metadata_match = self.get_metadata_match_mask(
+            image_attr_values=image_attr_values,
+            text_attr_values=candidate_text_attr_values,
+            image_accessory_ids=image_accessory_ids,
+            text_accessory_ids=candidate_text_accessory_ids,
+        )
         valid_terms = self.get_valid_term_mask(
             image_attr_values=image_attr_values,
             text_attr_values=candidate_text_attr_values,
             image_accessory_ids=image_accessory_ids,
             text_accessory_ids=candidate_text_accessory_ids,
             positive_text_indices=positive_text_indices,
-        )
-        metadata_match = self.get_metadata_match_mask(
-            image_attr_values=image_attr_values,
-            text_attr_values=candidate_text_attr_values,
-            image_accessory_ids=image_accessory_ids,
-            text_accessory_ids=candidate_text_accessory_ids,
+            metadata_match=metadata_match,
         )
         query_has_evidence = None
         if self.compatible_as_positive:
