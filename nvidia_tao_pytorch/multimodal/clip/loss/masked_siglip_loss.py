@@ -58,10 +58,13 @@ class MetadataMaskedSigLipLoss(nn.Module):
                 an image before handling a metadata-compatible off-diagonal.
             compatible_as_positive: Promote compatible off-diagonal pairs to
                 positives instead of only ignoring them.
-            compatible_positive_weight: Weight assigned to promoted terms.
+            compatible_positive_weight: Per-pair weight in ``per_pair`` mode,
+                or total weight divided among a text query's promoted images
+                in ``per_query`` mode. Zero gives promoted pairs no loss weight.
             compatible_positive_normalization: ``per_pair`` applies the full
-                weight to every promoted pair. ``per_query`` divides the
-                weight by the global promoted-image count for each text.
+                weight to every promoted pair. ``per_query`` divides it by the
+                promoted-image count for each text query, globally across ranks
+                in gather mode and within the local batch otherwise.
         """
         super().__init__()
         if dist_impl not in ("local", "gather"):
@@ -98,7 +101,7 @@ class MetadataMaskedSigLipLoss(nn.Module):
         self.compatible_as_positive = compatible_as_positive
         self.compatible_positive_weight = compatible_positive_weight
         self.compatible_positive_normalization = compatible_positive_normalization
-        self.last_compatible_positive_pairs = torch.tensor(0)
+        self.last_compatible_positive_pairs = torch.tensor(0.0)
 
     @staticmethod
     def _resolve_positive_text_indices(
@@ -528,7 +531,9 @@ class MetadataMaskedSigLipLoss(nn.Module):
                 query_has_evidence=query_has_evidence,
             )
         )
-        self.last_compatible_positive_pairs = promoted.sum().detach()
+        self.last_compatible_positive_pairs = promoted.sum(
+            dtype=torch.float32
+        ).detach()
         loss_terms = -F.logsigmoid(labels * logits) * term_weights
         loss = loss_terms.masked_select(valid_terms).sum()
         loss = loss / local_batch

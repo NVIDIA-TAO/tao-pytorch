@@ -1030,6 +1030,7 @@ class TestMetadataMaskedSigLipLoss:
         assert torch.allclose(output["contrastive_loss"], expected)
         assert output["compatible_positive_pairs"].item() == 1
         assert loss_fn.last_compatible_positive_pairs.item() == 1
+        assert loss_fn.last_compatible_positive_pairs.dtype == torch.float32
 
     def test_gather_per_query_normalizes_with_global_compatible_counts(
         self, monkeypatch

@@ -619,8 +619,10 @@ class CLIPTrainConfig(TrainConfig):
         default_value=1.0,
         valid_min=0.0,
         description=(
-            "Weight for metadata-compatible off-diagonal terms when a "
-            "positive SigLIP metadata mode is selected."
+            "Per-pair weight for promoted metadata-compatible off-diagonal "
+            "terms with per_pair normalization, or total weight divided "
+            "among each text query's promoted images with per_query "
+            "normalization. Set to 0 to give promoted pairs no loss weight."
         ),
         display_name="Compatible Positive Weight",
     )
@@ -629,8 +631,10 @@ class CLIPTrainConfig(TrainConfig):
         default_value="per_pair",
         valid_options="per_pair,per_query",
         description=(
-            "Apply compatible_positive_weight to every promoted pair or "
-            "divide it across all promoted images for each text query."
+            "Apply compatible_positive_weight to every promoted pair with "
+            "per_pair, or divide it among all promoted images for each text "
+            "query with per_query. Counts are global across ranks in gather "
+            "mode and limited to the local batch in local mode."
         ),
         display_name="Compatible Positive Normalization",
     )
