@@ -360,6 +360,13 @@ class CLIPPlModel(TAOLightningModule):
                 compatible_as_positive = siglip_mask_mode.endswith(
                     "_positive"
                 )
+                if compatible_as_positive and self.triplet_loss_weight > 0:
+                    raise ValueError(
+                        f"siglip_loss_mask_mode={siglip_mask_mode!r} requires "
+                        "train.triplet_loss_weight=0.0 because triplet loss "
+                        "treats compatible off-diagonal pairs as negative "
+                        "candidates."
+                    )
                 if (
                     compatible_as_positive and
                     len(train_data_cfg.datasets) != 1

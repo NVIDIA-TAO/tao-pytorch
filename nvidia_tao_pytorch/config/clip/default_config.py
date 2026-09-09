@@ -608,6 +608,7 @@ class CLIPTrainConfig(TrainConfig):
             "all query accessories to be present in the image. The positive "
             "variants promote compatible off-diagonal pairs to positives and "
             "currently require exactly one custom source dataset. "
+            "Positive modes require triplet_loss_weight=0.0. "
             "Metadata masking supports siglip_loss_dist_impl='local' or "
             "'gather' and requires "
             "include_attribute_metadata=True on the custom training dataset."

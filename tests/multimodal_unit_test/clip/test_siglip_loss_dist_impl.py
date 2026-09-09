@@ -37,12 +37,14 @@ def _build_siglip_loss(
     dataset_count=1,
     compatible_positive_weight=1.0,
     compatible_positive_normalization="per_query",
+    triplet_loss_weight=0.0,
 ):
     """Build the SigLIP criterion without constructing the full model."""
     model = SimpleNamespace(
         loss_type="siglip",
         siglip_loss_dist_impl=dist_impl,
         siglip_loss_mask_mode=mask_mode,
+        triplet_loss_weight=triplet_loss_weight,
         global_rank=rank,
         trainer=SimpleNamespace(world_size=world_size),
         experiment_spec=SimpleNamespace(
@@ -159,6 +161,42 @@ class TestSigLipLossDistImpl:
         assert loss.compatible_as_positive is True
         assert loss.compatible_positive_weight == 0.5
         assert loss.compatible_positive_normalization == "per_query"
+
+    @pytest.mark.parametrize(
+        "mask_mode",
+        ["attribute_match_positive", "attribute_plus_accessory_match_positive"],
+    )
+    @pytest.mark.parametrize("triplet_loss_weight", [0.0, 0.1])
+    def test_positive_mask_mode_requires_disabled_triplet_loss(
+        self, mask_mode, triplet_loss_weight
+    ):
+        """Test positive masking rejects conflicting triplet supervision."""
+        if triplet_loss_weight > 0:
+            with pytest.raises(ValueError, match="train.triplet_loss_weight=0.0"):
+                _build_siglip_loss(
+                    "local",
+                    mask_mode=mask_mode,
+                    triplet_loss_weight=triplet_loss_weight,
+                )
+        else:
+            loss = _build_siglip_loss(
+                "local",
+                mask_mode=mask_mode,
+                triplet_loss_weight=triplet_loss_weight,
+            )
+            assert isinstance(loss, MetadataMaskedSigLipLoss)
+            assert loss.compatible_as_positive is True
+
+    @pytest.mark.parametrize(
+        "mask_mode",
+        ["none", "attribute_match_ignore", "attribute_plus_accessory_match_ignore"],
+    )
+    def test_existing_mask_modes_allow_triplet_loss(self, mask_mode):
+        """Test the positive-mode guard preserves existing configurations."""
+        loss = _build_siglip_loss(
+            "local", mask_mode=mask_mode, triplet_loss_weight=0.1
+        )
+        assert isinstance(loss, (SigLipLoss, MetadataMaskedSigLipLoss))
 
     def test_positive_mask_mode_rejects_multiple_source_datasets(self):
         """Test positive matches cannot cross dataset metadata vocabularies."""
