@@ -4,6 +4,7 @@
 """Define entrypoint to run tasks for dinov3."""
 
 import argparse
+import os
 from nvidia_tao_pytorch.ssl.dinov3 import scripts
 from nvidia_tao_pytorch.core.entrypoint import get_subtasks, launch, command_line_parser
 
@@ -29,7 +30,10 @@ def main():
     args, unknown_args = command_line_parser(parser, subtasks)
 
     # Launch the subtask.
-    launch(vars(args), unknown_args, subtasks, network="dinov3")
+    launch(
+        vars(args), unknown_args, subtasks, network="dinov3",
+        strict_multinode=os.environ.get("TAO_STRICT_MULTINODE") == "1",
+    )
 
 
 if __name__ == '__main__':
