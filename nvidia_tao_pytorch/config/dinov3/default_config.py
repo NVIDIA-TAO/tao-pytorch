@@ -466,6 +466,20 @@ class DINOv3TransformConfig(NVDINOv2TransformConfig):
 class DINOv3DatasetConfig(NVDINOv2DatasetConfig):
     """DINOv3 dataset config (reuses nvdinov2 dataset, v3 transform defaults)."""
 
+    train_manifest: Optional[str] = STR_FIELD(
+        value=None,
+        default_value=None,
+        default_type=None,
+        description=(
+            "Optional Parquet training manifest. Each row must contain an absolute or "
+            "images_dir-relative path and storage_type, plus member for tar/zip shards. When "
+            "set, DINOv3 reads exactly these records instead of recursively scanning "
+            "train_dataset.images_dir."
+        ),
+        display_name="training manifest",
+        popular="yes",
+    )
+
     transform: DINOv3TransformConfig = DATACLASS_FIELD(
         DINOv3TransformConfig(),
         description="Configuration parameters for data transformation",

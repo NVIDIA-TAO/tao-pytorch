@@ -4,9 +4,9 @@
 """DINOv3 Model Module.
 
 ``DinoV3PlModel`` inherits the entire ``nvdinov2`` Lightning flow (training step, teacher
-EMA, optimizer/scheduler config, callbacks, checkpoint saving) and overrides only
-``_build_model`` to construct the DINOv3 RoPE ViT (no absolute pos-embed, per-type FFN)
-using the patch-16 v3 param map.
+EMA and optimizer/scheduler config), with DINOv3-owned checkpoint callbacks and
+data loading. It builds the DINOv3 RoPE ViT (no absolute pos-embed, per-type FFN)
+using the patch-16 v3 param map; NVDINOv2 behavior is unchanged.
 
 The checkpoint remapper (Meta/timm DINOv3 -> this ViT) and the Gram-anchoring loss
 (``_extra_losses``) land in later steps; this file is the build + inheritance scaffold so
@@ -32,7 +32,12 @@ from nvidia_tao_pytorch.core.distributed.comm import get_global_rank
 from nvidia_tao_pytorch.core.tlt_logging import logging
 from nvidia_tao_pytorch.ssl.nvdinov2.model.head import DinoHead
 from nvidia_tao_pytorch.ssl.nvdinov2.model.loss import DinoV2Loss
-from nvidia_tao_pytorch.ssl.nvdinov2.model.pl_model import CustomModelCheckpoint, DinoV2PlModel
+from nvidia_tao_pytorch.ssl.nvdinov2.model.pl_model import DinoV2PlModel
+from nvidia_tao_pytorch.ssl.dinov3.model.checkpoint import (
+    DinoV3ModelCheckpoint,
+    DinoV3ExceptionCheckpoint,
+)
+from nvidia_tao_pytorch.core.callbacks.loggers import TAOStatusLogger
 from nvidia_tao_pytorch.ssl.dinov3.model.vit import DinoV3VisionTransformer, SwiGLUFusedFull
 from nvidia_tao_pytorch.ssl.dinov3.model.loss import GramLoss, ClsPreservationLoss
 from nvidia_tao_pytorch.ssl.dinov3.model.lora import (
@@ -952,46 +957,33 @@ class DinoV3PlModel(DinoV2PlModel):
         resume consumes, there is nothing to resume *from* either. Step-unit checkpointing is
         what makes a requeue/resume loop viable at all.
 
-        The periodic callback is rebuilt through its public constructor rather than by poking
-        Lightning's private ``_every_n_*`` attributes, so this does not depend on Lightning
-        internals.
+        DINOv3-owned callbacks use public constructors and do not mutate shared
+        NVDINOv2 or TAO exception callback class attributes. Best-metric handling
+        is still delegated to the existing TAO helper.
 
         Returns:
-            Sequence[Callback]: the inherited callbacks, with the periodic checkpoint
-            re-wired to step cadence when the spec asks for it.
+            Sequence[Callback]: DINOv3 status, periodic and exception callbacks,
+            plus the configured TAO best-metric callback when enabled.
         """
-        callbacks = super().configure_callbacks()
-
         unit = self.experiment_spec["train"].get("checkpoint_interval_unit", "epoch")
-        if unit != "step":
-            return callbacks
-
         interval = self.experiment_spec["train"]["checkpoint_interval"]
         results_dir = self.experiment_spec["results_dir"]
-
-        rebuilt = []
-        for callback in callbacks:
-            # The periodic checkpoint is the unmonitored, keep-everything one. The best-metric
-            # callback (when enabled) is monitored, and TAOExceptionCheckpoint is a different
-            # class, so neither is touched.
-            if (isinstance(callback, CustomModelCheckpoint) and
-                    callback.monitor is None and
-                    callback.save_top_k == -1):
-                rebuilt.append(CustomModelCheckpoint(
-                    every_n_train_steps=interval,
-                    every_n_epochs=None,
-                    dirpath=results_dir,
-                    save_on_train_epoch_end=False,
-                    monitor=None,
-                    save_top_k=-1,
-                    save_last="link",
-                    filename="model_{epoch:03d}_{step:05d}",
-                    enable_version_counter=False,
-                ))
-                logging.info(
-                    "DINOv3: checkpointing every %d steps (checkpoint_interval_unit='step').",
-                    interval,
-                )
-            else:
-                rebuilt.append(callback)
-        return rebuilt
+        # Construct DINOv3-owned callbacks without changing NVDINOv2 class attributes.
+        periodic = DinoV3ModelCheckpoint(
+            save_final_epoch=bool(self.experiment_spec["dataset"].get("train_manifest")),
+            every_n_train_steps=interval if unit == "step" else None,
+            every_n_epochs=interval if unit != "step" else None,
+            dirpath=results_dir,
+            save_on_train_epoch_end=unit != "step",
+            monitor=None,
+            save_top_k=-1,
+            save_last="link",
+            filename="model_{epoch:03d}_{step:05d}",
+            enable_version_counter=False,
+        )
+        callbacks = [
+            TAOStatusLogger(results_dir, append=True),
+            periodic,
+            DinoV3ExceptionCheckpoint(dirpath=results_dir),
+        ]
+        return self._configure_best_checkpoint(callbacks, results_dir)
