@@ -23,6 +23,8 @@ from typing import List, Optional
 
 from omegaconf import MISSING
 
+from nvidia_tao_pytorch.config.dinov3.grit_score import GRITScoreConfig
+
 from nvidia_tao_pytorch.config.utils.types import (
     STR_FIELD,
     INT_FIELD,
@@ -648,6 +650,10 @@ class DINOv3ConvertConfig:
 @dataclass
 class ExperimentConfig(CommonExperimentConfig):
     """DINOv3 experiment config."""
+
+    grit_score: GRITScoreConfig = DATACLASS_FIELD(
+        GRITScoreConfig(), description="GRIT scoring parameters for SSL data refinement.",
+    )
 
     model: DINOv3ModelConfig = DATACLASS_FIELD(
         DINOv3ModelConfig(),
