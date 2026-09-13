@@ -47,7 +47,10 @@ def resolve_annotation_paths(ann_file: os.PathLike | str) -> list[str]:
         paths = [
             osp.join(ann_file, name)
             for name in sorted(os.listdir(ann_file))
-            if name.endswith(".pkl") and name not in _GENERATED_FILENAMES
+            if name.endswith(".pkl") and
+            not name.endswith("_lazy_index.pkl") and
+            name not in _GENERATED_FILENAMES and
+            osp.isfile(osp.join(ann_file, name))
         ]
     elif ann_file.endswith(".txt"):
         if not osp.isfile(ann_file):

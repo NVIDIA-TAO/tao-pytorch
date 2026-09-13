@@ -14,6 +14,7 @@ from nvidia_tao_pytorch.cv.sparse4d.dataloader.dataset import (
 from nvidia_tao_pytorch.cv.sparse4d.tools.build_lazy_index import (
     build_lazy_index,
     get_lazy_index_cache_path,
+    resolve_annotation_paths,
 )
 
 
@@ -87,6 +88,16 @@ def test_non_lazy_directory_discovery_ignores_generated_caches(tmp_path):
     paths = dataset._get_ann_paths(str(tmp_path))
 
     assert paths == [str(tmp_path / "a.pkl"), str(tmp_path / "b.pkl")]
+
+
+def test_lazy_index_directory_discovery_excludes_split_indices_and_nonfiles(tmp_path):
+    """Index production considers only regular annotation PKLs."""
+    annotation = tmp_path / "SceneA_infos_train.pkl"
+    _write_annotation(annotation, "SceneA", 2)
+    (tmp_path / "train_lazy_index.pkl").touch()
+    (tmp_path / "looks_like_an_annotation.pkl").mkdir()
+
+    assert resolve_annotation_paths(tmp_path) == [str(annotation.resolve())]
 
 
 def test_lazy_index_replaces_only_the_split_suffix(tmp_path):
