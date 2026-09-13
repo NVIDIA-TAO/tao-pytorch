@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """ Generates TRT compatible Sparse4D onnx model. """
@@ -15,6 +15,18 @@ from nvidia_tao_pytorch.cv.sparse4d.model.box3d import X, Y, Z, W, L, H, SIN_YAW
 from nvidia_tao_pytorch.cv.sparse4d.model.ops.deformable_aggregation import DeformableAggregationFunction, feature_maps_format
 
 
+def sanitize_sampling_locations_for_export(points_2d):
+    """Replace invalid MSDA locations with a finite out-of-bounds sentinel.
+
+    The accepted-only predicate deliberately rejects NaN and infinity because
+    comparisons against NaN are false. Zero is also rejected by both the
+    original and hardened TensorRT MSDA plugins, so it is a safe sentinel.
+    """
+    valid_x = (points_2d[..., :1] > 0) & (points_2d[..., :1] < 1)
+    valid_y = (points_2d[..., 1:2] > 0) & (points_2d[..., 1:2] < 1)
+    return torch.where(valid_x & valid_y, points_2d, torch.zeros_like(points_2d))
+
+
 def deformable_feature_aggregation_project_points(key_points, projection_mat, image_wh=None):
     """Project 3D points to 2D points using a projection matrix."""
     pts_extend = torch.cat(
@@ -29,7 +41,7 @@ def deformable_feature_aggregation_project_points(key_points, projection_mat, im
     )
     if image_wh is not None:
         points_2d = points_2d / image_wh[:, :, None, None]
-    return points_2d
+    return sanitize_sampling_locations_for_export(points_2d)
 
 
 def symbolic_for_deformable_aggregation_function(
@@ -350,19 +362,9 @@ class Sparse4DExporter(nn.Module):
     @staticmethod
     def deformable_feature_aggregation_project_points(_unused_self, key_points, projection_mat, image_wh=None):
         """Project 3D points to 2D points using a projection matrix."""
-        pts_extend = torch.cat(
-            [key_points, torch.ones_like(key_points[..., :1])], dim=-1
+        return deformable_feature_aggregation_project_points(
+            key_points, projection_mat, image_wh
         )
-        points_2d = torch.matmul(
-            projection_mat[:, :, None, None], pts_extend[:, None, ..., None]
-        )
-        points_2d = points_2d.view(*points_2d.shape[:-1])
-        points_2d = points_2d[..., :2] / torch.clamp(
-            points_2d[..., 2:3], min=1e-5
-        )
-        if image_wh is not None:
-            points_2d = points_2d / image_wh[:, :, None, None]
-        return points_2d
 
     @staticmethod
     def symbolic_for_deformable_aggregation_function(

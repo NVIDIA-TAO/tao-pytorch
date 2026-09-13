@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 from platform import machine
@@ -98,6 +98,66 @@ def test_sparse4d_onnx_export(
     sparse4d_exporter.export_model(cfg, model, str(output_file))
     sparse4d_exporter.check_onnx(str(output_file))
     assert output_file.is_file(), "ONNX file was not generated properly!"
+
+    graph = onnx_export.onnx.load(str(output_file)).graph
+    producers = {
+        output: node
+        for node in graph.node
+        for output in node.output
+    }
+    msda_nodes = [
+        node for node in graph.node
+        if node.domain == "nv" and node.op_type == "MSDA"
+    ]
+    assert msda_nodes, "Exported graph does not contain an nv::MSDA node"
+
+    for msda_node in msda_nodes:
+        reshape = producers[msda_node.input[3]]
+        transpose = producers[reshape.input[0]]
+        where = producers[transpose.input[0]]
+        pair_condition = producers[where.input[0]]
+
+        assert reshape.op_type == "Reshape"
+        assert transpose.op_type == "Transpose"
+        assert where.op_type == "Where"
+        assert pair_condition.op_type == "And"
+
+        coordinate_conditions = [
+            producers[input_name] for input_name in pair_condition.input
+        ]
+        assert all(node.op_type == "And" for node in coordinate_conditions)
+        for condition in coordinate_conditions:
+            comparison_ops = {
+                producers[input_name].op_type for input_name in condition.input
+            }
+            assert comparison_ops == {"Greater", "Less"}
+
+
+@pytest.mark.cv_unit
+@pytest.mark.sparse4d
+@pytest.mark.export
+def test_export_sanitizes_nonfinite_msda_sampling_locations():
+    """Invalid coordinate pairs must become a finite rejected sentinel."""
+    points_2d = torch.tensor(
+        [
+            [0.25, 0.75],
+            [float("nan"), 0.5],
+            [0.5, float("nan")],
+            [float("inf"), 0.5],
+            [0.5, -float("inf")],
+            [0.0, 0.5],
+            [1.0, 0.5],
+            [-0.1, 0.5],
+            [0.5, 1.1],
+        ],
+        dtype=torch.float32,
+    )
+
+    sanitized = onnx_export.sanitize_sampling_locations_for_export(points_2d)
+
+    torch.testing.assert_close(sanitized[0], points_2d[0])
+    assert torch.equal(sanitized[1:], torch.zeros_like(sanitized[1:]))
+    assert torch.isfinite(sanitized).all()
 
 
 @pytest.mark.cv_unit
