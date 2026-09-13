@@ -12,10 +12,29 @@ from nvidia_tao_pytorch.core.hydra.hydra_runner import hydra_runner
 from nvidia_tao_pytorch.core.initialize_experiments import initialize_train_experiment
 from nvidia_tao_pytorch.core.tlt_logging import obfuscate_logs, logging
 from nvidia_tao_pytorch.config.sparse4d.default_config import ExperimentConfig
-from nvidia_tao_pytorch.cv.sparse4d.dataloader.pl_sparse4d_data_module import Sparse4DDataModule
+from nvidia_tao_pytorch.cv.sparse4d.dataloader.pl_sparse4d_data_module import (
+    Sparse4DDataModule,
+)
 from nvidia_tao_pytorch.cv.sparse4d.dataloader.callbacks import PklResampleCallback
 from nvidia_tao_pytorch.cv.sparse4d.model.sparse4d_pl_model import Sparse4DPlModel
 from nvidia_tao_pytorch.cv.sparse4d.utils.misc import load_pretrained_weights
+
+
+def select_train_strategy(devices, num_nodes, cotrain_param_touch):
+    """Select a Lightning strategy from the complete distributed world size.
+
+    ``initialize_train_experiment`` supplies the explicit local GPU ID list,
+    but accepting an integer as well keeps the helper useful in isolation.
+    """
+    if isinstance(devices, bool):
+        raise ValueError("devices must be a positive count or explicit device list")
+    local_devices = devices if isinstance(devices, int) else len(devices)
+    nodes = int(num_nodes)
+    if local_devices <= 0 or nodes <= 0:
+        raise ValueError("devices and num_nodes must both be positive")
+    if local_devices * nodes == 1:
+        return "auto"
+    return "ddp" if cotrain_param_touch else "ddp_find_unused_parameters_true"
 
 
 def run_experiment(experiment_config, key):
@@ -29,15 +48,17 @@ def run_experiment(experiment_config, key):
     pretrained_path = experiment_config.train.pretrained_model_path
 
     precision = experiment_config.train.precision
-    if precision.lower() == 'fp16':
-        precision = '16-mixed'
-    elif precision.lower() == 'bf16':
-        precision = 'bf16-mixed'
-    elif precision.lower() == 'fp32':
-        precision = '32-true'
+    if precision.lower() == "fp16":
+        precision = "16-mixed"
+    elif precision.lower() == "bf16":
+        precision = "bf16-mixed"
+    elif precision.lower() == "fp32":
+        precision = "32-true"
     else:
-        raise NotImplementedError(f"{precision} is not supported. \
-                                  Only bf16, fp16, and fp32 are supported")
+        raise NotImplementedError(
+            f"{precision} is not supported. \
+                                  Only bf16, fp16, and fp32 are supported"
+        )
 
     sync_batchnorm = True
 
@@ -47,7 +68,9 @@ def run_experiment(experiment_config, key):
     num_gpus = experiment_config.train.num_gpus
     num_bev_groups = experiment_config.dataset.num_bev_groups
     num_epochs = experiment_config.train.num_epochs
-    num_iters_per_epoch = int(num_frames * num_bev_groups // (num_nodes * num_gpus * batch_size))
+    num_iters_per_epoch = int(
+        num_frames * num_bev_groups // (num_nodes * num_gpus * batch_size)
+    )
     grad_clip = experiment_config.train.optim.grad_clip.max_norm
 
     # Instantiate the model
@@ -58,19 +81,25 @@ def run_experiment(experiment_config, key):
         logging.info(f"Loading checkpoint from: {pretrained_path}")
         new_state_dict = load_pretrained_weights(pretrained_path)
         model.load_state_dict(new_state_dict, strict=False)
-        logging.info(f"Successfully loaded weights into Sparse4DPlModel from {pretrained_path}")
+        logging.info(
+            f"Successfully loaded weights into Sparse4DPlModel from {pretrained_path}"
+        )
 
-    strategy = 'auto'
-    if len(trainer_kwargs['devices']) > 1:
-        strategy = 'ddp_find_unused_parameters_true'
+    strategy = select_train_strategy(
+        trainer_kwargs["devices"],
+        num_nodes,
+        experiment_config.model.cotrain_param_touch,
+    )
 
-    lr_monitor = LearningRateMonitor(logging_interval='step')
+    lr_monitor = LearningRateMonitor(logging_interval="step")
 
     callbacks = [lr_monitor]
     pkl_sample_size = experiment_config.dataset.get("pkl_sample_size", 0)
     if pkl_sample_size > 0:
         callbacks.append(PklResampleCallback(num_iters_per_epoch=num_iters_per_epoch))
-        logging.info(f"PklResampleCallback enabled (interval={num_iters_per_epoch} steps)")
+        logging.info(
+            f"PklResampleCallback enabled (interval={num_iters_per_epoch} steps)"
+        )
 
     # Sparse4D defines its training budget in optimizer steps.  Keeping the
     # common max_epochs limit as well can terminate a resumed run at the epoch
@@ -89,7 +118,7 @@ def run_experiment(experiment_config, key):
         num_nodes=num_nodes,
         max_steps=max_steps,
         limit_train_batches=num_iters_per_epoch,
-        reload_dataloaders_every_n_epochs=0,
+        reload_dataloaders_every_n_epochs=1 if pkl_sample_size > 0 else 0,
         log_every_n_steps=50,
         num_sanity_val_steps=0,
         strategy=strategy,
@@ -109,17 +138,16 @@ spec_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # Load experiment specification, additially using schema for validation/retrieving the default values.
 # --config_path and --config_name will be provided by the entrypoint script.
 @hydra_runner(
-    config_path=os.path.join(spec_root, "experiment_specs"), config_name="experiment_spec", schema=ExperimentConfig
+    config_path=os.path.join(spec_root, "experiment_specs"),
+    config_name="experiment_spec",
+    schema=ExperimentConfig,
 )
 @monitor_status(name="Sparse4D", mode="train")
 def main(cfg: ExperimentConfig) -> None:
     """Run the training process."""
     # Obfuscate logs.
     obfuscate_logs(cfg)
-    run_experiment(
-        experiment_config=cfg,
-        key=cfg.encryption_key
-    )
+    run_experiment(experiment_config=cfg, key=cfg.encryption_key)
 
 
 if __name__ == "__main__":

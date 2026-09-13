@@ -9,10 +9,16 @@ from typing import List, Optional, Union, Dict, Any
 
 from nvidia_tao_pytorch.cv.sparse4d.model.blocks import DeformableFeatureAggregation
 from nvidia_tao_pytorch.cv.sparse4d.model.instance_bank import InstanceBank
-from nvidia_tao_pytorch.cv.sparse4d.model.detection3d.detection3d_blocks import SparseBox3DEncoder
+from nvidia_tao_pytorch.cv.sparse4d.model.detection3d.detection3d_blocks import (
+    SparseBox3DEncoder,
+)
 from nvidia_tao_pytorch.cv.sparse4d.model.detection3d.target import SparseBox3DTarget
-from nvidia_tao_pytorch.cv.sparse4d.model.detection3d.detection3d_blocks import SparseBox3DKeyPointsGenerator
-from nvidia_tao_pytorch.cv.sparse4d.model.detection3d.detection3d_blocks import SparseBox3DRefinementModule
+from nvidia_tao_pytorch.cv.sparse4d.model.detection3d.detection3d_blocks import (
+    SparseBox3DKeyPointsGenerator,
+)
+from nvidia_tao_pytorch.cv.sparse4d.model.detection3d.detection3d_blocks import (
+    SparseBox3DRefinementModule,
+)
 from nvidia_tao_pytorch.cv.sparse4d.model.detection3d.decoder import SparseBox3DDecoder
 
 from nvidia_tao_pytorch.cv.sparse4d.model.blocks import VisibilityNet, BNNeck
@@ -32,7 +38,10 @@ def reduce_mean(tensor):
     if not torch.distributed.is_available() or not torch.distributed.is_initialized():
         return tensor
     tensor = tensor.clone()
-    torch.distributed.all_reduce(tensor.div_(torch.distributed.get_world_size()), op=torch.distributed.ReduceOp.SUM)
+    torch.distributed.all_reduce(
+        tensor.div_(torch.distributed.get_world_size()),
+        op=torch.distributed.ReduceOp.SUM,
+    )
     return tensor
 
 
@@ -154,6 +163,7 @@ class Sparse4DHead(nn.Module):
             confidence_decay=self.instance_bank_cfg["confidence_decay"],
             feat_grad=self.instance_bank_cfg["feat_grad"],
             use_temporal_align=self.instance_bank_cfg["use_temporal_align"],
+            reset_on_time_gap=self.instance_bank_cfg.get("reset_on_time_gap", False),
         )
         self.anchor_encoder = SparseBox3DEncoder(
             embed_dims=self.anchor_encoder_cfg["embed_dims"],
@@ -241,15 +251,21 @@ class Sparse4DHead(nn.Module):
                         proj_drop=self.deformable_cfg["proj_drop"],
                         attn_drop=self.deformable_cfg["attn_drop"],
                         kps_generator=SparseBox3DKeyPointsGenerator(
-                            embed_dims=self.deformable_cfg["kps_generator"]["embed_dims"],
-                            num_learnable_pts=self.deformable_cfg["kps_generator"]["num_learnable_pts"],
-                            fix_scale=self.deformable_cfg["kps_generator"]["fix_scale"]
+                            embed_dims=self.deformable_cfg["kps_generator"][
+                                "embed_dims"
+                            ],
+                            num_learnable_pts=self.deformable_cfg["kps_generator"][
+                                "num_learnable_pts"
+                            ],
+                            fix_scale=self.deformable_cfg["kps_generator"]["fix_scale"],
                         ),
                         use_deformable_func=self.deformable_cfg["use_deformable_func"],
                         use_camera_embed=self.deformable_cfg["use_camera_embed"],
                         residual_mode=self.deformable_cfg["residual_mode"],
                         reid_dims=self.config["model"]["head"]["reid_dims"],
-                        use_reid_sampling=self.config["model"]["head"]["use_reid_sampling"],
+                        use_reid_sampling=self.config["model"]["head"][
+                            "use_reid_sampling"
+                        ],
                     )
                 )
             elif op == "refine":
@@ -258,7 +274,9 @@ class Sparse4DHead(nn.Module):
                         embed_dims=self.refine_cfg["embed_dims"],
                         num_cls=len(self.config["dataset"]["classes"]),
                         refine_yaw=self.refine_cfg["refine_yaw"],
-                        with_quality_estimation=self.refine_cfg["with_quality_estimation"],
+                        with_quality_estimation=self.refine_cfg[
+                            "with_quality_estimation"
+                        ],
                     )
                 )
             else:
@@ -270,12 +288,8 @@ class Sparse4DHead(nn.Module):
         self.feat_dims = self.embed_dims
 
         if self.decouple_attn:
-            self.fc_before = nn.Linear(
-                self.embed_dims, self.embed_dims * 2, bias=False
-            )
-            self.fc_after = nn.Linear(
-                self.embed_dims * 2, self.embed_dims, bias=False
-            )
+            self.fc_before = nn.Linear(self.embed_dims, self.embed_dims * 2, bias=False)
+            self.fc_after = nn.Linear(self.embed_dims * 2, self.embed_dims, bias=False)
         else:
             self.fc_before = nn.Identity()
             self.fc_after = nn.Identity()
@@ -327,37 +341,63 @@ class Sparse4DHead(nn.Module):
             )
         )
 
+    @staticmethod
+    def _get_data_indices(metas, key):
+        """Read per-sample indices from TAO or legacy nested metadata."""
+        if not isinstance(metas, dict):
+            return None
+        indices = metas.get(key)
+        if indices is None and "img_metas" in metas:
+            img_metas = metas["img_metas"]
+            if isinstance(img_metas, (list, tuple)):
+                indices = [sample.get(key, -1) for sample in img_metas]
+        if indices is None:
+            return None
+        if isinstance(indices, torch.Tensor):
+            indices = indices.detach().cpu().tolist()
+        elif not isinstance(indices, (list, tuple)):
+            indices = [indices]
+        return list(indices)
+
+    @staticmethod
+    def _indices_changed(previous, current):
+        """Return whether any known per-sample data index changed."""
+        if previous is None or current is None:
+            return False
+        if len(previous) != len(current):
+            return True
+        return any(
+            prev != -1 and curr != -1 and prev != curr
+            for prev, curr in zip(previous, current)
+        )
+
+    def _reset_at_data_boundary(self, metas):
+        """Reset all temporal caches when a group or scene changes."""
+        group_indices = self._get_data_indices(metas, "group_idx")
+        scene_indices = self._get_data_indices(metas, "scene_idx")
+        previous_groups, previous_scenes = self.instance_bank.get_data_indices()
+
+        boundary = self._indices_changed(previous_groups, group_indices)
+        boundary = boundary or self._indices_changed(previous_scenes, scene_indices)
+        if boundary:
+            self.instance_bank.reset_temporal_state()
+            self.sampler.dn_metas = None
+
+        # Retain the last known dimension when one metadata layout omits it.
+        if group_indices is None:
+            group_indices = previous_groups
+        if scene_indices is None:
+            scene_indices = previous_scenes
+        self.instance_bank.set_data_indices(group_indices, scene_indices)
+        return boundary
+
     def forward(
         self,
         feature_maps: Union[torch.Tensor, List],
         metas: dict,
     ):
         """Forward function."""
-        if self.use_temporal_align:
-            # reset gt_index_mapping for different groups
-            group_indices_curr = [metas["img_metas"][i]["group_idx"] for i in range(len(metas["img_metas"]))]
-            scene_indices_curr = [metas["img_metas"][i]["scene_idx"] for i in range(len(metas["img_metas"]))]
-            group_indices_prev, scene_indices_prev = self.instance_bank.get_data_indices()
-
-            # check if we need to reset gt_index_mapping for different groups
-            flags_new_group = []  # need to be reset if flag is True
-            if group_indices_prev is not None:
-                for group_idx_prev, group_idx_curr in zip(group_indices_prev, group_indices_curr):
-                    if group_idx_prev != -1 and group_idx_curr != -1:
-                        flags_new_group.append(group_idx_prev != group_idx_curr)
-                    else:
-                        flags_new_group.append(False)
-            else:
-                flags_new_group = [False] * len(group_indices_curr)
-
-            if scene_indices_prev is not None:
-                for i, (scene_idx_prev, scene_idx_curr) in enumerate(zip(scene_indices_prev, scene_indices_curr)):
-                    if scene_idx_prev != -1 and scene_idx_curr != -1:
-                        # group_idx is changed OR scene_idx is changed
-                        flags_new_group[i] = flags_new_group[i] or (scene_idx_prev != scene_idx_curr)
-
-            self.instance_bank.reset_gt_index_mapping_by_data_indices(flags_new_group)
-            self.instance_bank.set_data_indices(group_indices_curr, scene_indices_curr)
+        self._reset_at_data_boundary(metas)
 
         if isinstance(feature_maps, torch.Tensor):
             feature_maps = [feature_maps]
@@ -365,7 +405,8 @@ class Sparse4DHead(nn.Module):
 
         # ========= get instance info ============
         if (
-            self.sampler.dn_metas is not None and self.sampler.dn_metas["dn_anchor"].shape[0] != batch_size
+            self.sampler.dn_metas is not None and
+            self.sampler.dn_metas["dn_anchor"].shape[0] != batch_size
         ):
             self.sampler.dn_metas = None
         (
@@ -375,9 +416,7 @@ class Sparse4DHead(nn.Module):
             temp_anchor,
             time_interval,
             _,
-        ) = self.instance_bank.get(
-            batch_size, metas, dn_metas=self.sampler.dn_metas
-        )
+        ) = self.instance_bank.get(batch_size, metas, dn_metas=self.sampler.dn_metas)
 
         # ========= prepare for denosing training ============
         # 1. get dn metas: noisy-anchors and corresponding GT
@@ -430,9 +469,7 @@ class Sparse4DHead(nn.Module):
             )
             num_instance = instance_feature.shape[1]
             num_free_instance = num_instance - num_dn_anchor
-            attn_mask = anchor.new_ones(
-                (num_instance, num_instance), dtype=torch.bool
-            )
+            attn_mask = anchor.new_ones((num_instance, num_instance), dtype=torch.bool)
             attn_mask[:num_free_instance, :num_free_instance] = False
             attn_mask[num_free_instance:, num_free_instance:] = dn_attn_mask
 
@@ -462,9 +499,7 @@ class Sparse4DHead(nn.Module):
                     temp_instance_feature,
                     query_pos=anchor_embed,
                     key_pos=temp_anchor_embed,
-                    attn_mask=attn_mask
-                    if temp_instance_feature is None
-                    else None,
+                    attn_mask=attn_mask if temp_instance_feature is None else None,
                 )
             elif op == "gnn":
                 instance_feature = self.graph_model(
@@ -489,8 +524,12 @@ class Sparse4DHead(nn.Module):
                 if self.use_reid_sampling:
                     backbone_feature = output_deform["backbone_feature"]
                     visibility_score = self.visibility_net(backbone_feature)
-                    softmax_weights = torch.softmax(visibility_score, dim=2).unsqueeze(-1)
-                    weighted_backbone_feature = (backbone_feature * softmax_weights).sum(dim=2)
+                    softmax_weights = torch.softmax(visibility_score, dim=2).unsqueeze(
+                        -1
+                    )
+                    weighted_backbone_feature = (
+                        backbone_feature * softmax_weights
+                    ).sum(dim=2)
                     predicted_id, bnn_feature = self.bnneck(weighted_backbone_feature)
 
             elif op == "refine":
@@ -500,7 +539,9 @@ class Sparse4DHead(nn.Module):
                     anchor_embed,
                     time_interval=time_interval,
                     return_cls=(
-                        self.training or len(prediction) == self.num_single_frame_decoder - 1 or i == len(self.operation_order) - 1
+                        self.training or
+                        len(prediction) == self.num_single_frame_decoder - 1 or
+                        i == len(self.operation_order) - 1
                     ),
                 )
                 prediction.append(anchor)
@@ -516,7 +557,9 @@ class Sparse4DHead(nn.Module):
                         instance_feature, anchor, cls
                     )
                     if (
-                        dn_metas is not None and self.sampler.num_temp_dn_groups > 0 and dn_id_target is not None
+                        dn_metas is not None and
+                        self.sampler.num_temp_dn_groups > 0 and
+                        dn_id_target is not None
                     ):
                         (
                             instance_feature,
@@ -538,7 +581,8 @@ class Sparse4DHead(nn.Module):
                 if i != len(self.operation_order) - 1:
                     anchor_embed = self.anchor_encoder(anchor)
                 if (
-                    len(prediction) > self.num_single_frame_decoder and temp_anchor_embed is not None
+                    len(prediction) > self.num_single_frame_decoder and
+                    temp_anchor_embed is not None
                 ):
                     temp_anchor_embed = anchor_embed[
                         :, : self.instance_bank.num_temp_instances
@@ -550,15 +594,12 @@ class Sparse4DHead(nn.Module):
 
         # split predictions of learnable instances and noisy instances
         if dn_metas is not None:
-            dn_classification = [
-                x[:, num_free_instance:] for x in classification
-            ]
+            dn_classification = [x[:, num_free_instance:] for x in classification]
             classification = [x[:, :num_free_instance] for x in classification]
             dn_prediction = [x[:, num_free_instance:] for x in prediction]
             prediction = [x[:, :num_free_instance] for x in prediction]
             quality = [
-                x[:, :num_free_instance] if x is not None else None
-                for x in quality
+                x[:, :num_free_instance] if x is not None else None for x in quality
             ]
             output.update(
                 {
@@ -587,8 +628,12 @@ class Sparse4DHead(nn.Module):
             cls = cls[:, :num_free_instance]
             if self.use_reid_sampling:
                 bnn_features = [x[:, :num_free_instance] for x in bnn_features]
-                backbone_features = [x[:, :num_free_instance] for x in backbone_features]
-                visibility_scores = [x[:, :num_free_instance] for x in visibility_scores]
+                backbone_features = [
+                    x[:, :num_free_instance] for x in backbone_features
+                ]
+                visibility_scores = [
+                    x[:, :num_free_instance] for x in visibility_scores
+                ]
                 predicted_ids = [x[:, :num_free_instance] for x in predicted_ids]
 
             # cache dn_metas for temporal denoising
@@ -618,9 +663,7 @@ class Sparse4DHead(nn.Module):
                 output["visibility_scores"] = visibility_scores[-1]
 
         # cache current instances for temporal modeling
-        self.instance_bank.cache(
-            instance_feature, anchor, cls, metas, feature_maps
-        )
+        self.instance_bank.cache(instance_feature, anchor, cls, metas, feature_maps)
         if not self.training:
             instance_id = self.instance_bank.get_instance_id(
                 cls, anchor, self.decoder.score_threshold
@@ -657,7 +700,7 @@ def build_head(config: Dict[str, Any]) -> nn.Module:
     head_config = config["model"]["head"]
     head_type = head_config["type"]
 
-    if head_type == 'sparse4d':
+    if head_type == "sparse4d":
 
         # Create head with the constructed modules
         head = Sparse4DHead(
