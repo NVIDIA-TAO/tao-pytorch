@@ -163,6 +163,44 @@ def test_export_sanitizes_nonfinite_msda_sampling_locations():
 @pytest.mark.cv_unit
 @pytest.mark.sparse4d
 @pytest.mark.export
+def test_export_project_points_sanitizes_after_image_normalization():
+    """Projection must sanitize invalid pairs after pixel normalization."""
+    key_points = torch.tensor(
+        [
+            [
+                [
+                    [50.0, 25.0, 1.0],
+                    [float("nan"), 25.0, 1.0],
+                    [50.0, float("inf"), 1.0],
+                    [50.0, 25.0, -1.0],
+                    [100.0, 25.0, 1.0],
+                ]
+            ]
+        ],
+        dtype=torch.float32,
+    )
+    projection_mat = torch.eye(4, dtype=torch.float32).reshape(1, 1, 4, 4)
+    image_wh = torch.tensor([[[100.0, 100.0]]], dtype=torch.float32)
+
+    projected = Sparse4DExporter.deformable_feature_aggregation_project_points(
+        None,
+        key_points,
+        projection_mat,
+        image_wh,
+    )
+
+    assert projected.shape == (1, 1, 1, 5, 2)
+    torch.testing.assert_close(
+        projected[0, 0, 0, 0],
+        torch.tensor([0.5, 0.25]),
+    )
+    assert torch.equal(projected[0, 0, 0, 1:], torch.zeros((4, 2)))
+    assert torch.isfinite(projected).all()
+
+
+@pytest.mark.cv_unit
+@pytest.mark.sparse4d
+@pytest.mark.export
 def test_sparse4d_refinement_module():
     """Simple test for the refinement module forward pass."""
     from nvidia_tao_pytorch.cv.sparse4d.model.detection3d.detection3d_blocks import (
