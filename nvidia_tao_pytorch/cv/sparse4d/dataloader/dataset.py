@@ -485,7 +485,9 @@ class Omniverse3DDetTrackDataset(Dataset):
                 name
                 for name in os.listdir(ann_file)
                 if name.endswith(".pkl") and
-                name not in _GENERATED_ANNOTATION_CACHE_FILENAMES
+                not name.endswith("_lazy_index.pkl") and
+                name not in _GENERATED_ANNOTATION_CACHE_FILENAMES and
+                osp.isfile(osp.join(ann_file, name))
             )
             return [osp.join(ann_file, name) for name in ann_files]
         elif ann_file.endswith(".txt"):

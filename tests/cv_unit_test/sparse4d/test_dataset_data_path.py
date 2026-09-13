@@ -46,6 +46,19 @@ def test_dataset_constructor_preserves_annotation_path_alias(monkeypatch):
     assert dataset.ann_file == dataset.anno_file
 
 
+def test_annotation_directory_excludes_generated_indices_and_nonfiles(tmp_path):
+    """Directory discovery returns only regular annotation PKLs."""
+    annotation = tmp_path / "SceneA_infos_train.pkl"
+    annotation.touch()
+    (tmp_path / "_lazy_index.pkl").touch()
+    (tmp_path / "train_lazy_index.pkl").touch()
+    (tmp_path / "_pkl_cam_counts.pkl").touch()
+    (tmp_path / "looks_like_an_annotation.pkl").mkdir()
+    dataset = object.__new__(Omniverse3DDetTrackDataset)
+
+    assert dataset._get_ann_paths(str(tmp_path)) == [str(annotation)]
+
+
 def _dataset_without_initialization(info):
     dataset = object.__new__(Omniverse3DDetTrackDataset)
     dataset.lazy_load = False
