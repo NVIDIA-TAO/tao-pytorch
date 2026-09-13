@@ -73,8 +73,13 @@ def test_depth_loader_preserves_missing_sentinel_and_valid_depth(tmp_path):
     )
 
 
-def test_load_loose_to_tight_sidecar_aligns_instances_and_cameras(tmp_path):
-    """LTT sidecars join on scene, frame, instance, and camera."""
+@pytest.mark.parametrize(
+    "scene_name", ["CT1_distill__SceneA", "CT1_distill__SceneA+training_group_0"]
+)
+def test_load_loose_to_tight_sidecar_aligns_instances_and_cameras(
+    tmp_path, scene_name
+):
+    """LTT sidecars join prefixed/grouped scenes to their raw scene artifact."""
     np.savez(
         tmp_path / "SceneA__ltt2dgt.npz",
         _meta=_encoded_metadata(cam_names=["cam0", "cam1"]),
@@ -87,7 +92,7 @@ def test_load_loose_to_tight_sidecar_aligns_instances_and_cameras(tmp_path):
     transform = LoadLooseToTight2DGT(tmp_path)
     results = transform(
         {
-            "scene_name": "CT1_distill__SceneA",
+            "scene_name": scene_name,
             "cam_names": ["cam0", "cam1"],
             "img_filename": ["frame_000042.jpg", "frame_000042.jpg"],
             "instance_inds": np.array([8, 7]),

@@ -245,7 +245,9 @@ class LoadLooseToTight2DGT:
 
     def _sidecar_path(self, scene):
         """Resolve a scene name to its LTT sidecar path."""
-        bare_scene = re.sub(self.dedup_regex, "", scene) if self.dedup_regex else scene
+        bare_scene = scene.split("+")[0]
+        if self.dedup_regex:
+            bare_scene = re.sub(self.dedup_regex, "", bare_scene)
         return os.path.join(self.sidecar_dir, f"{bare_scene}__ltt2dgt.npz")
 
     def _get_index(self, scene):
