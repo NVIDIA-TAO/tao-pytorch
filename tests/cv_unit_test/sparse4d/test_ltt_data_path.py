@@ -224,6 +224,44 @@ def test_load_rtdetr_marks_explicit_empty_frame_as_valid(tmp_path):
     assert all(boxes.shape == (0, 4) for boxes in results["det_boxes_2d"])
 
 
+def test_load_rtdetr_requires_cache_canonical_image_shape(tmp_path):
+    """SV2D cache coordinates cannot silently diverge from resized images."""
+    np.savez(
+        tmp_path / "SV2D__rtdetr2d.npz",
+        _meta=_encoded_metadata(
+            cam_names=["cam0"],
+            class_names=["person"],
+            virtual_camera={"width": 12, "height": 8},
+        ),
+        frame_id=np.array([0], dtype=np.int32),
+        cam=np.array([0], dtype=np.int16),
+        class_id=np.array([0], dtype=np.int16),
+        box=np.array([[1, 2, 10, 7]], dtype=np.float32),
+        score=np.array([1.0], dtype=np.float32),
+        valid_frame_id=np.array([0], dtype=np.int32),
+        valid_cam=np.array([0], dtype=np.int16),
+    )
+    transform = LoadRTDETR2D(
+        cache_dir=tmp_path,
+        class_names=["person"],
+    )
+    sample = {
+        "scene_name": "SV2D",
+        "frame_idx": 0,
+        "cam_names": ["cam0"],
+        "has_3d_gt": False,
+        "img": [np.zeros((4, 6, 3), dtype=np.float32)],
+    }
+
+    with pytest.raises(ValueError, match="resize_to_canonical_2d"):
+        transform(dict(sample))
+
+    resized = ResizeToCanonical2D(height=8, width=12)(sample)
+    output = transform(resized)
+    assert output["has_2d_pseudo"] is True
+    np.testing.assert_array_equal(output["det_boxes_2d"][0], [[1, 2, 10, 7]])
+
+
 def test_load_rtdetr_missing_cache_warns_once_and_marks_invalid(tmp_path):
     """A missing sidecar cannot masquerade as a background-only frame."""
     transform = LoadRTDETR2D(cache_dir=tmp_path)

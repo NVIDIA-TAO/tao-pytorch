@@ -439,6 +439,36 @@ class LoadRTDETR2D:
                     f"dataset={self.class_names!r}"
                 )
             active_class_names = cache_class_names or self.class_names or []
+            canonical_shape = None
+            virtual_camera = metadata.get("virtual_camera")
+            if virtual_camera is not None:
+                if not isinstance(virtual_camera, dict):
+                    raise ValueError(
+                        f"{cache_path} virtual_camera metadata must be an object"
+                    )
+                width = virtual_camera.get("width")
+                height = virtual_camera.get("height")
+                try:
+                    width_value = int(width)
+                    height_value = int(height)
+                    dimensions_are_integral = (
+                        not isinstance(width, (bool, np.bool_)) and
+                        not isinstance(height, (bool, np.bool_)) and
+                        float(width) == width_value and
+                        float(height) == height_value
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    dimensions_are_integral = False
+                if (
+                    not dimensions_are_integral or
+                    width_value <= 0 or
+                    height_value <= 0
+                ):
+                    raise ValueError(
+                        f"{cache_path} virtual_camera width/height must be "
+                        "positive integers"
+                    )
+                canonical_shape = (height_value, width_value)
 
             def camera_name(camera_id):
                 camera_idx = int(camera_id)
@@ -483,7 +513,7 @@ class LoadRTDETR2D:
                 record[0].append(box)
                 record[1].append(int(class_id))
                 record[2].append(float(score))
-            cache_record = (index, valid_pairs)
+            cache_record = (index, valid_pairs, canonical_shape)
 
         self._cache[scene] = cache_record
         if len(self._cache) > self.cache_size:
@@ -530,7 +560,22 @@ class LoadRTDETR2D:
                 "skipped for this sample.",
             )
         else:
-            index, valid_pairs = cache_record
+            index, valid_pairs, canonical_shape = cache_record
+            images = results.get("img")
+            if canonical_shape is not None and images is not None:
+                mismatched_shapes = [
+                    tuple(np.asarray(image).shape[:2])
+                    for image in images
+                    if tuple(np.asarray(image).shape[:2]) != canonical_shape
+                ]
+                if mismatched_shapes:
+                    raise ValueError(
+                        "LoadRTDETR2D cache coordinates require image shape "
+                        f"{canonical_shape}, but received {mismatched_shapes[0]}. "
+                        "Enable dataset.resize_to_canonical_2d and set "
+                        "canonical_2d_height/canonical_2d_width to the cache "
+                        "virtual_camera dimensions."
+                    )
 
         has_2d_pseudo = False
         if frame_id is None:
