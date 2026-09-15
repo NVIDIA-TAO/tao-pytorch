@@ -34,7 +34,7 @@ def test_run_experiment_forwards_logging_interval(monkeypatch):
         "initialize_train_experiment",
         lambda *_: (None, {"devices": [0], "max_epochs": cfg.train.num_epochs}),
     )
-    monkeypatch.setattr(train, "DinoV2DataModule", lambda *_: object())
+    monkeypatch.setattr(train, "DinoV3DataModule", lambda *_: object())
     monkeypatch.setattr(train, "DinoV3PlModel", lambda *_: model)
     monkeypatch.setattr(train, "Trainer", _Trainer)
 
