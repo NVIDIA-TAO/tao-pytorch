@@ -112,13 +112,16 @@ def dual_output(log_file=None):
         yield sys.stdout, None
 
 
-def launch(args, unknown_args, subtasks, network=None):
+def launch(args, unknown_args, subtasks, network=None, *, strict_multinode=False):
     """CLI function that executes subtasks.
 
     Args:
-        parser: Created parser object for a given task.
-        subtasks: list of subtasks for a given task.
-        network (str): name of the network running.
+        args (dict): Parsed task arguments.
+        unknown_args (list): Additional arguments forwarded to the task.
+        subtasks (dict): Available task definitions.
+        network (str): Name of the network running.
+        strict_multinode (bool): Raise when multinode validation fails instead
+            of retaining the legacy single-node fallback.
     """
     # default_specs doesn't require an experiment spec file
     if args["subtask"] != "default_specs":
@@ -246,6 +249,11 @@ def launch(args, unknown_args, subtasks, network=None):
             ]
         except Exception as e:
             logging.warning(f"[Multinode] Error overriding configs: {e}")
+            if strict_multinode:
+                raise RuntimeError(
+                    "Strict multinode launch validation failed; refusing to "
+                    "fall back to a single-node job"
+                ) from e
             logging.warning("[Multinode] Using default configs.")
             num_nodes = 1
             num_gpus = torch.cuda.device_count()
