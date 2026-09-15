@@ -49,6 +49,8 @@ def _transform(_image):
 
 
 @pytest.mark.parametrize(("relative_path", "reader", "count"), [
+    ("dinov3/data_refinement/cli.py", "read_parquet", 1),
+    ("dinov3/data_refinement/grit_pipeline.py", "read_parquet", 2),
     ("dinov3/dataloader/dataset.py", "read_table", 1),
 ])
 def test_deft_parquet_reads_disable_only_background_prefetch(

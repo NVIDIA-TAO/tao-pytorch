@@ -317,3 +317,31 @@ class DinoV3VisionTransformer(DinoV2VisionTransformer):
             "x_norm_patchtokens": x_norm[:, 1:],
             "masks": masks,
         }
+
+    def forward_selected_layers(self, x, layer_numbers):
+        """Return normalized tokens at declared one-based block depths.
+
+        Args:
+            x (torch.Tensor): Image batch.
+            layer_numbers (Iterable[int]): Strictly increasing one-based blocks.
+
+        Returns:
+            list[torch.Tensor]: Normalized full token sequences in requested order.
+        """
+        requested = tuple(int(value) for value in layer_numbers)
+        valid = bool(requested)
+        valid = valid and tuple(sorted(set(requested))) == requested
+        valid = valid and requested[0] >= 1 and requested[-1] <= self.n_blocks
+        if not valid:
+            raise ValueError(
+                f"layer_numbers must be unique, increasing, and within [1, {self.n_blocks}]"
+            )
+        rope = self._build_rope(x)
+        tokens = self.norm_pre(self.patch_drop(self.patch_pos_embed(x)))
+        outputs = []
+        requested_set = set(requested)
+        for block_number, block in enumerate(self.blocks, start=1):
+            tokens = block(tokens, rope=rope)
+            if block_number in requested_set:
+                outputs.append(self.norm(tokens))
+        return outputs

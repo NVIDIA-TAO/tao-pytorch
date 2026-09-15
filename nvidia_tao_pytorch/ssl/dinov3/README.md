@@ -74,7 +74,7 @@ The `dinov3` console command is registered in `setup.py` and dispatches to the s
 exactly like every other TAO task (`entrypoint/` → `scripts/` → `model/`).
 
 ```
-console: dinov3 {train, inference, export, convert, default_specs}
+console: dinov3 {train, inference, export, convert, grit_score, default_specs}
   └─ ssl/dinov3/entrypoint/dinov3.py     # discovers subtasks, launches
        ├─ ssl/dinov3/scripts/train.py     # @hydra_runner + @monitor_status; builds DinoV3PlModel
        │    └─ ssl/dinov3/model/pl_model.py        DinoV3PlModel(DinoV2PlModel)
@@ -468,7 +468,101 @@ end-to-end training run (loss-down / no NaN-OOM sanity), and the deploy path in 
 
 ---
 
-## 12. References
+## 12. SSL data refinement actions
+
+GRIT scoring is available through the normal TAO experiment interface:
+
+```bash
+dinov3 grit_score -e grit.yaml
+```
+
+```yaml
+results_dir: /results/deft
+grit_score:
+  input_parquet: /data/targets.parquet
+  checkpoint: /models/dinov3.pth
+  base_spec: /specs/train_dinov3.yaml
+  device: cuda
+  batch_size: 12
+```
+
+The subtask uses the DINOv3 dataclass schema, Hydra overrides, and TAO status
+logging. Scores, `experiment.yaml`, and `status.json` appear under
+`/results/deft/grit_score`; set `grit_score.results_dir` for an exact output
+directory. A committed score directory cannot be overwritten. The module
+interfaces below remain the stable leaf adapters used by the external DEFT
+runner. Training still invokes the existing `dinov3 train` path.
+
+The DINOv3 package exposes two atomic actions for the platform-neutral SSL
+refinement controller:
+
+- `python -m nvidia_tao_pytorch.ssl.dinov3.data_refinement.cli --config grit.yaml`
+  recomputes the frozen GRIT probes from
+  the declared checkpoint and query/reference image manifest. The production
+  path uses 512-pixel images, relative depth quartiles, two fixed 90% crop views, global
+  neighbor settling, and dense Gram/retrieval settling. The result is an
+  ordinal within-domain score, not uncertainty or a failure probability.
+  ViT-B therefore uses blocks 3/6/9/12; ViT-L, H+, and 7B use the equivalent
+  25/50/75/100% depths. The artifact records the exact variant and blocks.
+- `python -m nvidia_tao_pytorch.ssl.dinov3.data_refinement.train_cli` derives a
+  normal DINOv3 experiment spec from an
+  immutable cumulative Parquet manifest and a parent checkpoint. One requested
+  pass means every manifest sample is visited at least once; distributed
+  padding can repeat a small tail.
+
+The trainer writes a sealed `refinement_input.yaml` and binds its SHA-256,
+effective resource overrides, checkpoint policy, same-round resume checkpoint,
+and TAO launch implementation identities in `training_contract.json`. TAO owns
+the separate runtime `experiment.yaml`. Every launcher trains from a private
+temporary copy because the TAO entrypoint may normalize its input spec.
+Finalization verifies the requested epoch and optimizer step, hashes the runtime
+spec, and publishes `training_commit.json` binding the final contract,
+checkpoint, and runtime-spec digests. `_SUCCESS` contains the commit record's
+SHA-256. An interrupted finalization reconstructs a missing commit record from
+the sealed final contract and verifies it against any existing success marker.
+
+Multi-node runners must start exactly one trainer process per node and export:
+
+- `WORLD_SIZE` as the TAO **node count**, not the global process count.
+- `NODE_RANK`, `MASTER_ADDR`, `MASTER_PORT`, and `NUM_GPU_PER_NODE`.
+- A unique `TAO_REFINEMENT_LAUNCH_ID` for each gang attempt. A bare scheduler
+  job ID is invalid because it can survive a requeue. For example, a Slurm
+  runner can combine its job ID, restart count, and runner attempt generation.
+
+These values must exactly match `--num-nodes` and `--gpus-per-node`. The trainer
+fails before launch on missing or mismatched values and enables strict TAO
+validation so the entrypoint cannot silently fall back to one node. Rank zero
+publishes the prepared bundle and final EMA teacher; other nodes wait for the
+matching prepared marker and never finalize. Lightning DDP/FSDP creates the
+local GPU workers in each node-level launcher through an explicit
+`LightningEnvironment`, independent of scheduler auto-detection. Process-level
+launcher variables such as `LOCAL_RANK` are invalid at the adapter boundary.
+A failed launcher cancels the whole gang, and a retry starts every launcher
+with a fresh rendezvous and launch ID. Partial rank or pod retries are invalid. All
+nodes require the same immutable input paths and shared output filesystem
+namespace with atomic rename and hard-link support. Each node verifies the base
+spec, manifest, parent checkpoint, prepared spec, and same-round resume
+checkpoint before spawning workers. Scheduler-provided `CUDA_VISIBLE_DEVICES`
+must expose exactly the requested GPUs and remains unchanged in strict mode. Set
+`TAO_REFINEMENT_TMPDIR` (or `TMPDIR`) to job-local temporary storage. The
+`--prepare-only` and `--finalize-only` modes remain available to external
+platform adapters and recovery tooling. A completed output directory is
+idempotent for the identical request and is permanently bound to its base spec,
+manifest, parent checkpoint, passes, resources, and checkpoint policy. Reusing
+it for a different request fails instead of replacing its provenance.
+
+Training manifests use one canonical locator: `storage_type` (`file`, `tar`, or
+`zip`), `path`, and `member` for archive-backed rows. They avoid image copies
+and symlink trees; the sampler may shuffle rows and distributed padding may
+repeat a small tail. The
+scorer and trainer publish `_SUCCESS` only after all declared outputs exist.
+
+The higher-level workflow, customer task heads, evaluation adapters, source
+search, and stopping policy intentionally live outside this package.
+
+---
+
+## 13. References
 - DINOv3 (Meta AI). Public weights: `facebook/dinov3-vitb16-pretrain-lvd1689m` / timm
   `vit_base_patch16_dinov3.lvd1689m`.
 - timm RoPE reference: `timm.layers.pos_embed_sincos.RotaryEmbeddingDinoV3` / `make_coords_dinov3`.
