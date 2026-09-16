@@ -34,6 +34,83 @@ LIGHTNING_EXCLUDED_NETWORKS = [
 ]
 
 
+def _validate_native_lightning_launch(
+    *,
+    args,
+    network,
+    num_nodes,
+    num_gpus,
+    gpu_ids,
+):
+    """Validate the DINOv3 DEFT node entrypoint without rewriting its spec."""
+    enabled = all((
+        os.environ.get("TAO_REFINEMENT_LIGHTNING_LAUNCH") == "1",
+        network == "dinov3",
+        args["subtask"] == "train",
+    ))
+    if not enabled:
+        return False
+    if os.environ.get("TAO_STRICT_MULTINODE") != "1":
+        raise RuntimeError(
+            "Native DINOv3 refinement requires TAO_STRICT_MULTINODE=1"
+        )
+    inherited_workers = sorted(
+        name for name in os.environ
+        if name in {
+            "RANK", "LOCAL_RANK", "LOCAL_WORLD_SIZE", "GROUP_RANK",
+            "ROLE_RANK", "ROLE_WORLD_SIZE",
+        } or name.startswith("TORCHELASTIC_")
+    )
+    if inherited_workers:
+        raise RuntimeError(
+            "Native DINOv3 refinement must start at a node boundary; inherited "
+            f"worker variables are forbidden: {inherited_workers}"
+        )
+    expected_nodes = int(num_nodes)
+    expected_gpus = int(num_gpus)
+    if expected_nodes <= 0 or expected_gpus <= 0:
+        raise RuntimeError("Native DINOv3 refinement allocation must be positive")
+    if list(gpu_ids) != list(range(expected_gpus)):
+        raise RuntimeError(
+            "Native DINOv3 refinement requires contiguous local gpu_ids"
+        )
+    declared_nodes = os.environ.get("WORLD_SIZE")
+    declared_gpus = os.environ.get("NUM_GPU_PER_NODE")
+    if declared_nodes is not None and int(declared_nodes) != expected_nodes:
+        raise RuntimeError(
+            "Native DINOv3 refinement WORLD_SIZE differs from train.num_nodes"
+        )
+    if declared_gpus is not None and int(declared_gpus) != expected_gpus:
+        raise RuntimeError(
+            "Native DINOv3 refinement NUM_GPU_PER_NODE differs from train.num_gpus"
+        )
+    if expected_gpus > torch.cuda.device_count():
+        raise RuntimeError(
+            "Native DINOv3 refinement requests more GPUs than are visible"
+        )
+    node_rank = os.environ.get("NODE_RANK")
+    if expected_nodes > 1:
+        required = (
+            "WORLD_SIZE", "NUM_GPU_PER_NODE", "NODE_RANK",
+            "MASTER_ADDR", "MASTER_PORT",
+        )
+        missing = [name for name in required if not os.environ.get(name)]
+        if missing:
+            raise RuntimeError(
+                "Native DINOv3 multinode launch is missing allocation fields: "
+                f"{missing}"
+            )
+    elif node_rank not in {None, "0"}:
+        raise RuntimeError("Single-node DINOv3 refinement requires NODE_RANK=0")
+    if node_rank is not None and not 0 <= int(node_rank) < expected_nodes:
+        raise RuntimeError("Native DINOv3 refinement NODE_RANK is out of range")
+    if os.environ.get("MASTER_PORT") is not None:
+        master_port = int(os.environ["MASTER_PORT"])
+        if not 1024 <= master_port <= 65535:
+            raise RuntimeError("Native DINOv3 refinement MASTER_PORT is invalid")
+    return True
+
+
 def get_subtasks(package):
     """Get supported subtasks for a given task.
 
@@ -112,13 +189,16 @@ def dual_output(log_file=None):
         yield sys.stdout, None
 
 
-def launch(args, unknown_args, subtasks, network=None):
+def launch(args, unknown_args, subtasks, network=None, *, strict_multinode=False):
     """CLI function that executes subtasks.
 
     Args:
-        parser: Created parser object for a given task.
-        subtasks: list of subtasks for a given task.
-        network (str): name of the network running.
+        args (dict): Parsed task arguments.
+        unknown_args (list): Additional arguments forwarded to the task.
+        subtasks (dict): Available task definitions.
+        network (str): Name of the network running.
+        strict_multinode (bool): Raise when multinode validation fails instead
+            of retaining the legacy single-node fallback.
     """
     # default_specs doesn't require an experiment spec file
     if args["subtask"] != "default_specs":
@@ -203,15 +283,33 @@ def launch(args, unknown_args, subtasks, network=None):
                     if "num_nodes" in exp_config[task]:
                         num_nodes = exp_config[task]["num_nodes"]
 
+    native_lightning_requested = all((
+        os.environ.get("TAO_REFINEMENT_LIGHTNING_LAUNCH") == "1",
+        network == "dinov3",
+        args["subtask"] == "train",
+    ))
+    if num_gpus != len(gpu_ids) and native_lightning_requested:
+        raise RuntimeError(
+            "Native DINOv3 refinement requires train.num_gpus to equal "
+            "the length of train.gpu_ids"
+        )
     if num_gpus != len(gpu_ids):
         logging.warning(f"Number of gpus {num_gpus} != len({gpu_ids}).")
         num_gpus = max(num_gpus, len(gpu_ids))
         gpu_ids = list(range(num_gpus)) if len(gpu_ids) != num_gpus else gpu_ids
         logging.info(f"Using GPUs {gpu_ids} (total {num_gpus})")
 
+    native_lightning_launch = _validate_native_lightning_launch(
+        args=args,
+        network=network,
+        num_nodes=num_nodes,
+        num_gpus=num_gpus,
+        gpu_ids=gpu_ids,
+    )
+
     # Configure multinode
     multinode = [f"--nnodes={num_nodes}", f"--nproc-per-node={num_gpus}"]
-    if os.environ.get("WORLD_SIZE"):
+    if os.environ.get("WORLD_SIZE") and not native_lightning_launch:
         try:
             validate_configs(logging)
 
@@ -246,6 +344,11 @@ def launch(args, unknown_args, subtasks, network=None):
             ]
         except Exception as e:
             logging.warning(f"[Multinode] Error overriding configs: {e}")
+            if strict_multinode:
+                raise RuntimeError(
+                    "Strict multinode launch validation failed; refusing to "
+                    "fall back to a single-node job"
+                ) from e
             logging.warning("[Multinode] Using default configs.")
             num_nodes = 1
             num_gpus = torch.cuda.device_count()
