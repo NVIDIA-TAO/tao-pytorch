@@ -34,6 +34,122 @@ LIGHTNING_EXCLUDED_NETWORKS = [
 ]
 
 
+def _native_dinov3_deft_requested(args, network):
+    """Return whether the DINOv3 DEFT node-level Lightning path is selected."""
+    return all((
+        os.environ.get("TAO_REFINEMENT_LIGHTNING_LAUNCH") == "1",
+        network == "dinov3",
+        args["subtask"] == "train",
+    ))
+
+
+def _resolve_native_dinov3_deft_allocation(args, unknown_args):
+    """Resolve the sealed train spec first, then overlay Hydra allocation args."""
+    prefix = "Parameter validation error: DINOv3 DEFT"
+    try:
+        with open(args["experiment_spec_file"], "r", encoding="utf-8") as spec:
+            experiment = yaml.safe_load(spec)
+    except yaml.YAMLError as error:
+        raise ValueError(f"{prefix} train spec is invalid YAML") from error
+    if experiment is None:
+        experiment = {}
+    if not isinstance(experiment, dict):
+        raise ValueError(f"{prefix} train spec root must be a mapping")
+    train = experiment.get("train") or {}
+    if not isinstance(train, dict):
+        raise ValueError(f"{prefix} train must be a mapping")
+    allocation = {
+        "num_nodes": train.get("num_nodes", 1),
+        "num_gpus": train.get("num_gpus", 1),
+        "gpu_ids": train.get("gpu_ids", [0]),
+    }
+    supported = {
+        "num_nodes": "num_nodes",
+        "train.num_nodes": "num_nodes",
+        "num_gpus": "num_gpus",
+        "train.num_gpus": "num_gpus",
+        "gpu_ids": "gpu_ids",
+        "train.gpu_ids": "gpu_ids",
+    }
+    for argument in unknown_args:
+        key, separator, value = argument.lstrip("+").partition("=")
+        field = supported.get(key)
+        if not separator or field is None:
+            continue
+        allocation[field] = (
+            ast.literal_eval(value)
+            if field == "gpu_ids"
+            else int(value)
+        )
+    return allocation["num_nodes"], allocation["num_gpus"], allocation["gpu_ids"]
+
+
+def _validate_native_dinov3_deft_launch(*, num_nodes, num_gpus, gpu_ids):
+    """Fail closed on an incomplete or inconsistent DEFT node allocation."""
+    prefix = "Parameter validation error: DINOv3 DEFT"
+
+    def parse_integer(value, name):
+        try:
+            return int(value)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"{prefix} {name} must be an integer") from error
+
+    expected_nodes = parse_integer(num_nodes, "train.num_nodes")
+    expected_gpus = parse_integer(num_gpus, "train.num_gpus")
+    if expected_nodes <= 0 or expected_gpus <= 0:
+        raise ValueError(f"{prefix} allocation must be positive")
+    if len(gpu_ids) != expected_gpus:
+        raise ValueError(
+            f"{prefix} train.num_gpus must equal the length of train.gpu_ids"
+        )
+    try:
+        configured_gpu_ids = [int(gpu_id) for gpu_id in gpu_ids]
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{prefix} train.gpu_ids must contain integers") from error
+    if configured_gpu_ids != list(range(expected_gpus)):
+        raise ValueError(f"{prefix} requires contiguous local train.gpu_ids")
+
+    worker_variables = {
+        "RANK", "LOCAL_RANK", "LOCAL_WORLD_SIZE", "GROUP_RANK",
+        "ROLE_RANK", "ROLE_WORLD_SIZE",
+    }
+    inherited_workers = sorted(
+        name for name in os.environ if (
+            name in worker_variables or name.startswith("TORCHELASTIC_")
+        )
+    )
+    if inherited_workers:
+        raise ValueError(
+            f"{prefix} must start at a node boundary; inherited worker "
+            f"variables are forbidden: {inherited_workers}"
+        )
+
+    required = (
+        "WORLD_SIZE", "NUM_GPU_PER_NODE", "NODE_RANK",
+        "MASTER_ADDR", "MASTER_PORT",
+    )
+    missing = [name for name in required if not os.environ.get(name)]
+    if missing:
+        raise ValueError(f"{prefix} is missing allocation fields: {missing}")
+
+    declared_nodes = parse_integer(os.environ["WORLD_SIZE"], "WORLD_SIZE")
+    declared_gpus = parse_integer(
+        os.environ["NUM_GPU_PER_NODE"], "NUM_GPU_PER_NODE"
+    )
+    node_rank = parse_integer(os.environ["NODE_RANK"], "NODE_RANK")
+    master_port = parse_integer(os.environ["MASTER_PORT"], "MASTER_PORT")
+    if declared_nodes != expected_nodes:
+        raise ValueError(f"{prefix} WORLD_SIZE differs from train.num_nodes")
+    if declared_gpus != expected_gpus:
+        raise ValueError(f"{prefix} NUM_GPU_PER_NODE differs from train.num_gpus")
+    if not 0 <= node_rank < expected_nodes:
+        raise ValueError(f"{prefix} NODE_RANK is out of range")
+    if not 1024 <= master_port <= 65535:
+        raise ValueError(f"{prefix} MASTER_PORT is invalid")
+    if expected_gpus > torch.cuda.device_count():
+        raise ValueError(f"{prefix} requests more GPUs than are visible")
+
+
 def get_subtasks(package):
     """Get supported subtasks for a given task.
 
@@ -168,10 +284,30 @@ def launch(args, unknown_args, subtasks, network=None):
     # Set gpus - overwrite if fields are inconsistent
     # Precedence for gpu setting: env > cmdline > specfile > default
     overrides = ["num_gpus", "gpu_ids", "cuda_blocking"]
+    native_dinov3_deft = _native_dinov3_deft_requested(args, network)
+    launch_validation_error = None
     num_gpus = 1
     gpu_ids = [0]
     num_nodes = 1
-    if args["subtask"] in ["train", "evaluate", "inference", "distill"]:
+    if native_dinov3_deft:
+        try:
+            num_nodes, num_gpus, gpu_ids = _resolve_native_dinov3_deft_allocation(
+                args, unknown_args
+            )
+            _validate_native_dinov3_deft_launch(
+                num_nodes=num_nodes,
+                num_gpus=num_gpus,
+                gpu_ids=gpu_ids,
+            )
+        except (SyntaxError, TypeError, ValueError) as error:
+            message = str(error)
+            if not message.startswith("Parameter validation error:"):
+                error = ValueError(
+                    "Parameter validation error: DINOv3 DEFT allocation "
+                    f"override is invalid: {message}"
+                )
+            launch_validation_error = error
+    elif args["subtask"] in ["train", "evaluate", "inference", "distill"]:
         # Parsing cmdline override
         if any(arg in unknown_args_as_str for arg in overrides):
             if "num_gpus" in unknown_args_as_str:
@@ -203,7 +339,7 @@ def launch(args, unknown_args, subtasks, network=None):
                     if "num_nodes" in exp_config[task]:
                         num_nodes = exp_config[task]["num_nodes"]
 
-    if num_gpus != len(gpu_ids):
+    if num_gpus != len(gpu_ids) and not native_dinov3_deft:
         logging.warning(f"Number of gpus {num_gpus} != len({gpu_ids}).")
         num_gpus = max(num_gpus, len(gpu_ids))
         gpu_ids = list(range(num_gpus)) if len(gpu_ids) != num_gpus else gpu_ids
@@ -211,7 +347,7 @@ def launch(args, unknown_args, subtasks, network=None):
 
     # Configure multinode
     multinode = [f"--nnodes={num_nodes}", f"--nproc-per-node={num_gpus}"]
-    if os.environ.get("WORLD_SIZE"):
+    if os.environ.get("WORLD_SIZE") and not native_dinov3_deft:
         try:
             validate_configs(logging)
 
@@ -285,6 +421,8 @@ def launch(args, unknown_args, subtasks, network=None):
 
     try:
         # Run the script.
+        if launch_validation_error is not None:
+            raise launch_validation_error
         with dual_output(log_file) as (stdout_target, log_target):
             proc = subprocess.Popen(
                 shlex.split(call),
