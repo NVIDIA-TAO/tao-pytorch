@@ -10,6 +10,7 @@ Lightning training flow and data module.
 import os
 
 from pytorch_lightning import Trainer
+from pytorch_lightning.plugins.environments import LightningEnvironment
 from pytorch_lightning.strategies import FSDPStrategy
 
 from nvidia_tao_pytorch.core.decorators.workflow import monitor_status
@@ -19,6 +20,13 @@ from nvidia_tao_pytorch.core.tlt_logging import obfuscate_logs
 from nvidia_tao_pytorch.config.dinov3.default_config import ExperimentConfig, validate_img_size
 from nvidia_tao_pytorch.ssl.nvdinov2.dataloader.pl_dinov2_data_module import DinoV2DataModule
 from nvidia_tao_pytorch.ssl.dinov3.model.pl_model import DinoV3PlModel
+
+
+def _refinement_trainer_plugins():
+    """Own local worker creation for the DEFT node-level launcher."""
+    if os.environ.get("TAO_REFINEMENT_LIGHTNING_LAUNCH") == "1":
+        return [LightningEnvironment()]
+    return None
 
 
 def _resolve_strategy(experiment_config):
@@ -79,6 +87,7 @@ def run_experiment(experiment_config, key):
     trainer = Trainer(**trainer_kwargs,
                       num_nodes=num_nodes,
                       strategy=_resolve_strategy(experiment_config),
+                      plugins=_refinement_trainer_plugins(),
                       precision=precision,
                       use_distributed_sampler=False,
                       sync_batchnorm=True,
