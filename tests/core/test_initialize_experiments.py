@@ -20,6 +20,7 @@ import pytest
 import torch
 import torch.backends.cudnn as cudnn
 
+import nvidia_tao_pytorch.core.initialize_experiments as initialize_module
 from nvidia_tao_pytorch.core.initialize_experiments import initialize_train_experiment
 
 
@@ -104,3 +105,32 @@ def test_cublas_workspace_config_respects_user_value(tmp_path, monkeypatch, rest
     initialize_train_experiment(_build_cfg(tmp_path, deterministic=True))
 
     assert os.environ["CUBLAS_WORKSPACE_CONFIG"] == ":16:8"
+
+
+def test_default_rejects_epoch_checkpoint_beyond_training(tmp_path, monkeypatch):
+    """Existing model callers retain the historical cadence validation."""
+    config = _build_cfg(tmp_path, deterministic=False)
+    config["train"]["checkpoint_interval"] = 2
+    monkeypatch.setenv("TAO_VISIBLE_DEVICES", "0")
+    with pytest.raises(AssertionError, match="Checkpoint interval"):
+        initialize_train_experiment(config)
+
+
+def test_dino_opt_ins_allow_terminal_save_without_directory_resume(
+    tmp_path, monkeypatch
+):
+    """DEFT candidates can finish off cadence and never inherit sibling state."""
+    config = _build_cfg(tmp_path, deterministic=False)
+    config["train"]["checkpoint_interval"] = 2
+    monkeypatch.setenv("TAO_VISIBLE_DEVICES", "0")
+
+    def unexpected_scan(_results_dir):
+        raise AssertionError("automatic checkpoint scanning must be disabled")
+
+    monkeypatch.setattr(initialize_module, "get_latest_checkpoint", unexpected_scan)
+    resume, _ = initialize_train_experiment(
+        config,
+        allow_off_cadence_final_checkpoint=True,
+        auto_resume=False,
+    )
+    assert resume is None

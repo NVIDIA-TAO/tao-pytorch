@@ -466,6 +466,36 @@ class DINOv3TransformConfig(NVDINOv2TransformConfig):
 class DINOv3DatasetConfig(NVDINOv2DatasetConfig):
     """DINOv3 dataset config (reuses nvdinov2 dataset, v3 transform defaults)."""
 
+    train_manifest: Optional[str] = STR_FIELD(
+        value=None,
+        default_value=None,
+        default_type=None,
+        description=(
+            "Optional Parquet training manifest. Each row must contain an absolute or "
+            "images_dir-relative path and storage_type, plus member for tar/zip shards. When "
+            "set, DINOv3 reads exactly these records instead of recursively scanning "
+            "train_dataset.images_dir."
+        ),
+        display_name="training manifest",
+        popular="yes",
+    )
+    archive_cache_size: int = INT_FIELD(
+        value=8,
+        default_value=8,
+        valid_min=1,
+        description="Maximum open tar/zip shards retained by each data-loader worker.",
+        display_name="archive handle cache size",
+        popular="no",
+    )
+    shard_shuffle_window: int = INT_FIELD(
+        value=256,
+        default_value=256,
+        valid_min=1,
+        description="Rows shuffled at a time while preserving archive read locality.",
+        display_name="shard shuffle window",
+        popular="no",
+    )
+
     transform: DINOv3TransformConfig = DATACLASS_FIELD(
         DINOv3TransformConfig(),
         description="Configuration parameters for data transformation",
@@ -537,6 +567,27 @@ class DINOv3TrainExpConfig(NVDINOv2TrainExpConfig):
         valid_min=1,
         description="Number of training steps between logger updates.",
         display_name="logging interval",
+        popular="no",
+    )
+    checkpoint_keep_last_n: int = INT_FIELD(
+        value=0,
+        default_value=0,
+        valid_min=0,
+        description=(
+            "Retain only the newest N periodic DINOv3 checkpoint families; "
+            "zero disables pruning."
+        ),
+        display_name="checkpoint retention",
+        popular="no",
+    )
+    auto_resume: bool = BOOL_FIELD(
+        value=True,
+        default_value=True,
+        description=(
+            "Resume from the newest checkpoint in results_dir when no explicit resume "
+            "path is set. DEFT disables this so every candidate starts from its declared input."
+        ),
+        display_name="automatic resume",
         popular="no",
     )
     cudnn: DINOv3CuDNNConfig = DATACLASS_FIELD(

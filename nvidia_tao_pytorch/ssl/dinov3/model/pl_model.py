@@ -4,9 +4,9 @@
 """DINOv3 Model Module.
 
 ``DinoV3PlModel`` inherits the entire ``nvdinov2`` Lightning flow (training step, teacher
-EMA, optimizer/scheduler config, callbacks, checkpoint saving) and overrides only
-``_build_model`` to construct the DINOv3 RoPE ViT (no absolute pos-embed, per-type FFN)
-using the patch-16 v3 param map.
+EMA and optimizer/scheduler config), with DINOv3-owned checkpoint callbacks and
+data loading. It builds the DINOv3 RoPE ViT (no absolute pos-embed, per-type FFN)
+using the patch-16 v3 param map; NVDINOv2 behavior is unchanged.
 
 The checkpoint remapper (Meta/timm DINOv3 -> this ViT) and the Gram-anchoring loss
 (``_extra_losses``) land in later steps; this file is the build + inheritance scaffold so
@@ -32,7 +32,12 @@ from nvidia_tao_pytorch.core.distributed.comm import get_global_rank
 from nvidia_tao_pytorch.core.tlt_logging import logging
 from nvidia_tao_pytorch.ssl.nvdinov2.model.head import DinoHead
 from nvidia_tao_pytorch.ssl.nvdinov2.model.loss import DinoV2Loss
-from nvidia_tao_pytorch.ssl.nvdinov2.model.pl_model import CustomModelCheckpoint, DinoV2PlModel
+from nvidia_tao_pytorch.ssl.nvdinov2.model.pl_model import DinoV2PlModel
+from nvidia_tao_pytorch.ssl.dinov3.model.checkpoint import (
+    DinoV3ModelCheckpoint,
+    DinoV3ExceptionCheckpoint,
+)
+from nvidia_tao_pytorch.core.callbacks.loggers import TAOStatusLogger
 from nvidia_tao_pytorch.ssl.dinov3.model.vit import DinoV3VisionTransformer, SwiGLUFusedFull
 from nvidia_tao_pytorch.ssl.dinov3.model.loss import GramLoss, ClsPreservationLoss
 from nvidia_tao_pytorch.ssl.dinov3.model.lora import (
@@ -306,7 +311,8 @@ class DinoV3PlModel(DinoV2PlModel):
             )
         return lora_parameter_report(self.student, name="student (LoRA)")
 
-    def _resolve_arch(self, backbone_type):
+    @staticmethod
+    def _resolve_arch(backbone_type):
         """Look up DINOv3 ViT hyper-parameters for a backbone type from the v3 param map.
 
         Args:
@@ -328,35 +334,55 @@ class DinoV3PlModel(DinoV2PlModel):
             "mlp_ratio": mp['mlp_ratio'][backbone_type],
         }
 
-    def _make_backbone(self, arch):
-        """Construct a DINOv3 ViT backbone from a resolved arch dict.
-
-        Args:
-            arch (dict): Output of :meth:`_resolve_arch`.
-
-        Returns:
-            DinoV3VisionTransformer: The constructed backbone.
-        """
+    @classmethod
+    def build_backbone(
+        cls,
+        backbone_config,
+        train_config,
+        *,
+        backbone_type=None,
+        img_size=None,
+        drop_path_rate=0.0,
+    ):
+        """Build the canonical TAO DINOv3 backbone for training or inference."""
+        backbone_type = backbone_type or str(backbone_config.teacher_type)
+        arch = cls._resolve_arch(backbone_type)
         return DinoV3VisionTransformer(
-            img_size=self.img_size,
-            patch_size=self.patch_size,
+            img_size=int(img_size or backbone_config.img_size),
+            patch_size=int(backbone_config.patch_size),
             embed_dim=arch["embed_dim"],
             depth=arch["depth"],
             num_heads=arch["num_heads"],
             init_values=arch["init_values"],
             drop_path_schedule=arch["drop_path_schedule"],
             num_classes=arch["num_classes"],
-            drop_path_rate=self.drop_path_rate,
+            drop_path_rate=float(drop_path_rate),
             mlp_layer=arch["mlp_layer"],
             mlp_ratio=arch["mlp_ratio"],
             norm_layer=nn.LayerNorm,
-            # DINOv3 ViT-B/L use a standard GELU MLP with no QKV bias (timm
-            # vit_base_patch16_dinov3 reference); these are the v3 ViT defaults.
             act_layer=nn.GELU,
             qkv_bias=False,
-            register_tokens=self.register_tokens,
-            use_custom_attention=self.use_custom_attention,
-            rope_theta=self.model_config.backbone['rope_theta'],
+            register_tokens=int(backbone_config.num_register_tokens),
+            use_custom_attention=bool(train_config.use_custom_attention),
+            rope_theta=float(backbone_config.rope_theta),
+        )
+
+    def _make_backbone(self, arch, backbone_type):
+        """Construct a DINOv3 ViT backbone from a resolved arch dict.
+
+        Args:
+            arch (dict): Output of :meth:`_resolve_arch`.
+            backbone_type (str): Exact architecture key used to resolve ``arch``.
+
+        Returns:
+            DinoV3VisionTransformer: The constructed backbone.
+        """
+        return self.build_backbone(
+            self.model_config.backbone,
+            self.train_config,
+            backbone_type=backbone_type,
+            img_size=self.img_size,
+            drop_path_rate=self.drop_path_rate,
         )
 
     def _make_head(self, embed_dim):
@@ -398,14 +424,14 @@ class DinoV3PlModel(DinoV2PlModel):
 
         self.student = torch.nn.ModuleDict(
             {
-                'backbone': self._make_backbone(student_arch),
+                'backbone': self._make_backbone(student_arch, self.student_backbone_type),
                 'dino_head': self._make_head(self.student_embed_dim),
                 'ibot_head': self._make_head(self.student_embed_dim),
             }
         )
         self.teacher = torch.nn.ModuleDict(
             {
-                'backbone': self._make_backbone(teacher_arch),
+                'backbone': self._make_backbone(teacher_arch, self.teacher_backbone_type),
                 'dino_head': self._make_head(self.teacher_embed_dim),
                 'ibot_head': self._make_head(self.teacher_embed_dim),
             }
@@ -443,7 +469,7 @@ class DinoV3PlModel(DinoV2PlModel):
         # receives gradients, EMA updates, or LoRA adapters. Its weights are (re)synced from
         # the teacher by _sync_gram_teacher.
         if self.model_config.gram.enable or self._preservation_enabled():
-            self.gram_teacher = self._make_backbone(teacher_arch)
+            self.gram_teacher = self._make_backbone(teacher_arch, self.teacher_backbone_type)
             for param in self.gram_teacher.parameters():
                 param.requires_grad = False
             self.gram_teacher.eval()
@@ -795,6 +821,38 @@ class DinoV3PlModel(DinoV2PlModel):
         if getattr(self, 'gram_teacher', None) is not None:
             self._sync_gram_teacher()
 
+    @classmethod
+    def load_backbone_weights(cls, backbone, checkpoint_path):
+        """Strictly load a supported DINOv3 checkpoint into one bare backbone.
+
+        This public inference helper avoids constructing SSL heads and duplicate
+        student/teacher modules for representation diagnostics.
+
+        Args:
+            backbone: A configured :class:`DinoV3VisionTransformer`.
+            checkpoint_path: Supported DINOv3 checkpoint file or directory.
+
+        Returns:
+            dict: Counts describing the strict checkpoint remap.
+        """
+        source = cls._load_pretrained_state_dict(checkpoint_path)
+        remapped, unmapped = cls._validate_and_remap_pretrained_state_dict(
+            source, backbone.state_dict(), checkpoint_path
+        )
+        missing, unexpected = backbone.load_state_dict(remapped, strict=False)
+        residual_missing = [key for key in missing if key not in TAO_ONLY_KEYS]
+        if residual_missing or unexpected:
+            raise cls._invalid_pretrained_checkpoint(
+                checkpoint_path,
+                "bare-backbone load was incomplete; "
+                f"missing={residual_missing}, unexpected={unexpected}",
+            )
+        return {
+            "loaded_tensors": len(remapped),
+            "unmapped_tensors": len(unmapped),
+            "initialized_tao_only_tensors": sorted(set(missing) & set(TAO_ONLY_KEYS)),
+        }
+
     def _log_loss(self, name, value):
         """Log a scalar loss/diagnostic under the run's standard step-logging settings.
 
@@ -952,46 +1010,34 @@ class DinoV3PlModel(DinoV2PlModel):
         resume consumes, there is nothing to resume *from* either. Step-unit checkpointing is
         what makes a requeue/resume loop viable at all.
 
-        The periodic callback is rebuilt through its public constructor rather than by poking
-        Lightning's private ``_every_n_*`` attributes, so this does not depend on Lightning
-        internals.
+        DINOv3-owned callbacks use public constructors and do not mutate shared
+        NVDINOv2 or TAO exception callback class attributes. Best-metric handling
+        is still delegated to the existing TAO helper.
 
         Returns:
-            Sequence[Callback]: the inherited callbacks, with the periodic checkpoint
-            re-wired to step cadence when the spec asks for it.
+            Sequence[Callback]: DINOv3 status, periodic and exception callbacks,
+            plus the configured TAO best-metric callback when enabled.
         """
-        callbacks = super().configure_callbacks()
-
         unit = self.experiment_spec["train"].get("checkpoint_interval_unit", "epoch")
-        if unit != "step":
-            return callbacks
-
         interval = self.experiment_spec["train"]["checkpoint_interval"]
         results_dir = self.experiment_spec["results_dir"]
-
-        rebuilt = []
-        for callback in callbacks:
-            # The periodic checkpoint is the unmonitored, keep-everything one. The best-metric
-            # callback (when enabled) is monitored, and TAOExceptionCheckpoint is a different
-            # class, so neither is touched.
-            if (isinstance(callback, CustomModelCheckpoint) and
-                    callback.monitor is None and
-                    callback.save_top_k == -1):
-                rebuilt.append(CustomModelCheckpoint(
-                    every_n_train_steps=interval,
-                    every_n_epochs=None,
-                    dirpath=results_dir,
-                    save_on_train_epoch_end=False,
-                    monitor=None,
-                    save_top_k=-1,
-                    save_last="link",
-                    filename="model_{epoch:03d}_{step:05d}",
-                    enable_version_counter=False,
-                ))
-                logging.info(
-                    "DINOv3: checkpointing every %d steps (checkpoint_interval_unit='step').",
-                    interval,
-                )
-            else:
-                rebuilt.append(callback)
-        return rebuilt
+        # Construct DINOv3-owned callbacks without changing NVDINOv2 class attributes.
+        periodic = DinoV3ModelCheckpoint(
+            save_final_epoch=True,
+            keep_last_n=self.experiment_spec["train"].get("checkpoint_keep_last_n", 0),
+            every_n_train_steps=interval if unit == "step" else None,
+            every_n_epochs=interval if unit != "step" else None,
+            dirpath=results_dir,
+            save_on_train_epoch_end=unit != "step",
+            monitor=None,
+            save_top_k=-1,
+            save_last="link",
+            filename="model_{epoch:03d}_{step:05d}",
+            enable_version_counter=False,
+        )
+        callbacks = [
+            TAOStatusLogger(results_dir, append=True),
+            periodic,
+            DinoV3ExceptionCheckpoint(dirpath=results_dir),
+        ]
+        return self._configure_best_checkpoint(callbacks, results_dir)
