@@ -343,10 +343,35 @@ class DinoV3PlModel(DinoV2PlModel):
         backbone_type=None,
         img_size=None,
         drop_path_rate=0.0,
+        use_custom_attention=None,
     ):
-        """Build the canonical TAO DINOv3 backbone for training or inference."""
+        """Build the canonical TAO DINOv3 backbone for training or inference.
+
+        Args:
+            backbone_config: Backbone sub-config (``model.backbone``).
+            train_config: Train sub-config, source of the configured attention flag.
+            backbone_type (str, optional): Architecture key; defaults to the teacher type.
+            img_size (int, optional): Override for the configured input resolution.
+            drop_path_rate (float): Stochastic-depth rate.
+            use_custom_attention (bool, optional): Explicit custom-attention choice. When
+                ``None`` the configured flag is gated on the current GPU architecture,
+                mirroring :meth:`DinoV2PlModel.__init__`. This gate must never be skipped:
+                the xformers ``memory_efficient_attention`` kernel fails to launch on
+                Hopper/Blackwell (bug 6459926), and forcing it on there aborts the whole
+                process with SIGSEGV instead of raising a Python exception.
+
+        Returns:
+            DinoV3VisionTransformer: The constructed backbone.
+        """
         backbone_type = backbone_type or str(backbone_config.teacher_type)
         arch = cls._resolve_arch(backbone_type)
+        if use_custom_attention is None:
+            # Never enable the xformers custom-attention kernel on an architecture where
+            # it cannot launch; fall back to the SDPA path exactly like training does.
+            use_custom_attention = (
+                bool(train_config.use_custom_attention) and
+                cls._custom_attention_supported(cls)
+            )
         return DinoV3VisionTransformer(
             img_size=int(img_size or backbone_config.img_size),
             patch_size=int(backbone_config.patch_size),
@@ -363,7 +388,7 @@ class DinoV3PlModel(DinoV2PlModel):
             act_layer=nn.GELU,
             qkv_bias=False,
             register_tokens=int(backbone_config.num_register_tokens),
-            use_custom_attention=bool(train_config.use_custom_attention),
+            use_custom_attention=bool(use_custom_attention),
             rope_theta=float(backbone_config.rope_theta),
         )
 
@@ -383,6 +408,9 @@ class DinoV3PlModel(DinoV2PlModel):
             backbone_type=backbone_type,
             img_size=self.img_size,
             drop_path_rate=self.drop_path_rate,
+            # Pass the arch-gated flag resolved in __init__, not the raw configured
+            # value, so Hopper/Blackwell keep the SDPA fallback (bug 6459926).
+            use_custom_attention=self.use_custom_attention,
         )
 
     def _make_head(self, embed_dim):
