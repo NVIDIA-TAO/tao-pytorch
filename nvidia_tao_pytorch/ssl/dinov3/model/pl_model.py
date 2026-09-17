@@ -343,10 +343,38 @@ class DinoV3PlModel(DinoV2PlModel):
         backbone_type=None,
         img_size=None,
         drop_path_rate=0.0,
+        use_custom_attention=None,
     ):
-        """Build the canonical TAO DINOv3 backbone for training or inference."""
+        """Build the canonical TAO DINOv3 backbone for training or inference.
+
+        Args:
+            backbone_config: ``model.backbone`` config node.
+            train_config: ``train`` config node (source of the requested attention mode).
+            backbone_type (str, optional): Architecture key; defaults to the teacher type.
+            img_size (int, optional): Override for ``backbone_config.img_size``.
+            drop_path_rate (float): Stochastic-depth rate.
+            use_custom_attention (bool, optional): Already-resolved attention mode. When
+                ``None`` the requested mode is read from ``train_config`` instead. Either
+                way the value is AND-ed with the GPU capability gate below.
+
+        Returns:
+            DinoV3VisionTransformer: The constructed backbone.
+        """
         backbone_type = backbone_type or str(backbone_config.teacher_type)
         arch = cls._resolve_arch(backbone_type)
+        # The xformers custom-attention path must stay behind the GPU capability gate: its
+        # memory_efficient_attention kernel does not launch on Hopper (SM90A, bug 6459926)
+        # and FA3 is unsupported on Blackwell, so honoring the raw config flag here would
+        # hard-crash the process (SIGSEGV) instead of falling back to SDPA. Mirrors how
+        # DinoV2PlModel.__init__ resolves self.use_custom_attention.
+        requested_custom_attention = (
+            bool(train_config.use_custom_attention)
+            if use_custom_attention is None
+            else bool(use_custom_attention)
+        )
+        resolved_custom_attention = (
+            requested_custom_attention and cls._custom_attention_supported()
+        )
         return DinoV3VisionTransformer(
             img_size=int(img_size or backbone_config.img_size),
             patch_size=int(backbone_config.patch_size),
@@ -363,7 +391,7 @@ class DinoV3PlModel(DinoV2PlModel):
             act_layer=nn.GELU,
             qkv_bias=False,
             register_tokens=int(backbone_config.num_register_tokens),
-            use_custom_attention=bool(train_config.use_custom_attention),
+            use_custom_attention=resolved_custom_attention,
             rope_theta=float(backbone_config.rope_theta),
         )
 
@@ -383,6 +411,10 @@ class DinoV3PlModel(DinoV2PlModel):
             backbone_type=backbone_type,
             img_size=self.img_size,
             drop_path_rate=self.drop_path_rate,
+            # Pass the capability-gated value resolved in DinoV2PlModel.__init__ rather than
+            # letting build_backbone re-read the raw config flag, so the training path keeps
+            # its pre-refactor behavior on Hopper/Blackwell (SDPA fallback, no SIGSEGV).
+            use_custom_attention=self.use_custom_attention,
         )
 
     def _make_head(self, embed_dim):

@@ -299,7 +299,8 @@ class DinoV2PlModel(TAOLightningModule):
         self.checkpoint_filename = 'nvdinov2_model'
         self.dm = []
 
-    def _custom_attention_supported(self):
+    @staticmethod
+    def _custom_attention_supported():
         """Whether the xformers custom-attention path is usable on the current GPU.
 
         The xformers ``memory_efficient_attention`` kernel fails to launch on Hopper (SM90A,
@@ -310,6 +311,12 @@ class DinoV2PlModel(TAOLightningModule):
         numerically stable and launches on those archs. This is deliberately an
         xformers-build-scoped arch hardcode - the true gate is whether this xformers build
         launches ``memory_efficient_attention`` on the arch - and is the pragmatic P0 unblock.
+
+        This is a ``staticmethod`` (it probes the device, never ``self``) so that
+        ``classmethod`` backbone builders - which construct a ViT without an instance, e.g.
+        :meth:`DinoV3PlModel.build_backbone` - can apply the exact same gate instead of
+        re-reading the raw config flag and re-introducing bug 6459926. Existing instance
+        calls (``self._custom_attention_supported()``) are unaffected.
         """
         if not torch.cuda.is_available():
             # No device to probe (e.g. CPU-only construction); honor the configured flag.
