@@ -15,11 +15,14 @@
 """Unit tests for initialize_train_experiment determinism plumbing."""
 
 import os
+import random
 
+import numpy as np
 import pytest
 import torch
 import torch.backends.cudnn as cudnn
 
+import nvidia_tao_pytorch.core.initialize_experiments as initialize_module
 from nvidia_tao_pytorch.core.initialize_experiments import initialize_train_experiment
 
 
@@ -30,17 +33,44 @@ def restore_determinism_state():
     prior_cudnn_det = cudnn.deterministic
     prior_use_det = torch.are_deterministic_algorithms_enabled()
     prior_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
-    prior_cublas = os.environ.get("CUBLAS_WORKSPACE_CONFIG")
+    prior_sdp = (
+        torch.backends.cuda.flash_sdp_enabled(),
+        torch.backends.cuda.mem_efficient_sdp_enabled(),
+        torch.backends.cuda.math_sdp_enabled(),
+    )
+    prior_python_rng = random.getstate()
+    prior_numpy_rng = np.random.get_state()
+    prior_torch_rng = torch.random.get_rng_state()
+    prior_cuda_rng = (
+        torch.cuda.get_rng_state_all() if torch.cuda.is_initialized() else None
+    )
+    tracked_environment = (
+        "CUBLAS_WORKSPACE_CONFIG",
+        "PL_GLOBAL_SEED",
+        "PL_SEED_WORKERS",
+    )
+    prior_environment = {
+        name: os.environ.get(name) for name in tracked_environment
+    }
     try:
         yield
     finally:
         cudnn.benchmark = prior_benchmark
         cudnn.deterministic = prior_cudnn_det
         torch.use_deterministic_algorithms(prior_use_det, warn_only=prior_warn_only)
-        if prior_cublas is None:
-            os.environ.pop("CUBLAS_WORKSPACE_CONFIG", None)
-        else:
-            os.environ["CUBLAS_WORKSPACE_CONFIG"] = prior_cublas
+        torch.backends.cuda.enable_flash_sdp(prior_sdp[0])
+        torch.backends.cuda.enable_mem_efficient_sdp(prior_sdp[1])
+        torch.backends.cuda.enable_math_sdp(prior_sdp[2])
+        random.setstate(prior_python_rng)
+        np.random.set_state(prior_numpy_rng)
+        torch.random.set_rng_state(prior_torch_rng)
+        if prior_cuda_rng is not None:
+            torch.cuda.set_rng_state_all(prior_cuda_rng)
+        for name, value in prior_environment.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 def _build_cfg(tmp_path, deterministic):
@@ -52,7 +82,10 @@ def _build_cfg(tmp_path, deterministic):
             "validation_interval": 1,
             "checkpoint_interval": 1,
             "checkpoint_interval_unit": "epoch",
-            "seed": 1234,
+            # These tests exercise determinism flags, not RNG seeding. Disabling
+            # seeding also avoids leaving a deferred CUDA seed callback when the
+            # process has not initialized CUDA yet.
+            "seed": -1,
             "cudnn": {"benchmark": False, "deterministic": deterministic},
             "resume_training_checkpoint_path": None,
             "num_gpus": 1,
@@ -104,3 +137,32 @@ def test_cublas_workspace_config_respects_user_value(tmp_path, monkeypatch, rest
     initialize_train_experiment(_build_cfg(tmp_path, deterministic=True))
 
     assert os.environ["CUBLAS_WORKSPACE_CONFIG"] == ":16:8"
+
+
+def test_default_rejects_epoch_checkpoint_beyond_training(tmp_path, monkeypatch):
+    """Existing model callers retain the historical cadence validation."""
+    config = _build_cfg(tmp_path, deterministic=False)
+    config["train"]["checkpoint_interval"] = 2
+    monkeypatch.setenv("TAO_VISIBLE_DEVICES", "0")
+    with pytest.raises(AssertionError, match="Checkpoint interval"):
+        initialize_train_experiment(config)
+
+
+def test_dino_opt_ins_allow_terminal_save_without_directory_resume(
+    tmp_path, monkeypatch
+):
+    """DEFT candidates can finish off cadence and never inherit sibling state."""
+    config = _build_cfg(tmp_path, deterministic=False)
+    config["train"]["checkpoint_interval"] = 2
+    monkeypatch.setenv("TAO_VISIBLE_DEVICES", "0")
+
+    def unexpected_scan(_results_dir):
+        raise AssertionError("automatic checkpoint scanning must be disabled")
+
+    monkeypatch.setattr(initialize_module, "get_latest_checkpoint", unexpected_scan)
+    resume, _ = initialize_train_experiment(
+        config,
+        allow_off_cadence_final_checkpoint=True,
+        auto_resume=False,
+    )
+    assert resume is None
