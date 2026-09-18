@@ -74,7 +74,7 @@ The `dinov3` console command is registered in `setup.py` and dispatches to the s
 exactly like every other TAO task (`entrypoint/` → `scripts/` → `model/`).
 
 ```
-console: dinov3 {train, inference, export, convert, default_specs}
+console: dinov3 {train, inference, export, convert, grit_score, default_specs}
   └─ ssl/dinov3/entrypoint/dinov3.py     # discovers subtasks, launches
        ├─ ssl/dinov3/scripts/train.py     # @hydra_runner + @monitor_status; builds DinoV3PlModel
        │    └─ ssl/dinov3/model/pl_model.py        DinoV3PlModel(DinoV2PlModel)
@@ -478,6 +478,53 @@ through `LightningEnvironment`; DEFT does not add a `torchrun` layer.
 
 ---
 
+## 12. SSL data refinement actions
+
+GRIT scoring is available through the normal TAO experiment interface:
+
+```bash
+dinov3 grit_score -e grit.yaml
+```
+
+```yaml
+results_dir: /results/deft
+grit_score:
+  input_parquet: /data/targets.parquet
+  checkpoint: /models/dinov3.pth
+  base_spec: /specs/train_dinov3.yaml
+  device: cuda
+  batch_size: 12
+```
+
+The subtask uses the DINOv3 dataclass schema, Hydra overrides, and TAO status
+logging. Scores, `experiment.yaml`, and `status.json` appear under
+`grit_score.results_dir`. A committed score directory cannot be overwritten.
+GRIT uses 512-pixel square resizing, relative depth quartiles, two fixed 90%
+crop views, global neighbor settling, and dense Gram/retrieval settling. The
+result is an ordinal within-domain score, not uncertainty or a failure
+probability. ViT-B uses blocks 3/6/9/12; deeper backbones use the equivalent
+25/50/75/100% depths. The score commit records the realized variant and blocks.
+
+TAO Data Services owns DEFT round orchestration, policy, retry state, and
+artifact lineage. It generates ordinary structured DINOv3 experiment specs and
+invokes only the native `dinov3 train` and `dinov3 grit_score` actions. PyTorch
+therefore has no second refinement training CLI or scheduler policy. One
+requested training pass is represented as one DINOv3 epoch; manifest-backed
+loading visits every declared sample, with a small repeated tail permitted for
+distributed equalization.
+
+Training manifests use one canonical locator: `storage_type` (`file`, `tar`, or
+`zip`), `path`, and `member` for archive-backed rows. They avoid image copies
+and symlink trees; the sampler may shuffle rows and distributed padding may
+repeat a small tail. The scorer publishes its committed `_SUCCESS` seal after all declared outputs
+exist. Data Services validates the terminal teacher checkpoint and then publishes
+the training contract, commit, and `_SUCCESS` seal.
+
+The higher-level workflow, customer task heads, evaluation adapters, source
+search, and stopping policy intentionally live in TAO Data Services.
+
+---
+
 ## Manifest-backed training
 
 Set `dataset.train_manifest` to a Parquet table with nonempty, unique
@@ -499,7 +546,7 @@ all). A successful manifest-backed run publishes `terminal_teacher.json`
 with the final teacher filename, actual epoch/global step, size and SHA256;
 consumers must validate this marker instead of deriving a filename.
 
-## 12. References
+## 13. References
 - DINOv3 (Meta AI). Public weights: `facebook/dinov3-vitb16-pretrain-lvd1689m` / timm
   `vit_base_patch16_dinov3.lvd1689m`.
 - timm RoPE reference: `timm.layers.pos_embed_sincos.RotaryEmbeddingDinoV3` / `make_coords_dinov3`.
