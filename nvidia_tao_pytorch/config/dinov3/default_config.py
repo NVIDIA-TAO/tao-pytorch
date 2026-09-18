@@ -23,6 +23,8 @@ from typing import List, Optional
 
 from omegaconf import MISSING
 
+from nvidia_tao_pytorch.config.dinov3.grit_score import GRITScoreConfig
+
 from nvidia_tao_pytorch.config.utils.types import (
     STR_FIELD,
     INT_FIELD,
@@ -715,6 +717,9 @@ class ExperimentConfig(CommonExperimentConfig):
     convert: DINOv3ConvertConfig = DATACLASS_FIELD(
         DINOv3ConvertConfig(),
         description="Configurable parameters to convert an SSL backbone to the backbone_v2 (timm) layout.",
+    )
+    grit_score: GRITScoreConfig = DATACLASS_FIELD(
+        GRITScoreConfig(), description="GRIT scoring parameters for SSL data refinement.",
     )
 
     def __post_init__(self):
