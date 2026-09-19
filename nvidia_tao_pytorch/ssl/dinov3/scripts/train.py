@@ -3,8 +3,8 @@
 
 """DINOv3 Train Script.
 
-Thin wrapper that builds :class:`DinoV3PlModel` and reuses the inherited (nvdinov2)
-Lightning training flow and data module.
+Build :class:`DinoV3PlModel` with the DINOv3-owned manifest data module while
+reusing the inherited NVDINOv2 training mathematics and transforms.
 """
 
 import os
@@ -12,21 +12,16 @@ import os
 from pytorch_lightning import Trainer
 from pytorch_lightning.plugins.environments import LightningEnvironment
 from pytorch_lightning.strategies import FSDPStrategy
+from pytorch_lightning.utilities import rank_zero_only
 
 from nvidia_tao_pytorch.core.decorators.workflow import monitor_status
 from nvidia_tao_pytorch.core.hydra.hydra_runner import hydra_runner
 from nvidia_tao_pytorch.core.initialize_experiments import initialize_train_experiment
 from nvidia_tao_pytorch.core.tlt_logging import obfuscate_logs
 from nvidia_tao_pytorch.config.dinov3.default_config import ExperimentConfig, validate_img_size
-from nvidia_tao_pytorch.ssl.nvdinov2.dataloader.pl_dinov2_data_module import DinoV2DataModule
+from nvidia_tao_pytorch.ssl.dinov3.dataloader.pl_dinov3_data_module import DinoV3DataModule
 from nvidia_tao_pytorch.ssl.dinov3.model.pl_model import DinoV3PlModel
-
-
-def _refinement_trainer_plugins():
-    """Own local worker creation for the DEFT node-level launcher."""
-    if os.environ.get("TAO_REFINEMENT_LIGHTNING_LAUNCH") == "1":
-        return [LightningEnvironment()]
-    return None
+from nvidia_tao_pytorch.ssl.dinov3.utils.runtime_spec import publish_runtime_spec
 
 
 def _resolve_strategy(experiment_config):
@@ -54,13 +49,42 @@ def _resolve_strategy(experiment_config):
     return choice
 
 
+def _refinement_trainer_plugins():
+    """Own local worker creation for the DEFT node-level launcher."""
+    if os.environ.get("TAO_REFINEMENT_LIGHTNING_LAUNCH") == "1":
+        return [LightningEnvironment()]
+    return None
+
+
+def _configure_refinement_status_rank():
+    """Set the process rank before Lightning exists for DEFT status logging.
+
+    The node-level adapter deliberately launches one ordinary Python process per
+    node. Lightning creates the local workers later, so its rank-zero helper has
+    not yet learned the global rank when ``monitor_status`` emits STARTED. Seed
+    that helper from the adapter's node coordinates without setting ``RANK`` (an
+    external-worker launch signal to Lightning).
+    """
+    if os.environ.get("TAO_REFINEMENT_LIGHTNING_LAUNCH") != "1":
+        return
+    node_rank = int(os.environ.get("NODE_RANK") or "0")
+    local_rank = int(os.environ.get("LOCAL_RANK") or "0")
+    processes_per_node = int(os.environ.get("NUM_GPU_PER_NODE") or "1")
+    rank_zero_only.rank = node_rank * processes_per_node + local_rank
+
+
 def run_experiment(experiment_config, key):
     """Start the training."""
     # Fail before logger/trainer/data-module initialization. Hydra validates the field type,
     # but the INT_FIELD ``valid_options`` enum is schema metadata rather than a runtime guard.
     validate_img_size(experiment_config.model.backbone)
 
-    resume_ckpt, trainer_kwargs = initialize_train_experiment(experiment_config, key)
+    resume_ckpt, trainer_kwargs = initialize_train_experiment(
+        experiment_config,
+        key,
+        allow_off_cadence_final_checkpoint=True,
+        auto_resume=experiment_config.train.auto_resume,
+    )
     trainer_kwargs["log_every_n_steps"] = experiment_config.train.log_every_n_steps
 
     num_nodes = experiment_config.train.num_nodes
@@ -70,7 +94,7 @@ def run_experiment(experiment_config, key):
 
     precision = experiment_config.train.precision
 
-    dm = DinoV2DataModule(experiment_config)
+    dm = DinoV3DataModule(experiment_config)
 
     model = DinoV3PlModel(experiment_config)
 
@@ -104,9 +128,10 @@ spec_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 @hydra_runner(
     config_path=os.path.join(spec_root, "experiment_specs"), config_name="experiment_spec", schema=ExperimentConfig
 )
-@monitor_status(name="DINOv3", mode="train")
+@monitor_status(name="DINOv3", mode="train", write_experiment_spec=False)
 def main(cfg: ExperimentConfig) -> None:
     """Run the training process."""
+    publish_runtime_spec(cfg, cfg.results_dir)
     # Obfuscate logs.
     obfuscate_logs(cfg)
     run_experiment(experiment_config=cfg,
@@ -114,4 +139,5 @@ def main(cfg: ExperimentConfig) -> None:
 
 
 if __name__ == "__main__":
+    _configure_refinement_status_rank()
     main()
