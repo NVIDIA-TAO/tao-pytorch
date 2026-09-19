@@ -840,6 +840,38 @@ class DinoV3PlModel(DinoV2PlModel):
         if getattr(self, 'gram_teacher', None) is not None:
             self._sync_gram_teacher()
 
+    @classmethod
+    def load_backbone_weights(cls, backbone, checkpoint_path):
+        """Strictly load a supported DINOv3 checkpoint into one bare backbone.
+
+        This public inference helper avoids constructing SSL heads and duplicate
+        student/teacher modules for representation diagnostics.
+
+        Args:
+            backbone: A configured :class:`DinoV3VisionTransformer`.
+            checkpoint_path: Supported DINOv3 checkpoint file or directory.
+
+        Returns:
+            dict: Counts describing the strict checkpoint remap.
+        """
+        source = cls._load_pretrained_state_dict(checkpoint_path)
+        remapped, unmapped = cls._validate_and_remap_pretrained_state_dict(
+            source, backbone.state_dict(), checkpoint_path
+        )
+        missing, unexpected = backbone.load_state_dict(remapped, strict=False)
+        residual_missing = [key for key in missing if key not in TAO_ONLY_KEYS]
+        if residual_missing or unexpected:
+            raise cls._invalid_pretrained_checkpoint(
+                checkpoint_path,
+                "bare-backbone load was incomplete; "
+                f"missing={residual_missing}, unexpected={unexpected}",
+            )
+        return {
+            "loaded_tensors": len(remapped),
+            "unmapped_tensors": len(unmapped),
+            "initialized_tao_only_tensors": sorted(set(missing) & set(TAO_ONLY_KEYS)),
+        }
+
     def _log_loss(self, name, value):
         """Log a scalar loss/diagnostic under the run's standard step-logging settings.
 

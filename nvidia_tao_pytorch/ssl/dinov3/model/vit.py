@@ -236,6 +236,16 @@ class DinoV3VisionTransformer(DinoV2VisionTransformer):
         grid_w = w // ps[1]
         return self.rope(grid_h, grid_w, x.device, torch.float32)
 
+    def _forward_blocks(self, tokens, rope, capture=()):
+        """Run the canonical block loop and optionally capture normalized depths."""
+        capture = set(capture)
+        outputs = []
+        for block_number, block in enumerate(self.blocks, start=1):
+            tokens = block(tokens, rope=rope)
+            if block_number in capture:
+                outputs.append(self.norm(tokens))
+        return tokens, outputs
+
     def forward(self, x, masks=None, keep_last_n_layers=None, keep_level: str = "chunk"):
         """Forward pass returning DINOv2-style feature dicts, with RoPE threaded into blocks.
 
@@ -261,8 +271,7 @@ class DinoV3VisionTransformer(DinoV2VisionTransformer):
                 for i, j in zip(x, masks)
             ]
 
-            for blk in self.blocks:
-                x = blk(x, rope=rope_list)
+            x, _ = self._forward_blocks(x, rope_list)
 
             all_x = x
             output = []
@@ -287,22 +296,14 @@ class DinoV3VisionTransformer(DinoV2VisionTransformer):
         x = self.patch_drop(x)
         x = self.norm_pre(x)
 
-        features = []
-
-        if keep_last_n_layers is None:
-            for blk in self.blocks:
-                x = blk(x, rope=rope)
-        else:
-            for blk in self.blocks[:-keep_last_n_layers]:
-                x = blk(x, rope=rope)
-
-            for blk in self.blocks[-keep_last_n_layers:]:
-                x = blk(x, rope=rope)
-                features.append(self.norm(x))
-
-            assert (
-                keep_last_n_layers is None or len(features) == keep_last_n_layers
-            ), f"len(features)={len(features)} != keep_last_n_layers={keep_last_n_layers}"
+        capture = (
+            () if keep_last_n_layers is None
+            else range(self.n_blocks - keep_last_n_layers + 1, self.n_blocks + 1)
+        )
+        x, features = self._forward_blocks(x, rope, capture)
+        assert keep_last_n_layers is None or len(features) == keep_last_n_layers, (
+            f"len(features)={len(features)} != keep_last_n_layers={keep_last_n_layers}"
+        )
 
         # Remove register tokens (appended at the end)
         if self.num_register_tokens > 0:
@@ -317,3 +318,26 @@ class DinoV3VisionTransformer(DinoV2VisionTransformer):
             "x_norm_patchtokens": x_norm[:, 1:],
             "masks": masks,
         }
+
+    def forward_selected_layers(self, x, layer_numbers):
+        """Return normalized tokens at declared one-based block depths.
+
+        Args:
+            x (torch.Tensor): Image batch.
+            layer_numbers (Iterable[int]): Strictly increasing one-based blocks.
+
+        Returns:
+            list[torch.Tensor]: Normalized full token sequences in requested order.
+        """
+        requested = tuple(int(value) for value in layer_numbers)
+        valid = bool(requested)
+        valid = valid and tuple(sorted(set(requested))) == requested
+        valid = valid and requested[0] >= 1 and requested[-1] <= self.n_blocks
+        if not valid:
+            raise ValueError(
+                f"layer_numbers must be unique, increasing, and within [1, {self.n_blocks}]"
+            )
+        rope = self._build_rope(x)
+        tokens = self.norm_pre(self.patch_drop(self.patch_pos_embed(x)))
+        _, outputs = self._forward_blocks(tokens, rope, requested)
+        return outputs
