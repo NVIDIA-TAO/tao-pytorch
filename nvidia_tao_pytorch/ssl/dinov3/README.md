@@ -466,6 +466,16 @@ unchanged.
 (`dinov3 convert`) are implemented and container-verified. Remaining for the bring-up: a short
 end-to-end training run (loss-down / no NaN-OOM sanity), and the deploy path in a later phase.
 
+### DINOv3 DEFT Lightning launch contract
+
+The Data Services adapter starts one ordinary TAO process per node and sets
+`TAO_REFINEMENT_LIGHTNING_LAUNCH=1` together with `WORLD_SIZE` (node count),
+`NUM_GPU_PER_NODE`, `NODE_RANK`, `MASTER_ADDR`, and `MASTER_PORT`. This internal
+adapter flag is honored only by `dinov3 train`, and only the value `1` enables
+the DEFT path; when it is absent or has any other value, existing TAO launch
+behavior is unchanged. Lightning then creates and coordinates the local workers
+through `LightningEnvironment`; DEFT does not add a `torchrun` layer.
+
 ---
 
 ## 12. References
