@@ -21,6 +21,9 @@ from nvidia_tao_pytorch.core.tlt_logging import obfuscate_logs
 from nvidia_tao_pytorch.config.dinov3.default_config import ExperimentConfig, validate_img_size
 from nvidia_tao_pytorch.ssl.dinov3.dataloader.pl_dinov3_data_module import DinoV3DataModule
 from nvidia_tao_pytorch.ssl.dinov3.model.pl_model import DinoV3PlModel
+from nvidia_tao_pytorch.ssl.dinov3.utils.refinement_attestation import (
+    publish_native_attestation,
+)
 from nvidia_tao_pytorch.ssl.dinov3.utils.runtime_spec import publish_runtime_spec
 
 
@@ -132,6 +135,10 @@ spec_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 def main(cfg: ExperimentConfig) -> None:
     """Run the training process."""
     publish_runtime_spec(cfg, cfg.results_dir)
+    if cfg.dataset.train_manifest or any(
+        name.startswith("TAO_REFINEMENT_") for name in os.environ
+    ):
+        publish_native_attestation("train", cfg.results_dir)
     # Obfuscate logs.
     obfuscate_logs(cfg)
     run_experiment(experiment_config=cfg,
