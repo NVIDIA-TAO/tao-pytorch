@@ -29,7 +29,7 @@ except ImportError:
     MarshmallowValidationError = Exception
 
 
-def monitor_status(name='module name', mode='train'):
+def monitor_status(name='module name', mode='train', *, write_experiment_spec=True):
     """Status monitoring decorator."""
     def inner(runner):
         @wraps(runner)
@@ -39,7 +39,8 @@ def monitor_status(name='module name', mode='train'):
             os.makedirs(cfg["results_dir"], exist_ok=True)
             results_dir = cfg["results_dir"]
 
-            OmegaConf.save(cfg, os.path.join(results_dir, "experiment.yaml"))
+            if write_experiment_spec:
+                OmegaConf.save(cfg, os.path.join(results_dir, "experiment.yaml"))
 
             status_file = os.path.join(results_dir, "status.json")
             status_logging.set_status_logger(

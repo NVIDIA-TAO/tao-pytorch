@@ -478,6 +478,27 @@ through `LightningEnvironment`; DEFT does not add a `torchrun` layer.
 
 ---
 
+## Manifest-backed training
+
+Set `dataset.train_manifest` to a Parquet table with nonempty, unique
+`sample_id`, `storage_type` (`file`, `tar`, or `zip`), and `path`.
+Archive rows also require `member`. Optional nonnegative `replay_repeat`
+distinguishes deliberate replay rows: their (`sample_id`, `replay_repeat`)
+pairs must be unique. Relative paths resolve against
+`dataset.train_dataset.images_dir`, or the manifest directory when that root
+is empty. Ordinary directory-backed training is unchanged.
+
+`dataset.archive_cache_size` bounds open archive handles per worker.
+`dataset.shard_shuffle_window` bounds the shard-local shuffle window.
+The manifest sampler pads each rank to full batches, preserving every row
+without singleton tails. Padding can repeat rows; it is not new training data.
+`train.auto_resume` controls discovery of an existing training checkpoint.
+DEFT sets it false and supplies the original base checkpoint for every candidate.
+`train.checkpoint_keep_last_n` bounds exported checkpoint retention (0 keeps
+all). A successful manifest-backed run publishes `terminal_teacher.json`
+with the final teacher filename, actual epoch/global step, size and SHA256;
+consumers must validate this marker instead of deriving a filename.
+
 ## 12. References
 - DINOv3 (Meta AI). Public weights: `facebook/dinov3-vitb16-pretrain-lvd1689m` / timm
   `vit_base_patch16_dinov3.lvd1689m`.

@@ -29,16 +29,22 @@ def test_run_experiment_forwards_logging_interval(monkeypatch):
         def fit(self, *args, **kwargs):
             trainer.fit(*args, **kwargs)
 
-    monkeypatch.setattr(
-        train,
-        "initialize_train_experiment",
-        lambda *_: (None, {"devices": [0], "max_epochs": cfg.train.num_epochs}),
-    )
-    monkeypatch.setattr(train, "DinoV2DataModule", lambda *_: object())
+    initialize_options = {}
+
+    def initialize(*_args, **kwargs):
+        initialize_options.update(kwargs)
+        return None, {"devices": [0], "max_epochs": cfg.train.num_epochs}
+
+    monkeypatch.setattr(train, "initialize_train_experiment", initialize)
+    monkeypatch.setattr(train, "DinoV3DataModule", lambda *_: object())
     monkeypatch.setattr(train, "DinoV3PlModel", lambda *_: model)
     monkeypatch.setattr(train, "Trainer", _Trainer)
 
     train.run_experiment(cfg, key="")
 
     assert captured["log_every_n_steps"] == 7
+    assert initialize_options == {
+        "allow_off_cadence_final_checkpoint": True,
+        "auto_resume": cfg.train.auto_resume,
+    }
     trainer.fit.assert_called_once()

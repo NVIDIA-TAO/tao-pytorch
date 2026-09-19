@@ -17,8 +17,18 @@ from nvidia_tao_pytorch.core.tlt_logging import logging
 from nvidia_tao_pytorch.core.utilities import get_latest_checkpoint
 
 
-def initialize_train_experiment(cfg, key=None):
-    """Common training steps for all models"""
+def initialize_train_experiment(
+    cfg,
+    key=None,
+    *,
+    allow_off_cadence_final_checkpoint=False,
+    auto_resume=True,
+):
+    """Common training steps for all models.
+
+    The keyword-only switches are narrow model opt-ins. Their defaults retain the
+    historical validation and resume behavior for every existing TAO model.
+    """
     TLTPyTorchCookbook.set_passphrase(key)
 
     results_dir = cfg["results_dir"]
@@ -29,7 +39,7 @@ def initialize_train_experiment(cfg, key=None):
     checkpoint_interval = cfg["train"]["checkpoint_interval"]
     checkpoint_interval_unit = cfg["train"].get("checkpoint_interval_unit", "epoch")
 
-    if checkpoint_interval_unit == "epoch":
+    if checkpoint_interval_unit == "epoch" and not allow_off_cadence_final_checkpoint:
         assert checkpoint_interval <= total_epochs, (
             f"Checkpoint interval {checkpoint_interval} > Number of epochs {total_epochs}."
             f"Please set experiment_config.train.checkpoint_interval <= {total_epochs}"
@@ -63,7 +73,9 @@ def initialize_train_experiment(cfg, key=None):
         torch.backends.cuda.enable_mem_efficient_sdp(False)
         torch.backends.cuda.enable_math_sdp(True)
 
-    resume_ckpt = cfg["train"]["resume_training_checkpoint_path"] or get_latest_checkpoint(results_dir)
+    resume_ckpt = cfg["train"]["resume_training_checkpoint_path"]
+    if not resume_ckpt and auto_resume:
+        resume_ckpt = get_latest_checkpoint(results_dir)
     if resume_ckpt:
         if resume_ckpt.endswith('.tlt') or resume_ckpt.endswith('.pth'):
             logging.info(f"Setting resume checkpoint to {resume_ckpt}")
