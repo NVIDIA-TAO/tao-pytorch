@@ -46,7 +46,7 @@ families.
 | `release` | Release Dockerfile, wheel build scripts, and version metadata. |
 | `runner/tao_pt.py` | Local developer launcher that runs commands inside the TAO PyTorch development container. |
 | `tao-core` | TAO Core submodule with shared API, microservice, telemetry, and configuration infrastructure. |
-| `tools` and `ci` | Documentation generation helpers, CI checks, changelog tooling, and release helpers. |
+| `tools` | Documentation generation helpers (README command table, dataclass-to-RST tables). |
 
 ## Developer And Power-User Docs
 
@@ -307,9 +307,12 @@ pytest tests/multimodal_unit_test
 pytest tests/ssl_unit_test
 ```
 
-For static and CI-style checks, see the scripts in `ci/`, especially
-`ci/run_static_tests.py`, `ci/test_changed_files.py`, and
-`ci/run_functional_tests.py`.
+For static checks, run the same pre-commit hooks CI runs
+(`.github/workflows/static-tests.yml`):
+
+```sh
+pre-commit run --from-ref origin/main --to-ref HEAD
+```
 
 To verify the generated README command table is up to date:
 
