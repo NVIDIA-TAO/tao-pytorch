@@ -98,7 +98,7 @@ class MAEPlModule(TAOLightningModule):
         model_arch = self.cfg.model.arch
         supported_archs = [m[len("mae_"):] for m in self.model_mapper.keys()]
         if model_arch not in supported_archs:
-            raise NotImplementedError(f"Only {", ".join(supported_archs)} are supported, but {model_arch} is specified.")
+            raise NotImplementedError(f"Only {', '.join(supported_archs)} are supported, but {model_arch} is specified.")
         self.checkpoint_filename = model_arch
         # Enable the MAE mask for the pretrain stage and if not exporting the model.
         if self.cfg.train.stage == "pretrain" and not self.export:
