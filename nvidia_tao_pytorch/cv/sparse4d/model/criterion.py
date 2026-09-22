@@ -52,6 +52,7 @@ class SetCriterion(nn.Module):
         instance_bank,
         class_names=None,
         sync_positive_counts=True,
+        scrub_nan_gradients=False,
     ):
         """Create the criterion.
 
@@ -64,9 +65,12 @@ class SetCriterion(nn.Module):
                 may use distributed collectives. This must be false when an
                 active route-specific loss can make ranks leave the criterion
                 before the 3D loss path.
+            scrub_nan_gradients (bool): Opt in to numerical recovery. Otherwise
+                preserve unbounded logits and raise on non-finite losses.
         """
         super().__init__()
         self.sync_positive_counts = bool(sync_positive_counts)
+        self.scrub_nan_gradients = bool(scrub_nan_gradients)
         self.class_names = None if class_names is None else list(class_names)
         if self.class_names is not None:
             if not self.class_names:
@@ -242,6 +246,27 @@ class SetCriterion(nn.Module):
                 det_cls_key=sv_cfg.get("det_cls_key", "det_classes_2d"),
                 min_box_size=float(sv_cfg.get("min_box_size", 2.0)),
             )
+
+        # All ranks derive the same loss schema before training; no object
+        # collective is needed when routes emit different subsets at a step.
+        keys = ["loss_dense_depth"]
+        for index in range(head_config["num_decoder"]):
+            names = ["loss_cls", "loss_box", "loss_cns", "loss_yns",
+                     "loss_cls_dn", "loss_box_dn"]
+            if self.loss_reg.valid_vel_weight > 0:
+                names += ["loss_box_vel", "loss_box_vel_dn"]
+            if self.use_reid_sampling:
+                names += ["loss_id", "loss_visibility"]
+            if self.ltt_enable:
+                names += ["loss_box_2d"]
+                if self.ltt_pseudo_enable:
+                    names += ["loss_box_2d_pseudo", "loss_cls_pseudo"]
+            if self.sv_aux_enable and not (self.ltt_enable and self.ltt_pseudo_enable):
+                names += ["loss_sv_head"]
+            keys.extend(f"{name}_{index}" for name in names)
+        if self.sv_aux_enable:
+            keys.append("loss_sv_aux_cls")
+        self.loss_keys = tuple(sorted(keys))
 
     def _positive_count(self, count):
         """Globally average a count only when every rank reaches this path."""
@@ -443,17 +468,8 @@ class SetCriterion(nn.Module):
 
             cls = cls.flatten(end_dim=1)
             cls_target = cls_target.flatten(end_dim=1)
-            cls_input = cls.clamp(min=-50.0, max=50.0)
+            cls_input = self._classification_input(cls)
             cls_loss = self.loss_cls(cls_input, cls_target, avg_factor=num_pos)
-            if not bool(torch.isfinite(cls_loss).all()):
-                warnings.warn(
-                    f"loss_cls_{decoder_idx} is non-finite; skipping its gradient",
-                    RuntimeWarning,
-                )
-                cls_loss = (
-                    torch.nan_to_num(cls_input, nan=0.0, posinf=0.0, neginf=0.0).sum() *
-                    0.0
-                )
 
             mask = mask.reshape(-1)
             reg_weights = reg_weights * reg.new_tensor(self.reg_weights)
@@ -577,25 +593,14 @@ class SetCriterion(nn.Module):
                     avg_factor=dn_positive_counts.get("temp_"),
                 )
 
-            dn_cls_input = cls.flatten(end_dim=1)[dn_valid_mask].clamp(
-                min=-50.0, max=50.0
+            dn_cls_input = self._classification_input(
+                cls.flatten(end_dim=1)[dn_valid_mask]
             )
             cls_loss = self.loss_cls(
                 dn_cls_input,
                 dn_cls_target,
                 avg_factor=num_dn_pos,
             )
-            if not bool(torch.isfinite(cls_loss).all()):
-                warnings.warn(
-                    f"loss_cls_dn_{decoder_idx} is non-finite; skipping its gradient",
-                    RuntimeWarning,
-                )
-                cls_loss = (
-                    torch.nan_to_num(
-                        dn_cls_input, nan=0.0, posinf=0.0, neginf=0.0
-                    ).sum() *
-                    0.0
-                )
 
             reg_loss = self.loss_reg(
                 reg.flatten(end_dim=1)[dn_valid_mask][dn_pos_mask][
@@ -636,9 +641,13 @@ class SetCriterion(nn.Module):
             values = values.detach().cpu().reshape(-1).tolist()
         elif not isinstance(values, (list, tuple)):
             values = [values]
-        return bool(values) and all(
-            value is not None and not bool(value) for value in values
-        )
+        real_samples = [value is not None and not bool(value) for value in values]
+        if any(real_samples) and not all(real_samples):
+            raise ValueError(
+                "Mixed 2D/3D samples in one batch are unsupported; configure "
+                "route-homogeneous batches with the same-scene sampler."
+            )
+        return bool(real_samples) and all(real_samples)
 
     def _add_dense_depth_loss(self, output, depth_preds, gt_depths, skip=False):
         """Add dense-depth supervision or a graph-connected route-safe zero."""
@@ -834,8 +843,8 @@ class SetCriterion(nn.Module):
         box_key = f"loss_box_2d_pseudo_{decoder_idx}"
         cls_key = f"loss_cls_pseudo_{decoder_idx}"
         output = {
-            box_key: torch.nan_to_num(reg, nan=0.0, posinf=0.0, neginf=0.0).sum() * 0.0,
-            cls_key: torch.nan_to_num(cls, nan=0.0, posinf=0.0, neginf=0.0).sum() * 0.0,
+            box_key: self._prediction_zero([], [reg]),
+            cls_key: self._prediction_zero([cls], []),
         }
         mlp = self._ltt_mlp[0]
         if mlp is None:
@@ -993,17 +1002,10 @@ class SetCriterion(nn.Module):
                 )
             )
 
-        logits = torch.cat(cls_logits, dim=0).clamp(min=-50.0, max=50.0)
+        logits = self._classification_input(torch.cat(cls_logits, dim=0))
         targets = torch.cat(cls_targets, dim=0)
         num_positive = (targets < background).sum().to(logits.dtype).clamp(min=1.0)
         classification_loss = self.loss_cls(logits, targets, avg_factor=num_positive)
-        if not bool(torch.isfinite(classification_loss).all()):
-            warnings.warn(
-                f"{cls_key} is non-finite; skipping its gradient", RuntimeWarning
-            )
-            classification_loss = (
-                torch.nan_to_num(logits, nan=0.0, posinf=0.0, neginf=0.0).sum() * 0.0
-            )
         output[box_key] = self.ltt_pseudo_box_weight * box_total / max(box_count, 1)
         output[cls_key] = self.ltt_pseudo_cls_weight * classification_loss
         return output
@@ -1039,8 +1041,11 @@ class SetCriterion(nn.Module):
             )
         return [bool(value) for value in resolved]
 
-    @staticmethod
-    def _prediction_zero(cls_scores, reg_preds, depths=None):
+    def _classification_input(self, logits):
+        """Keep clipping exclusive to the explicit numerical recovery mode."""
+        return logits.clamp(-50.0, 50.0) if self.scrub_nan_gradients else logits
+
+    def _prediction_zero(self, cls_scores, reg_preds, depths=None):
         """Build a backward-safe zero from tensors upstream of all loss maths."""
         tensors = list(cls_scores) + list(reg_preds)
         if torch.is_tensor(depths):
@@ -1050,13 +1055,13 @@ class SetCriterion(nn.Module):
         if not tensors:
             return torch.zeros(())
         return sum(
-            torch.nan_to_num(tensor, nan=0.0, posinf=0.0, neginf=0.0).sum() * 0.0
+            (torch.nan_to_num(tensor, nan=0.0, posinf=0.0, neginf=0.0)
+             if self.scrub_nan_gradients else tensor).sum() * 0.0
             for tensor in tensors
         )
 
-    @staticmethod
-    def _finite_losses(output, zero_ref=None):
-        """Replace residual non-finite values with a pre-loss graph zero.
+    def _finite_losses(self, output, zero_ref=None):
+        """Raise on non-finite losses, or explicitly opt into graph-zero recovery.
 
         Multiplying an already-invalid loss by zero is not backward-safe: its
         Jacobian can still contain NaN. ``zero_ref`` must therefore come from a
@@ -1064,6 +1069,12 @@ class SetCriterion(nn.Module):
         """
         for key, value in list(output.items()):
             if torch.is_tensor(value) and not bool(torch.isfinite(value).all()):
+                if not self.scrub_nan_gradients:
+                    raise FloatingPointError(
+                        f"{key} is non-finite. Numerical recovery is disabled; "
+                        "inspect the input/checkpoint or explicitly set "
+                        "train.scrub_nan_gradients=true."
+                    )
                 warnings.warn(
                     f"{key} is non-finite; zeroing this batch", RuntimeWarning
                 )
@@ -1345,6 +1356,18 @@ class SparseBox3DLoss(nn.Module):
         """
         # Some categories do not distinguish between positive and negative
         # directions. For example, barrier in nuScenes dataset.
+        if box.shape[0] == 0:
+            # Empty positive sets are valid background-only batches, not
+            # numerical failures. Avoid mean(empty) in quality/velocity losses.
+            zero = box.sum() * 0.0
+            output = {f"loss_box{suffix}": zero}
+            if self.valid_vel_weight > 0:
+                output[f"loss_box_vel{suffix}"] = zero
+            if quality is not None:
+                quality_zero = quality.sum() * 0.0
+                output[f"loss_cns{suffix}"] = quality_zero
+                output[f"loss_yns{suffix}"] = quality_zero
+            return output
         if self.cls_allow_reverse is not None and cls_target is not None:
             if_reverse = (
                 torch.nn.functional.cosine_similarity(

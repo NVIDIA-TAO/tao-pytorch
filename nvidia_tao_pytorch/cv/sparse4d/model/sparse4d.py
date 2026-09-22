@@ -46,9 +46,6 @@ class Sparse4D(nn.Module):
         self.neck_config = self.model_config["neck"]
         self.head_config = self.model_config["head"]
         self.depth_branch_config = self.model_config["depth_branch"]
-        self.cotrain_param_touch = bool(
-            self.model_config.get("cotrain_param_touch", False)
-        )
         self.backbone_type = self.backbone_config["type"]
         self.img_backbone = SPARSE4D_BACKBONE_REGISTRY.get(self.backbone_type)(
             out_indices=[0, 1, 2, 3], freeze_norm=True

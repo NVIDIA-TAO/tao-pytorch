@@ -4,6 +4,8 @@
 """Focused tests for route-synchronized Sparse4D co-training sampling."""
 
 import json
+from itertools import islice
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -13,6 +15,7 @@ from nvidia_tao_pytorch.cv.sparse4d.dataloader.callbacks import (
     PklResampleCallback,
 )
 from nvidia_tao_pytorch.cv.sparse4d.dataloader.sampler import GroupInBatchSampler
+from nvidia_tao_pytorch.cv.sparse4d.dataloader.pl_sparse4d_data_module import Sparse4DDataModule
 
 
 pytestmark = pytest.mark.cv_unit
@@ -72,6 +75,32 @@ def test_distributed_scene_blocks_stay_on_the_same_route():
         assert route0 == route1
         observed_routes.add(route0)
     assert observed_routes == {"real", "synthetic"}
+
+
+@pytest.mark.parametrize("cadence", [0, -1])
+def test_distributed_route_sync_requires_positive_cadence(cadence):
+    """Different sequence lengths must not silently desynchronize DDP routes."""
+    dataset = _SamplerDataset(["RealA", "SyntheticA"], scene_switch_iters=cadence)
+    with pytest.raises(ValueError, match="requires scene_switch_iters > 0"):
+        GroupInBatchSampler(dataset, batch_size=1, world_size=2, rank=0, seed=17)
+
+
+def test_reloaded_loader_varies_seed_by_epoch_reproducibly(monkeypatch):
+    """Same seed/epoch reproduces order; the next epoch advances it."""
+    monkeypatch.setenv("RANK", "0")
+    dm = Sparse4DDataModule.__new__(Sparse4DDataModule)
+    dm.trainer = SimpleNamespace(current_epoch=0)
+    dm.train_config = {"seed": 17, "num_gpus": 1, "num_nodes": 1}
+    dm.train_dataset = _SamplerDataset([f"Synthetic{i}" for i in range(20)])
+    dm.batch_size = 1
+    dm.num_workers = 0
+    def order(epoch):
+        dm.trainer.current_epoch = epoch
+        sampler = dm.train_dataloader().batch_sampler
+        return list(islice(sampler._infinite_group_indices(), 20))
+    assert order(0) == order(0)
+    assert order(0) != order(1)
+    assert order(1) == order(1)
 
 
 def test_real_block_probability_edges_select_expected_route():
@@ -165,3 +194,39 @@ def test_pkl_resample_rebuilds_sampler_and_retires_workers():
         ("shutdown", None),
     ]
     assert loader._iterator is None
+
+
+class _EpochDataset(torch.utils.data.Dataset):
+    """Expose worker-side copies of a resampled epoch without external files."""
+
+    def __init__(self):
+        self.epoch = 0
+
+    def __len__(self):
+        return 4
+
+    def __getitem__(self, index):
+        return self.epoch
+
+    def resample_pkls(self, epoch):
+        self.epoch = epoch
+
+
+def test_resampling_retires_real_persistent_workers():
+    """Exercise the private worker retirement API in the installed Torch runtime."""
+    loader = torch.utils.data.DataLoader(
+        _EpochDataset(), num_workers=1, persistent_workers=True,
+        multiprocessing_context="spawn",
+    )
+    iterator = iter(loader)
+    try:
+        assert next(iterator).item() == 0
+        trainer = SimpleNamespace(current_epoch=2, global_step=12, train_dataloader=loader)
+        PklResampleCallback(4).on_train_epoch_end(trainer, pl_module=None)
+        assert loader._iterator is None
+        assert all(not worker.is_alive() for worker in iterator._workers)
+        assert next(iter(loader)).item() == 3
+    finally:
+        iterator._shutdown_workers()
+        if loader._iterator is not None:
+            loader._iterator._shutdown_workers()

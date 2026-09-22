@@ -574,7 +574,8 @@ class Omniverse3DDetTrackDataset(Dataset):
     def load_annotations_lazy(self, ann_file):
         """Load annotations lazily using a pre-built index file.
 
-        Build the index with the TAO-native ``build_lazy_index`` module.
+        Build the index with tao-ds ``annotations sparse4d_prepare`` or the
+        TAO-native ``build_lazy_index`` module.
         """
         logging.info(f"** loading annotations (lazy mode) {ann_file} ...")
 
@@ -589,6 +590,11 @@ class Omniverse3DDetTrackDataset(Dataset):
             return self.load_annotations(ann_file)
 
         cache_path = self._get_lazy_index_cache_path(ann_file)
+        prepare_hint = (
+            "In tao-ds run `annotations sparse4d_prepare -e <spec.yaml> "
+            f"operation=lazy_index lazy_index.annotation_source={ann_file}`. "
+            "The spec must supply results_dir."
+        )
 
         if not cache_path or not osp.exists(cache_path):
             raise FileNotFoundError(
@@ -596,7 +602,7 @@ class Omniverse3DDetTrackDataset(Dataset):
                 f"Please build the index first by running:\n"
                 "  python -m "
                 "nvidia_tao_pytorch.cv.sparse4d.tools.build_lazy_index "
-                f"{ann_file}"
+                f"{ann_file}\n{prepare_hint}"
             )
 
         logging.info(f"** Loading lazy index from {cache_path}")
@@ -626,7 +632,9 @@ class Omniverse3DDetTrackDataset(Dataset):
                 if not osp.exists(self.pkl_cam_counts_path):
                     raise FileNotFoundError(
                         "Configured pkl_cam_counts_path does not exist: "
-                        f"{self.pkl_cam_counts_path}"
+                        f"{self.pkl_cam_counts_path}. {prepare_hint} "
+                        "Then remove the stale override to use embedded counts, "
+                        "or point it at the generated camera-count sidecar."
                     )
                 with open(self.pkl_cam_counts_path, "rb") as f:
                     self._pkl_cam_counts = pickle.load(f)
@@ -640,7 +648,7 @@ class Omniverse3DDetTrackDataset(Dataset):
                         "pkl_sample_size > 0 requires camera counts embedded in the "
                         "lazy index or an explicit pkl_cam_counts_path. Rebuild with "
                         "`python -m nvidia_tao_pytorch.cv.sparse4d.tools."
-                        f"build_lazy_index {ann_file}`."
+                        f"build_lazy_index {ann_file}`. {prepare_hint}"
                     )
                 logging.info(
                     "** Loaded embedded pkl cam counts: "
@@ -671,7 +679,8 @@ class Omniverse3DDetTrackDataset(Dataset):
             raise KeyError(
                 f"{len(missing)} pkl paths in lazy index have no camera-count entry. "
                 f"First 5: {missing[:5]}. "
-                "Rebuild the lazy index or use a matching pkl_cam_counts_path."
+                "Rebuild with tao-ds `annotations sparse4d_prepare` "
+                "(operation=lazy_index), or use a matching pkl_cam_counts_path."
             )
 
         target = min(self.pkl_sample_size, len(all_pkls))

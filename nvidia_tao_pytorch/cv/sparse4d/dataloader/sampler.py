@@ -255,6 +255,11 @@ class GroupInBatchSampler(Sampler):
             getattr(self.dataset, "scene_switch_iters", 0) or 0
         )
         if self.sync_route and self.scene_switch_iters <= 0:
+            if self.world_size > 1:
+                raise ValueError(
+                    "Distributed sync_route requires scene_switch_iters > 0 "
+                    "so ranks cannot drift between routes."
+                )
             logging.warning(
                 "sync_route is enabled with scene_switch_iters <= 0; ranks "
                 "can drift when scene sequences have different lengths"

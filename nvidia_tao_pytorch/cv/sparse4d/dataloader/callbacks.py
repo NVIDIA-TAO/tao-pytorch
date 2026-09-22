@@ -48,6 +48,8 @@ class PklResampleCallback(Callback):
         # Persistent-worker DataLoaders cache their iterator on the loader.
         # Explicitly retire it once; Lightning will build a fresh loader/iterator
         # for the next epoch.
+        # Private PyTorch API: verified against TAO's 2.11.0a0 nv26.03 runtime.
+        # Recheck this retirement path when upgrading the container/PyTorch.
         iterator = getattr(train_dataloader, "_iterator", None)
         if iterator is not None and hasattr(iterator, "_shutdown_workers"):
             iterator._shutdown_workers()

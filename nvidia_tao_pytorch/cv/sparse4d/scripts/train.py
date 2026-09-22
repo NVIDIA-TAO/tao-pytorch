@@ -74,7 +74,7 @@ def run_experiment(experiment_config, key):
     grad_clip = experiment_config.train.optim.grad_clip.max_norm
 
     # Instantiate the model
-    model = Sparse4DPlModel(experiment_config)
+    model = Sparse4DPlModel(experiment_config, build_training_losses=True)
     logging.info(model)
 
     if pretrained_path:

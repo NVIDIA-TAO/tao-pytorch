@@ -451,7 +451,7 @@ class Sparse4DDataModule(pl.LightningDataModule):
             batch_size=self.batch_size,
             world_size=world_size,
             rank=rank,
-            seed=self.train_config["seed"],
+            seed=self.train_config["seed"] + int(getattr(self.trainer, "current_epoch", 0)),
             skip_prob=0.5,
             sequence_flip_prob=0.1,
         )

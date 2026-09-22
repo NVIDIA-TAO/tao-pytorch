@@ -6,7 +6,6 @@
 import itertools
 
 import torch
-import torch.distributed as dist
 import pytorch_lightning as pl
 
 import nvidia_tao_pytorch.core.loggers.api_logging as status_logging
@@ -22,12 +21,15 @@ from nvidia_tao_pytorch.cv.sparse4d.utils.stability import (
 class Sparse4DPlModel(TAOLightningModule):
     """PyTorch Lightning Module for Sparse4D 3D Object Detection and Tracking."""
 
-    def __init__(self, experiment_spec, export=False):
+    def __init__(self, experiment_spec, export=False, build_training_losses=False):
         """Initialize the Sparse4D PyTorch Lightning Module.
 
         Args:
             experiment_spec: The experiment specification.
             export: Whether to export the model.
+            build_training_losses: Build training-only dependencies and register
+                auxiliary parameters before checkpoint restoration/DDP setup.
+                Set this to True for Trainer.fit; evaluation/export need no MLP.
         """
         super().__init__(experiment_spec)
         self.model_config = self.experiment_spec.model
@@ -54,7 +56,8 @@ class Sparse4DPlModel(TAOLightningModule):
             self.model.head.instance_bank,
             class_names=list(self.dataset_config["classes"]),
             sync_positive_counts=sync_positive_counts,
-        )
+            scrub_nan_gradients=bool(self.train_config.get("scrub_nan_gradients", False)),
+        ) if build_training_losses else None
 
         self.cotrain_param_touch = bool(
             self.model_config.get("cotrain_param_touch", False)
@@ -67,6 +70,10 @@ class Sparse4DPlModel(TAOLightningModule):
         self.nan_gradient_scrubbing = bool(
             self.train_config.get("scrub_nan_gradients", False)
         )
+        loss_keys = list(self.criterion.loss_keys) if self.criterion is not None else []
+        if self.cotrain_param_touch:
+            loss_keys.append("loss_param_touch")
+        self.cotrain_loss_keys = tuple(sorted(loss_keys))
 
         # Set up monitoring and logging
         self.status_logging_dict = {}
@@ -102,6 +109,8 @@ class Sparse4DPlModel(TAOLightningModule):
             The loss dictionary.
         """
         # Forward pass
+        if self.criterion is None:
+            raise RuntimeError("Construct Sparse4DPlModel with build_training_losses=True for fit.")
         batch["img"] = batch["img"].float()
         outputs = self.model(batch["img"], batch)
 
@@ -159,29 +168,11 @@ class Sparse4DPlModel(TAOLightningModule):
         return sum(terms) if terms else torch.zeros(())
 
     def _sync_cotrain_loss_keys(self, losses, zero_ref):
-        """Canonicalize heterogeneous route loss dictionaries across DDP ranks."""
-        if not (dist.is_available() and dist.is_initialized()):
-            return losses
-        world_size = dist.get_world_size()
-        if world_size == 1:
-            return losses
-
-        gathered = [None] * world_size
-        dist.all_gather_object(gathered, sorted(losses))
-        global_keys = sorted({key for keys in gathered for key in keys})
-        missing = [key for key in global_keys if key not in losses]
-        if missing:
-            count = getattr(self, "_cotrain_desync_logs", 0)
-            if count < 20:
-                self._cotrain_desync_logs = count + 1
-                status_logging.get_status_logger().write(
-                    message=(
-                        f"Sparse4D rank {dist.get_rank()} filled missing co-training "
-                        f"losses with zero: {missing}"
-                    ),
-                    status_level=status_logging.Status.RUNNING,
-                )
-        return {key: losses[key] if key in losses else zero_ref for key in global_keys}
+        """Fill a configuration-derived schema without per-step collectives."""
+        unexpected = set(losses).difference(self.cotrain_loss_keys)
+        if unexpected:
+            raise ValueError(f"Losses absent from configured schema: {sorted(unexpected)}")
+        return {key: losses.get(key, zero_ref) for key in self.cotrain_loss_keys}
 
     def on_after_backward(self):
         """Drop numerical NaNs without hiding mixed-precision overflows."""

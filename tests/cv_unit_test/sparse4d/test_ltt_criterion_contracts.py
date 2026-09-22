@@ -18,6 +18,7 @@ from nvidia_tao_pytorch.cv.sparse4d.model.criterion import (
     DenseDepthLoss,
     FocalLoss,
     SetCriterion,
+    SparseBox3DLoss,
 )
 from nvidia_tao_pytorch.cv.sparse4d.model.loose_to_tight_mlp import (
     LooseToTightMLP,
@@ -33,6 +34,7 @@ def _bare_criterion() -> SetCriterion:
     """Create a criterion shell for testing helpers that do not need configuration."""
     criterion = SetCriterion.__new__(SetCriterion)
     torch.nn.Module.__init__(criterion)
+    criterion.scrub_nan_gradients = False
     return criterion
 
 
@@ -40,7 +42,7 @@ def _bare_lightning_model() -> Sparse4DPlModel:
     """Create a Lightning shell for the standalone synchronization helper."""
     model = Sparse4DPlModel.__new__(Sparse4DPlModel)
     torch.nn.Module.__init__(model)
-    model._cotrain_desync_logs = 20
+    model.cotrain_loss_keys = ("loss_a", "loss_m", "loss_z")
     return model
 
 
@@ -66,14 +68,16 @@ def test_nonfinite_loss_uses_backward_safe_upstream_zero():
     prediction = torch.tensor(0.0, requires_grad=True)
     depth = torch.tensor(2.0, requires_grad=True)
     invalid_loss = prediction / prediction
-    zero_ref = SetCriterion._prediction_zero(
+    criterion = _bare_criterion()
+    criterion.scrub_nan_gradients = True
+    zero_ref = criterion._prediction_zero(
         [prediction],
         [],
         [depth],
     )
 
     with pytest.warns(RuntimeWarning, match="non-finite"):
-        losses = SetCriterion._finite_losses(
+        losses = criterion._finite_losses(
             {"loss_invalid": invalid_loss},
             zero_ref=zero_ref,
         )
@@ -86,6 +90,20 @@ def test_nonfinite_loss_uses_backward_safe_upstream_zero():
     assert prediction.grad.item() == 0.0
     assert depth.grad is not None
     assert depth.grad.item() == 0.0
+
+
+@pytest.mark.parametrize("velocity_weight", [-1, 2])
+def test_empty_positive_regression_is_a_finite_graph_zero(velocity_weight):
+    """Empty GT is supported without enabling numerical recovery."""
+    boxes = torch.empty((0, 11), requires_grad=True)
+    quality = torch.empty((0, 2), requires_grad=True)
+    losses = SparseBox3DLoss(valid_vel_weight=velocity_weight)(
+        boxes, torch.empty_like(boxes), quality=quality, avg_factor=1.0
+    )
+    assert all(loss.ndim == 0 and loss.item() == 0 for loss in losses.values())
+    sum(losses.values()).backward()
+    assert boxes.grad is not None
+    assert quality.grad is not None
 
 
 def test_dense_depth_loss_masks_invalid_targets_and_keeps_valid_depth():
@@ -101,6 +119,42 @@ def test_dense_depth_loss_masks_invalid_targets_and_keeps_valid_depth():
         prediction.grad,
         torch.tensor([[[[0.0, 0.0, 0.2]]]]),
     )
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
+def test_nonfinite_loss_raises_by_default(value):
+    """Baseline training must not silently replace divergence with zero."""
+    with pytest.raises(FloatingPointError, match="loss_bad is non-finite"):
+        _bare_criterion()._finite_losses({"loss_bad": torch.tensor(value)})
+
+
+@pytest.mark.parametrize("scrub", [False, True])
+def test_extreme_classification_logits_clip_only_when_opted_in(scrub):
+    """Default focal gradients remain active beyond the old clipping bounds."""
+    criterion = _bare_criterion()
+    criterion.scrub_nan_gradients = scrub
+    logits = torch.tensor([[80.0, -80.0]], requires_grad=True)
+    loss = FocalLoss()(criterion._classification_input(logits), torch.tensor([1]))
+    loss.backward()
+    if scrub:
+        torch.testing.assert_close(logits.grad, torch.zeros_like(logits))
+    else:
+        assert torch.all(logits.grad.abs() > 0)
+
+
+@pytest.mark.parametrize("flags", [[True, False], [False, None], torch.tensor([0, 1])])
+def test_mixed_supervision_batch_fails_fast(flags):
+    """Mixed routes cannot silently omit pseudo-label supervision."""
+    criterion = _bare_criterion()
+    criterion.ltt_has3dgt_key = "has_3d_gt"
+    with pytest.raises(ValueError, match="Mixed 2D/3D"):
+        criterion._is_real_batch({"has_3d_gt": flags})
+
+
+def test_loss_schema_rejects_unconfigured_keys():
+    """A new loss must be added to the shared schema, not silently dropped."""
+    with pytest.raises(ValueError, match="absent from configured schema"):
+        _bare_lightning_model()._sync_cotrain_loss_keys({"loss_new": _loss(1.0)}, _loss(0.0))
 
 
 def test_calibration_free_route_skips_dense_depth_supervision():
@@ -676,6 +730,9 @@ def _gloo_sync_worker(
     )
     try:
         model = _bare_lightning_model()
+        def unexpected_collective(*_args, **_kwargs):
+            raise AssertionError("loss-key filling must not use an object collective")
+        dist.all_gather_object = unexpected_collective
 
         if rank == 0:
             same_keys = {"loss_z": _loss(2.0), "loss_a": _loss(1.0)}
@@ -734,7 +791,7 @@ def test_cotrain_loss_keys_are_canonical_across_two_ranks(tmp_path):
         for rank in range(world_size)
     ]
     for result in results:
-        assert result["same_keys"] == ["loss_a", "loss_z"]
+        assert result["same_keys"] == ["loss_a", "loss_m", "loss_z"]
         assert result["heterogeneous_keys"] == ["loss_a", "loss_m", "loss_z"]
         assert result["missing_value"] == 0.0
         assert result["missing_is_zero_ref"]

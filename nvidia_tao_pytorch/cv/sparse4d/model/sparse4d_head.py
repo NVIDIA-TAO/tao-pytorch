@@ -360,28 +360,36 @@ class Sparse4DHead(nn.Module):
         return list(indices)
 
     @staticmethod
-    def _indices_changed(previous, current):
-        """Return whether any known per-sample data index changed."""
+    def _changed_slots(previous, current):
+        """Return boundary flags only for known per-sample data indices."""
         if previous is None or current is None:
-            return False
+            return []
         if len(previous) != len(current):
-            return True
-        return any(
+            return [True] * len(current)
+        return [
             prev != -1 and curr != -1 and prev != curr
             for prev, curr in zip(previous, current)
-        )
+        ]
 
     def _reset_at_data_boundary(self, metas):
-        """Reset all temporal caches when a group or scene changes."""
+        """Preserve independent slots; clear full caches at an all-slot boundary."""
         group_indices = self._get_data_indices(metas, "group_idx")
         scene_indices = self._get_data_indices(metas, "scene_idx")
         previous_groups, previous_scenes = self.instance_bank.get_data_indices()
 
-        boundary = self._indices_changed(previous_groups, group_indices)
-        boundary = boundary or self._indices_changed(previous_scenes, scene_indices)
-        if boundary:
+        reset_flags = []
+        for previous, current in ((previous_groups, group_indices),
+                                  (previous_scenes, scene_indices)):
+            changed = self._changed_slots(previous, current)
+            reset_flags.extend([False] * max(0, len(changed) - len(reset_flags)))
+            for index, flag in enumerate(changed):
+                reset_flags[index] |= flag
+        boundary = any(reset_flags)
+        if boundary and all(reset_flags):
             self.instance_bank.reset_temporal_state()
             self.sampler.dn_metas = None
+        elif boundary and self.use_temporal_align:
+            self.instance_bank.reset_gt_index_mapping_by_data_indices(reset_flags)
 
         # Retain the last known dimension when one metadata layout omits it.
         if group_indices is None:

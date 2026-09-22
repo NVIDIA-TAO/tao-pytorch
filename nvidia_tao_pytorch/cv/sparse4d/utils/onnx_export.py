@@ -21,6 +21,9 @@ def sanitize_sampling_locations_for_export(points_2d):
     The accepted-only predicate deliberately rejects NaN and infinity because
     comparisons against NaN are false. Zero is also rejected by both the
     original and hardened TensorRT MSDA plugins, so it is a safe sentinel.
+    This applies to every export, including unchanged 3D checkpoints. A
+    deployment MSDA plugin must skip coordinates outside the strict open
+    interval (0, 1), including exactly zero; otherwise this sentinel is unsafe.
     """
     valid_x = (points_2d[..., :1] > 0) & (points_2d[..., :1] < 1)
     valid_y = (points_2d[..., 1:2] > 0) & (points_2d[..., 1:2] < 1)

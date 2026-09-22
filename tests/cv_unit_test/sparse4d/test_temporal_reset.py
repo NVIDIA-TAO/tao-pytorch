@@ -44,6 +44,7 @@ def _bare_head(bank):
     head = Sparse4DHead.__new__(Sparse4DHead)
     nn.Module.__init__(head)
     head.instance_bank = bank
+    head.use_temporal_align = True
     head.sampler = SimpleNamespace(dn_metas={"dn_anchor": torch.ones(1)})
     return head
 
@@ -65,15 +66,15 @@ def _assert_temporal_state_cleared(bank):
 
 
 @pytest.mark.parametrize("changed_key", ["group_idx", "scene_idx"])
-def test_head_resets_all_temporal_state_on_any_data_boundary(changed_key):
-    """A boundary in one batch slot invalidates batch-wide and DN caches."""
+def test_head_resets_all_temporal_state_on_all_slot_boundary(changed_key):
+    """Only a boundary in every slot invalidates batch-wide and DN caches."""
     bank = _bank()
     bank.prev_id = 41
     bank.set_data_indices([3, 3], [7, 7])
     _populate_temporal_state(bank)
     head = _bare_head(bank)
     metas = {"group_idx": [3, 3], "scene_idx": [7, 7]}
-    metas[changed_key][1] += 1
+    metas[changed_key] = [value + 1 for value in metas[changed_key]]
 
     assert head._reset_at_data_boundary(metas)
 
@@ -100,6 +101,39 @@ def test_head_supports_legacy_nested_metadata_without_false_reset():
     assert bank.cached_feature is not None
     assert head.sampler.dn_metas is not None
     assert bank.prev_id == 9
+
+
+@pytest.mark.parametrize("changed_key", ["group_idx", "scene_idx"])
+@pytest.mark.parametrize("temporal_align", [False, True])
+def test_partial_boundary_preserves_other_slots(changed_key, temporal_align):
+    """Independently advancing samples must not erase the other slot's history."""
+    bank = _bank()
+    bank.set_data_indices([3, 3], [7, 7])
+    _populate_temporal_state(bank)
+    head = _bare_head(bank)
+    head.use_temporal_align = temporal_align
+    feature = bank.cached_feature
+    dn_metas = head.sampler.dn_metas
+    metas = {"group_idx": [3, 3], "scene_idx": [7, 7]}
+    metas[changed_key][1] += 1
+    assert head._reset_at_data_boundary(metas)
+    assert bank.cached_feature is feature
+    assert head.sampler.dn_metas is dn_metas
+    for mappings in (bank.gt_index_mapping, bank.cached_gt_index_mapping):
+        assert mappings[0] == {0: (0, 10)}
+        assert mappings[1] == ({} if temporal_align else {0: (0, 10)})
+    torch.testing.assert_close(bank.cached_query_indices[0], torch.tensor([0]))
+
+
+def test_partial_time_gap_preserves_valid_slot_history():
+    """The normal per-sample mask handles partial gaps even with reset enabled."""
+    bank = _bank(reset_on_time_gap=True)
+    _populate_temporal_state(bank)
+    feature = bank.cached_feature
+    outputs = bank.get(2, {"timestamp": torch.tensor([0.5, 3.0])})
+    assert bank.cached_feature is feature
+    assert outputs[2] is feature
+    assert bank.mask.tolist() == [True, False]
 
 
 def test_time_gap_uses_temporal_reset_without_recycling_instance_ids():

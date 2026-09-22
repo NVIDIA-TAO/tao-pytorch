@@ -171,11 +171,14 @@ class InstanceBank(nn.Module):
         self.cached_query_indices = None
 
     def reset_gt_index_mapping_by_data_indices(self, reset_flags):
-        """Reset the gt index mapping by data indices."""
-        if any(reset_flags):
-            self.gt_index_mapping = None
-            self.cached_gt_index_mapping = None
-            self.cached_query_indices = None
+        """Forget assignments only in slots crossing a data boundary."""
+        for mappings in (self.gt_index_mapping, self.cached_gt_index_mapping):
+            if mappings is not None:
+                for index, reset in enumerate(reset_flags):
+                    if reset:
+                        mappings[index] = {}
+        # Query indices remain valid for unchanged slots. Empty mappings above
+        # ensure stale indices cannot preserve assignments in changed slots.
 
     def get(self, batch_size, metas=None, dn_metas=None):
         """Get the instance feature, anchor, and re-ID feature."""
@@ -195,7 +198,7 @@ class InstanceBank(nn.Module):
             # A long gap or clip-boundary timestamp reset can otherwise carry a
             # poisoned recurrent feature into every later clip. Keep IDs globally
             # unique, but discard all temporal tensors when explicitly requested.
-            if self.reset_on_time_gap and not bool(torch.all(self.mask).item()):
+            if self.reset_on_time_gap and not bool(torch.any(self.mask).item()):
                 self.reset_temporal_state()
                 time_interval = instance_feature.new_full(
                     (batch_size,), self.default_time_interval

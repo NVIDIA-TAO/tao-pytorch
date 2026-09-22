@@ -123,8 +123,9 @@ class Sparse4DTrainConfig(TrainConfig):
         value=False,
         default_value=False,
         description=(
-            "Replace NaN gradient entries with zero after backward while "
-            "preserving infinities for mixed-precision overflow detection"
+            "Opt in to classification-logit clipping, non-finite loss recovery, "
+            "and NaN-gradient scrubbing after backward; gradient infinities "
+            "remain visible to mixed-precision overflow detection"
         ),
         display_name="Scrub NaN gradients",
     )

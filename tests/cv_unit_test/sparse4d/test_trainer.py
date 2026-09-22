@@ -70,10 +70,13 @@ class _TinyCriterion(nn.Module):
         instance_bank,
         class_names=None,
         sync_positive_counts=True,
+        scrub_nan_gradients=False,
     ):
         super().__init__()
         del model_config, instance_bank, class_names
         self.sync_positive_counts = sync_positive_counts
+        self.scrub_nan_gradients = scrub_nan_gradients
+        self.loss_keys = ("loss_tiny",)
         self.offset = nn.Parameter(torch.tensor(0.25))
 
     def forward(self, outputs, data):
@@ -232,23 +235,23 @@ def _trainer(spec, devices):
 
 def test_positive_count_sync_policy_is_wired_conservatively(_train_spec):
     """Only route-specific early losses disable baseline count reduction."""
-    baseline = Sparse4DPlModel(_train_spec)
+    baseline = Sparse4DPlModel(_train_spec, build_training_losses=True)
     assert baseline.criterion.sync_positive_counts is True
 
     _train_spec.model.cotrain_param_touch = True
-    parameter_touch_only = Sparse4DPlModel(_train_spec)
+    parameter_touch_only = Sparse4DPlModel(_train_spec, build_training_losses=True)
     assert parameter_touch_only.criterion.sync_positive_counts is True
 
     _train_spec.model.head.loose_to_tight.enable = True
     _train_spec.model.head.loose_to_tight.pseudo_enable = True
-    ltt_pseudo = Sparse4DPlModel(_train_spec)
+    ltt_pseudo = Sparse4DPlModel(_train_spec, build_training_losses=True)
     assert ltt_pseudo.criterion.sync_positive_counts is False
 
     _train_spec.model.head.loose_to_tight.enable = False
     _train_spec.model.head.loose_to_tight.pseudo_enable = False
     _train_spec.model.sv_aux_head.enable = True
     _train_spec.dataset.sync_route = True
-    sv_with_declared_route_sync = Sparse4DPlModel(_train_spec)
+    sv_with_declared_route_sync = Sparse4DPlModel(_train_spec, build_training_losses=True)
     assert sv_with_declared_route_sync.criterion.sync_positive_counts is False
 
 
@@ -258,7 +261,7 @@ def test_positive_count_sync_policy_is_wired_conservatively(_train_spec):
 def test_trainer_fit(_train_spec):
     """Run Sparse4DPlModel through a real Trainer fit and validation cycle."""
     dm = Sparse4DDataModule(_train_spec)
-    model = Sparse4DPlModel(_train_spec)
+    model = Sparse4DPlModel(_train_spec, build_training_losses=True)
     _load_temporary_checkpoint(model, _train_spec.train.pretrained_model_path)
     initial_weight = model.model.weight.detach().clone()
 
@@ -301,7 +304,7 @@ def test_run_experiment_uses_step_budget_as_only_stop_condition(monkeypatch):
         ),
     )
     monkeypatch.setattr(train_script, "Sparse4DDataModule", lambda experiment_config: object())
-    monkeypatch.setattr(train_script, "Sparse4DPlModel", lambda experiment_config: object())
+    monkeypatch.setattr(train_script, "Sparse4DPlModel", lambda experiment_config, **kwargs: object())
     monkeypatch.setattr(train_script, "LearningRateMonitor", lambda **kwargs: object())
     monkeypatch.setattr(train_script, "Trainer", _Trainer)
 
@@ -310,6 +313,31 @@ def test_run_experiment_uses_step_budget_as_only_stop_condition(monkeypatch):
     assert captured["max_epochs"] == -1
     assert captured["max_steps"] == 6
     assert captured["ckpt_path"] == "/tmp/epoch_1.pth"
+
+
+@pytest.mark.parametrize("export", [False, True])
+def test_nontraining_model_does_not_build_loss_dependencies(_train_spec, monkeypatch, export):
+    """A saved LTT-enabled spec needs no training-only MLP for inference/export."""
+    _train_spec.model.head.loose_to_tight.enable = True
+    _train_spec.model.head.loose_to_tight.mlp_ckpt = "/missing/training-only.pth"
+    def unexpected_criterion(*_args, **_kwargs):
+        raise AssertionError("non-training construction must not build criterion")
+    monkeypatch.setattr(pl_model_module, "SetCriterion", unexpected_criterion)
+    model = Sparse4DPlModel(_train_spec, export=export)
+    assert model.criterion is None
+
+
+def test_training_losses_are_registered_before_checkpoint_restore(_train_spec):
+    """Training-only parameters exist before Lightning loads/resumes a checkpoint."""
+    _train_spec.train.scrub_nan_gradients = True
+    model = Sparse4DPlModel(_train_spec, build_training_losses=True)
+    assert model.criterion.scrub_nan_gradients
+    state = model.state_dict()
+    assert "criterion.offset" in state
+    state["criterion.offset"] = torch.tensor(4.0)
+    restored = Sparse4DPlModel(_train_spec, build_training_losses=True)
+    restored.load_state_dict(state)
+    assert restored.criterion.offset.item() == 4.0
 
 
 @pytest.mark.cv_unit
