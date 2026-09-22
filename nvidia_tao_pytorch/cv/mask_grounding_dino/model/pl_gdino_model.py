@@ -7,6 +7,7 @@ import copy
 import os
 from pathlib import Path
 
+import numpy as np
 import pytorch_lightning as pl
 import torch
 from torch.optim.lr_scheduler import MultiStepLR, StepLR
@@ -16,6 +17,7 @@ import nvidia_tao_pytorch.core.loggers.api_logging as status_logging
 from nvidia_tao_pytorch.core.tlt_logging import logger
 
 from nvidia_tao_pytorch.cv.deformable_detr.utils.misc import rgetattr, match_name_keywords
+from nvidia_tao_pytorch.cv.deformable_detr.utils.coco_eval import CocoEvaluator
 
 from nvidia_tao_pytorch.cv.grounding_dino.model.matcher import HungarianMatcher
 from nvidia_tao_pytorch.cv.grounding_dino.utils.get_tokenlizer import get_tokenlizer
@@ -23,7 +25,7 @@ from nvidia_tao_pytorch.cv.grounding_dino.model.bertwraper import generate_masks
 
 from nvidia_tao_pytorch.cv.mask_grounding_dino.model.build_nn_model import build_model
 from nvidia_tao_pytorch.cv.mask_grounding_dino.model.criterion import SetCriterion
-from nvidia_tao_pytorch.cv.mask_grounding_dino.utils.evaluator import VG_Evaluator, OD_Evaluator
+from nvidia_tao_pytorch.cv.mask_grounding_dino.utils.evaluator import VG_Evaluator
 from nvidia_tao_pytorch.cv.mask_grounding_dino.utils.vl_utils import create_positive_map
 from nvidia_tao_pytorch.cv.mask_grounding_dino.model.post_process import (
     PostProcess,
@@ -31,6 +33,29 @@ from nvidia_tao_pytorch.cv.mask_grounding_dino.model.post_process import (
     save_inference_prediction,
     threshold_predictions,
 )
+
+
+def coco_metric_values(stats):
+    """Convert COCOeval's ordered statistics into TAO metric names."""
+    stats = np.asarray(stats, dtype=np.float64)
+    if stats.ndim != 1 or stats.size < 12:
+        raise ValueError("COCO evaluator statistics must contain 12 values.")
+    if not np.isfinite(stats[:12]).all():
+        raise RuntimeError("COCO evaluator produced non-finite statistics.")
+    return {
+        "mAP": float(stats[0]),
+        "mAP50": float(stats[1]),
+        "mAP75": float(stats[2]),
+        "mAP_small": float(stats[3]),
+        "mAP_medium": float(stats[4]),
+        "mAP_large": float(stats[5]),
+        "AR1": float(stats[6]),
+        "AR10": float(stats[7]),
+        "AR100": float(stats[8]),
+        "AR_small": float(stats[9]),
+        "AR_medium": float(stats[10]),
+        "AR_large": float(stats[11]),
+    }
 
 
 # pylint:disable=too-many-ancestors
@@ -280,12 +305,10 @@ class MaskGDINOPlModel(TAOLightningModule):
         """
         if self.experiment_spec.dataset.val_data_sources.data_type == "OD":
             self.iou_types = ['bbox', 'segm'] if self.model_config['has_mask'] else ['bbox']
-            self.val_evaluator = OD_Evaluator(
-                class_names=self.trainer.datamodule.val_dataset.cap_lists,
+            self.val_evaluator = CocoEvaluator(
+                self.trainer.datamodule.val_dataset.coco,
                 iou_types=self.iou_types,
-                device=self.device,
-                dataset_name='coco_variant',
-                output_dir=self.experiment_spec.results_dir
+                eval_class_ids=self.dataset_config["eval_class_ids"],
             )
         else:
             self.val_evaluator = VG_Evaluator(
@@ -356,7 +379,7 @@ class MaskGDINOPlModel(TAOLightningModule):
 
         if self.experiment_spec.dataset.val_data_sources.data_type == "OD":
             res = {target['image_id'].item(): output for target, output in zip(targets, results)}
-            self.val_evaluator.update(res, targets)
+            self.val_evaluator.update(res)
         else:
             self.val_evaluator.update(results, targets, no_targets)
 
@@ -369,16 +392,23 @@ class MaskGDINOPlModel(TAOLightningModule):
         """
         self.status_logging_dict = {}
         if self.experiment_spec.dataset.val_data_sources.data_type == "OD":
-            eval_results = self.val_evaluator.summarize()
-            if self.trainer.is_global_zero and eval_results:
-                # Log main metrics (bbox/segm)
+            self.val_evaluator.synchronize_between_processes()
+            if self.val_evaluator.img_ids:
+                self.val_evaluator.overall_accumulate()
+                self.val_evaluator.overall_summarize(is_print=False)
+            if self.trainer.is_global_zero and self.val_evaluator.img_ids:
                 for iou_type in self.iou_types:
-                    # _summarize_task omits the "all" aggregate when no class produced
-                    # predictions (e.g. fast_dev_run with an undertrained model).
-                    for key, value in eval_results[iou_type].get('all', {}).items():
-                        if isinstance(value, (int, float)):
-                            self.log(f"[{iou_type}] val_{key}", value, rank_zero_only=True)
-                        self.status_logging_dict[f"[{iou_type}] val_{key}"] = str(value)
+                    stats = self.val_evaluator.coco_eval[iou_type].stats
+                    metrics = coco_metric_values(stats)
+                    for key, value in metrics.items():
+                        prefix = "" if iou_type == "bbox" else f"{iou_type}_"
+                        metric_name = f"{prefix}val_{key}"
+                        self.log(
+                            metric_name,
+                            value,
+                            rank_zero_only=True,
+                        )
+                        self.status_logging_dict[metric_name] = str(value)
         else:
             eval_results = self.val_evaluator.evaluate()
             if self.trainer.is_global_zero:
@@ -408,12 +438,10 @@ class MaskGDINOPlModel(TAOLightningModule):
         dataname = Path(self.experiment_spec.dataset.test_data_sources['json_file']).stem
         if self.experiment_spec.dataset.test_data_sources.data_type == "OD":   # Keep original mask grounding DINO test dataset, Use OD dataset
             self.iou_types = ['bbox', 'segm'] if self.model_config['has_mask'] else ['bbox']
-            self.test_evaluator = OD_Evaluator(
-                class_names=self.trainer.datamodule.test_dataset.cap_lists,
+            self.test_evaluator = CocoEvaluator(
+                self.trainer.datamodule.test_dataset.coco,
                 iou_types=self.iou_types,
-                device=self.device,
-                dataset_name=dataname,
-                output_dir=self.experiment_spec.results_dir
+                eval_class_ids=self.dataset_config["eval_class_ids"],
             )
         else:
             self.test_evaluator = VG_Evaluator(
@@ -466,15 +494,17 @@ class MaskGDINOPlModel(TAOLightningModule):
             text_threshold=self.experiment_spec.evaluate.text_threshold,
             ioi_threshold=self.experiment_spec.evaluate.ioi_threshold
         )
-        filtered_res = threshold_predictions(
-            results,
-            self.experiment_spec.evaluate.conf_threshold,
-            self.experiment_spec.evaluate.nms_threshold
-        )
         if self.experiment_spec.dataset.test_data_sources.data_type == "OD":
-            res = {target['image_id'].item(): output for target, output in zip(targets, filtered_res)}
-            self.test_evaluator.update(res, targets)
+            # COCO AP must receive the complete ranked detections; applying a
+            # confidence/NMS threshold first changes the metric definition.
+            res = {target['image_id'].item(): output for target, output in zip(targets, results)}
+            self.test_evaluator.update(res)
         else:
+            filtered_res = threshold_predictions(
+                results,
+                self.experiment_spec.evaluate.conf_threshold,
+                self.experiment_spec.evaluate.nms_threshold
+            )
             self.test_evaluator.update(filtered_res, targets, no_targets)
 
     def on_test_epoch_end(self):
@@ -484,13 +514,23 @@ class MaskGDINOPlModel(TAOLightningModule):
         """
         self.status_logging_dict = {}
         if self.experiment_spec.dataset.test_data_sources.data_type == "OD":
-            eval_results = self.test_evaluator.summarize()
-            if self.trainer.is_global_zero and eval_results:
+            self.test_evaluator.synchronize_between_processes()
+            if self.test_evaluator.img_ids:
+                self.test_evaluator.overall_accumulate()
+                self.test_evaluator.overall_summarize(is_print=False)
+            if self.trainer.is_global_zero and self.test_evaluator.img_ids:
                 for iou_type in self.iou_types:
-                    for key, value in eval_results[iou_type].get('all', {}).items():
-                        if isinstance(value, (int, float)):
-                            self.log(f"[{iou_type}] test_{key}", value, rank_zero_only=True)
-                        self.status_logging_dict[f"[{iou_type}] test_{key}"] = str(value)
+                    stats = self.test_evaluator.coco_eval[iou_type].stats
+                    metrics = coco_metric_values(stats)
+                    for key, value in metrics.items():
+                        prefix = "" if iou_type == "bbox" else f"{iou_type}_"
+                        metric_name = f"{prefix}test_{key}"
+                        self.log(
+                            metric_name,
+                            value,
+                            rank_zero_only=True,
+                        )
+                        self.status_logging_dict[metric_name] = str(value)
         else:
             eval_results = self.test_evaluator.evaluate()
             if self.trainer.is_global_zero:
