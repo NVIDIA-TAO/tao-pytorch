@@ -8,6 +8,7 @@ train:
   checkpoint_interval: 1
   pretrained_model_path: ???
   precision: bf16
+  scrub_nan_gradients: false
   optim:
     type: "adamw"
     lr: 0.0001
@@ -31,8 +32,22 @@ model:
   use_grid_mask: true
   use_deformable_func: true
   use_temporal_align: true
+  cotrain_param_touch: false
+  sv_scene_keywords: ["SV2D"]
   input_shape: [1408, 512]
   embed_dims: 256
+  sv_aux_head:
+    enable: false
+    in_channels: 256
+    num_classes: 0  # derive from dataset.classes
+    roi_size: 7
+    hidden_dim: 256
+    fpn_strides: [4, 8, 16, 32]
+    use_level: 1
+    loss_weight: 1.0
+    det_box_key: "det_boxes_2d"
+    det_cls_key: "det_classes_2d"
+    min_box_size: 2.0
   neck:
     type: "FPN"
     num_outs: 4
@@ -60,6 +75,37 @@ model:
     drop_out: 0.1
     temporal: true
     with_quality_estimation: true
+    loose_to_tight:
+      enable: false
+      mlp_ckpt: ""
+      loss_weight: 0.1
+      num_classes: 0  # derive from dataset.classes
+      tight_l1_weight: 1.0
+      containment_weight: 1.0
+      box2d_key: "gt_boxes_2d_visible"
+      occ_key: "gt_occ_weight"
+      instance_id_key: "instance_id"
+      ego2cam_key: "cam2world_transform"
+      min_gt_area: 1.0
+      eps: 0.1
+      pseudo_enable: false
+      det_box_key: "det_boxes_2d"
+      det_cls_key: "det_classes_2d"
+      det_score_key: "det_scores_2d"
+      has_3d_gt_key: "has_3d_gt"
+      giou_thr: 0.3
+      cost_giou: 2.0
+      cost_l1: 1.0
+      cost_cls: 1.0
+      det_score_thr: 0.0
+      min_cams: 1
+      dedup_dist: 0.0
+      class_gate: true
+      pseudo_box_weight: 0.1
+      pseudo_cls_weight: 1.0
+      sv_depth_weight: 0.0
+      sv_size_weight: 0.25
+      sv_yaw_weight: 0.0
     instance_bank:
       num_anchor: 900
       anchor: ???
@@ -69,6 +115,7 @@ model:
       default_time_interval: 0.033333
       embed_dims: "${model.embed_dims}"
       use_temporal_align: "${model.use_temporal_align}"
+      reset_on_time_gap: false
     anchor_encoder:
       type: 'SparseBox3DEncoder'
       vel_dims: 3
@@ -176,6 +223,34 @@ model:
 dataset:
   use_h5_file_for_rgb: false
   use_h5_file_for_depth: true
+  lazy_load: false
+  lazy_load_cache_size: 50
+  pkl_sample_size: 0
+  pkl_cam_counts_path: ""
+  fps_drop_prob: 0.0
+  target_fps_choices: [30, 20, 15, 10, 6, 5, 3, 2, 1]
+  max_cameras: -1
+  eval_dist_fcn: "center_distance"
+  eval_hota: false
+  ltt_2dgt_sidecar_dir: ""
+  ltt_2dgt_frame_regex: ""
+  ltt_2dgt_dedup_regex: "^CT[\\w.]+?__"
+  ltt_2dgt_cache_size: 8
+  ltt_2dgt_warn_on_miss: true
+  rtdetr_2d_cache_dir: ""
+  rtdetr_2d_cache_path: ""
+  rtdetr_2d_dedup_regex: "^CT[\\w.]+?__"
+  rtdetr_2d_score_thr: 0.0
+  rtdetr_2d_per_class_score_thr: {}
+  rtdetr_2d_cache_size: 4
+  rtdetr_2d_mark_real: true
+  resize_to_canonical_2d: false
+  canonical_2d_height: 1080
+  canonical_2d_width: 1920
+  sync_route: false
+  real_scene_keywords: []
+  real_block_prob: -1.0
+  scene_switch_iters: 0
   num_frames: 200
   batch_size: 4
   num_bev_groups: 1
@@ -239,6 +314,7 @@ visualize:
 inference:
   checkpoint: ???
   output_nvschema: true
+  nvschema_fps: 0.0
   jsonfile_prefix: "sparse4d_pred"
 
 export:

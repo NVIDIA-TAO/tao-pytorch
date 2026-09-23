@@ -12,7 +12,7 @@ from nvidia_tao_pytorch.config.utils.types import (
     BOOL_FIELD,
     FLOAT_FIELD,
     LIST_FIELD,
-    DATACLASS_FIELD
+    DATACLASS_FIELD,
 )
 
 
@@ -24,7 +24,7 @@ class Sparse4DBackboneConfig:
         value="resnet_101",
         default_value="resnet_101",
         description="Backbone type",
-        display_name="Backbone type"
+        display_name="Backbone type",
     )
 
 
@@ -37,14 +37,15 @@ class Sparse4DNeckConfig:
         default_value="FPN",
         description="Neck type",
         valid_options="FPN",
-        display_name="Neck type"
+        display_name="Neck type",
     )
     num_outs: int = INT_FIELD(
         value=4,
         default_value=4,
         valid_min=1,
         valid_max="inf",
-        display_name="Number of output levels"
+        description="Number of output levels",
+        display_name="Number of output levels",
     )
     start_level: int = INT_FIELD(
         value=0,
@@ -52,7 +53,7 @@ class Sparse4DNeckConfig:
         valid_min=0,
         valid_max="inf",
         description="Start level for FPN",
-        display_name="Start level for FPN"
+        display_name="Start level for FPN",
     )
     out_channels: int = INT_FIELD(
         value=256,
@@ -60,26 +61,26 @@ class Sparse4DNeckConfig:
         valid_min=1,
         valid_max="inf",
         description="Output channels",
-        display_name="Output channels"
+        display_name="Output channels",
     )
     in_channels: List[int] = LIST_FIELD(
         arrList=[256, 512, 1024, 2048],
         default_value=[256, 512, 1024, 2048],
         description="Input channels",
-        display_name="Input channels"
+        display_name="Input channels",
     )
     add_extra_convs: str = STR_FIELD(
         value="on_output",
         default_value="on_output",
         description="Type of extra conv",
         valid_options="on_input,on_lateral,on_output,False",
-        display_name="Type of extra conv"
+        display_name="Type of extra conv",
     )
     relu_before_extra_convs: bool = BOOL_FIELD(
         value=True,
         default_value=True,
         description="Apply ReLU before extra convs",
-        display_name="Apply ReLU before extra convs"
+        display_name="Apply ReLU before extra convs",
     )
 
 
@@ -91,7 +92,7 @@ class Sparse4DDepthBranchConfig:
         value="dense_depth",
         default_value="dense_depth",
         description="Depth branch type",
-        display_name="Depth branch type"
+        display_name="Depth branch type",
     )
     embed_dims: int = INT_FIELD(
         value=256,
@@ -99,7 +100,7 @@ class Sparse4DDepthBranchConfig:
         valid_min=1,
         valid_max="inf",
         description="Embedding dimensions",
-        display_name="Embedding dimensions"
+        display_name="Embedding dimensions",
     )
     num_depth_layers: int = INT_FIELD(
         value=3,
@@ -107,7 +108,7 @@ class Sparse4DDepthBranchConfig:
         valid_min=1,
         valid_max="inf",
         description="Number of depth layers",
-        display_name="Number of depth layers"
+        display_name="Number of depth layers",
     )
     loss_weight: float = FLOAT_FIELD(
         value=0.2,
@@ -115,7 +116,321 @@ class Sparse4DDepthBranchConfig:
         valid_min=0,
         valid_max="inf",
         description="Weight for depth loss",
-        display_name="Weight for depth loss"
+        display_name="Weight for depth loss",
+    )
+
+
+@dataclass
+class Sparse4DLooseToTightConfig:
+    """Configuration for loose-to-tight geometric 2D distillation."""
+
+    enable: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        description="Enable loose-to-tight 2D distillation",
+        display_name="Enable loose-to-tight distillation",
+    )
+    mlp_ckpt: str = STR_FIELD(
+        value="",
+        default_value="",
+        description="Path to the trained frozen loose-to-tight MLP checkpoint",
+        display_name="Loose-to-tight MLP checkpoint",
+    )
+    loss_weight: float = FLOAT_FIELD(
+        value=0.1,
+        default_value=0.1,
+        valid_min=0,
+        valid_max="inf",
+        description="Weight for supervised loose-to-tight 2D box loss",
+        display_name="Loose-to-tight loss weight",
+    )
+    num_classes: int = INT_FIELD(
+        value=0,
+        default_value=0,
+        valid_min=0,
+        valid_max="inf",
+        description=(
+            "Number of classes used by the loose-to-tight MLP; zero derives "
+            "the taxonomy from dataset.classes"
+        ),
+        display_name="Loose-to-tight classes",
+    )
+    tight_l1_weight: float = FLOAT_FIELD(
+        value=1.0,
+        default_value=1.0,
+        valid_min=0,
+        valid_max="inf",
+        description="Weight for the tight-box L1 term",
+        display_name="Tight L1 weight",
+    )
+    containment_weight: float = FLOAT_FIELD(
+        value=1.0,
+        default_value=1.0,
+        valid_min=0,
+        valid_max="inf",
+        description="Weight for the visible-box containment term",
+        display_name="Containment weight",
+    )
+    box2d_key: str = STR_FIELD(
+        value="gt_boxes_2d_visible",
+        default_value="gt_boxes_2d_visible",
+        description="Batch key for visible 2D ground-truth boxes",
+        display_name="Visible 2D box key",
+    )
+    occ_key: str = STR_FIELD(
+        value="gt_occ_weight",
+        default_value="gt_occ_weight",
+        description="Batch key for 2D occlusion weights",
+        display_name="Occlusion weight key",
+    )
+    instance_id_key: str = STR_FIELD(
+        value="instance_id",
+        default_value="instance_id",
+        description="Batch key for instance identifiers",
+        display_name="Instance ID key",
+    )
+    ego2cam_key: str = STR_FIELD(
+        value="cam2world_transform",
+        default_value="cam2world_transform",
+        description="Batch key for ego-to-camera transforms",
+        display_name="Ego-to-camera key",
+    )
+    min_gt_area: float = FLOAT_FIELD(
+        value=1.0,
+        default_value=1.0,
+        valid_min=0,
+        valid_max="inf",
+        description="Minimum visible 2D ground-truth area in pixels",
+        display_name="Minimum 2D GT area",
+    )
+    eps: float = FLOAT_FIELD(
+        value=0.1,
+        default_value=0.1,
+        valid_min=0,
+        valid_max="inf",
+        description="Minimum projection depth used for numerical stability",
+        display_name="Projection epsilon",
+    )
+    pseudo_enable: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        description="Enable 2D pseudo-label loss for batches without 3D ground truth",
+        display_name="Enable 2D pseudo labels",
+    )
+    det_box_key: str = STR_FIELD(
+        value="det_boxes_2d",
+        default_value="det_boxes_2d",
+        description="Batch key for per-camera 2D detection boxes",
+        display_name="2D detection box key",
+    )
+    det_cls_key: str = STR_FIELD(
+        value="det_classes_2d",
+        default_value="det_classes_2d",
+        description="Batch key for per-camera 2D detection classes",
+        display_name="2D detection class key",
+    )
+    det_score_key: str = STR_FIELD(
+        value="det_scores_2d",
+        default_value="det_scores_2d",
+        description="Batch key for per-camera 2D detection scores",
+        display_name="2D detection score key",
+    )
+    has_3d_gt_key: str = STR_FIELD(
+        value="has_3d_gt",
+        default_value="has_3d_gt",
+        description="Batch key indicating whether a sample has 3D ground truth",
+        display_name="Has 3D ground truth key",
+    )
+    giou_thr: float = FLOAT_FIELD(
+        value=0.3,
+        default_value=0.3,
+        valid_min=-1,
+        valid_max=1,
+        description="Minimum generalized IoU for pseudo-label matching",
+        display_name="Pseudo-match GIoU threshold",
+    )
+    cost_giou: float = FLOAT_FIELD(
+        value=2.0,
+        default_value=2.0,
+        valid_min=0,
+        valid_max="inf",
+        description="GIoU component weight in pseudo-label matching cost",
+        display_name="Pseudo-match GIoU cost",
+    )
+    cost_l1: float = FLOAT_FIELD(
+        value=1.0,
+        default_value=1.0,
+        valid_min=0,
+        valid_max="inf",
+        description="L1 component weight in pseudo-label matching cost",
+        display_name="Pseudo-match L1 cost",
+    )
+    cost_cls: float = FLOAT_FIELD(
+        value=1.0,
+        default_value=1.0,
+        valid_min=0,
+        valid_max="inf",
+        description="Classification component weight in pseudo-label matching cost",
+        display_name="Pseudo-match class cost",
+    )
+    det_score_thr: float = FLOAT_FIELD(
+        value=0.0,
+        default_value=0.0,
+        valid_min=0,
+        valid_max=1,
+        description="Minimum 2D detection confidence used for matching",
+        display_name="2D detection score threshold",
+    )
+    min_cams: int = INT_FIELD(
+        value=1,
+        default_value=1,
+        valid_min=1,
+        valid_max="inf",
+        description="Minimum number of cameras supporting a pseudo match",
+        display_name="Minimum matching cameras",
+    )
+    dedup_dist: float = FLOAT_FIELD(
+        value=0.0,
+        default_value=0.0,
+        valid_min=0,
+        valid_max="inf",
+        description="BEV distance used to deduplicate pseudo matches; zero disables it",
+        display_name="Pseudo-match deduplication distance",
+    )
+    class_gate: bool = BOOL_FIELD(
+        value=True,
+        default_value=True,
+        description="Require class agreement during pseudo-label matching",
+        display_name="Pseudo-match class gate",
+    )
+    pseudo_box_weight: float = FLOAT_FIELD(
+        value=0.1,
+        default_value=0.1,
+        valid_min=0,
+        valid_max="inf",
+        description="Weight for pseudo-label 2D box loss",
+        display_name="Pseudo 2D box loss weight",
+    )
+    pseudo_cls_weight: float = FLOAT_FIELD(
+        value=1.0,
+        default_value=1.0,
+        valid_min=0,
+        valid_max="inf",
+        description="Weight for pseudo-label classification loss",
+        display_name="Pseudo classification loss weight",
+    )
+    sv_depth_weight: float = FLOAT_FIELD(
+        value=0.0,
+        default_value=0.0,
+        valid_min=0,
+        valid_max=1,
+        description="Gradient scale for SV2D metric depth",
+        display_name="SV2D depth gradient weight",
+    )
+    sv_size_weight: float = FLOAT_FIELD(
+        value=0.25,
+        default_value=0.25,
+        valid_min=0,
+        valid_max=1,
+        description="Gradient scale for SV2D 3D box extent",
+        display_name="SV2D size gradient weight",
+    )
+    sv_yaw_weight: float = FLOAT_FIELD(
+        value=0.0,
+        default_value=0.0,
+        valid_min=0,
+        valid_max=1,
+        description="Gradient scale for SV2D yaw",
+        display_name="SV2D yaw gradient weight",
+    )
+
+
+@dataclass
+class Sparse4DSVAuxHeadConfig:
+    """Configuration for the calibration-free single-view auxiliary head."""
+
+    enable: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        description="Enable the SV2D image-plane auxiliary classifier",
+        display_name="Enable SV auxiliary head",
+    )
+    in_channels: int = INT_FIELD(
+        value=256,
+        default_value=256,
+        valid_min=1,
+        valid_max="inf",
+        description="Number of channels in each FPN input feature",
+        display_name="SV auxiliary input channels",
+    )
+    num_classes: int = INT_FIELD(
+        value=0,
+        default_value=0,
+        valid_min=0,
+        valid_max="inf",
+        description=(
+            "Number of classes predicted by the SV auxiliary head; zero "
+            "derives the taxonomy from dataset.classes"
+        ),
+        display_name="SV auxiliary classes",
+    )
+    roi_size: int = INT_FIELD(
+        value=7,
+        default_value=7,
+        valid_min=1,
+        valid_max="inf",
+        description="RoIAlign output size",
+        display_name="SV auxiliary ROI size",
+    )
+    hidden_dim: int = INT_FIELD(
+        value=256,
+        default_value=256,
+        valid_min=1,
+        valid_max="inf",
+        description="Hidden dimension of the SV auxiliary classifier",
+        display_name="SV auxiliary hidden dimension",
+    )
+    fpn_strides: List[int] = LIST_FIELD(
+        arrList=[4, 8, 16, 32],
+        default_value=[4, 8, 16, 32],
+        description="Pixel stride for each FPN level",
+        display_name="SV auxiliary FPN strides",
+    )
+    use_level: int = INT_FIELD(
+        value=1,
+        default_value=1,
+        valid_min=0,
+        valid_max="inf",
+        description="FPN level used for RoIAlign",
+        display_name="SV auxiliary FPN level",
+    )
+    loss_weight: float = FLOAT_FIELD(
+        value=1.0,
+        default_value=1.0,
+        valid_min=0,
+        valid_max="inf",
+        description="Weight for the SV auxiliary classification loss",
+        display_name="SV auxiliary loss weight",
+    )
+    det_box_key: str = STR_FIELD(
+        value="det_boxes_2d",
+        default_value="det_boxes_2d",
+        description="Batch key for SV2D boxes",
+        display_name="SV auxiliary box key",
+    )
+    det_cls_key: str = STR_FIELD(
+        value="det_classes_2d",
+        default_value="det_classes_2d",
+        description="Batch key for SV2D class labels",
+        display_name="SV auxiliary class key",
+    )
+    min_box_size: float = FLOAT_FIELD(
+        value=2.0,
+        default_value=2.0,
+        valid_min=0,
+        valid_max="inf",
+        description="Minimum SV2D box width and height in input pixels",
+        display_name="SV auxiliary minimum box size",
     )
 
 
@@ -129,13 +444,13 @@ class Sparse4DInstanceBankConfig:
         valid_min=1,
         valid_max="inf",
         description="Number of anchors",
-        display_name="Number of anchors"
+        display_name="Number of anchors",
     )
     anchor: str = STR_FIELD(
         value="",
         default_value="",
         description="Path to anchor file",
-        display_name="Path to anchor file"
+        display_name="Path to anchor file",
     )
     num_temp_instances: int = INT_FIELD(
         value=600,
@@ -143,7 +458,7 @@ class Sparse4DInstanceBankConfig:
         valid_min=0,
         valid_max="inf",
         description="Number of temporal instances",
-        display_name="Number of temporal instances"
+        display_name="Number of temporal instances",
     )
     confidence_decay: float = FLOAT_FIELD(
         value=0.8,
@@ -151,13 +466,13 @@ class Sparse4DInstanceBankConfig:
         valid_min=0,
         valid_max=1,
         description="Confidence decay factor",
-        display_name="Confidence decay factor"
+        display_name="Confidence decay factor",
     )
     feat_grad: bool = BOOL_FIELD(
         value=False,
         default_value=False,
         description="Enable gradients for features",
-        display_name="Enable gradients for features"
+        display_name="Enable gradients for features",
     )
     default_time_interval: float = FLOAT_FIELD(
         value=0.033333,
@@ -165,7 +480,7 @@ class Sparse4DInstanceBankConfig:
         valid_min=0,
         valid_max="inf",
         description="Default time interval",
-        display_name="Default time interval"
+        display_name="Default time interval",
     )
     embed_dims: int = INT_FIELD(
         value=256,
@@ -173,19 +488,25 @@ class Sparse4DInstanceBankConfig:
         valid_min=1,
         valid_max="inf",
         description="Embedding dimensions",
-        display_name="Embedding dimensions"
+        display_name="Embedding dimensions",
     )
     use_temporal_align: bool = BOOL_FIELD(
         value=False,
         default_value=False,
         description="Use temporal alignment",
-        display_name="Use temporal alignment"
+        display_name="Use temporal alignment",
+    )
+    reset_on_time_gap: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        description="Reset recurrent state when timestamps cross a clip boundary",
+        display_name="Reset on time gap",
     )
     grid_size: Optional[float] = FLOAT_FIELD(
         value=None,
         default_value=None,
         description="Grid size",
-        display_name="Grid size"
+        display_name="Grid size",
     )
 
 
@@ -197,7 +518,7 @@ class Sparse4DAnchorEncoderConfig:
         value="SparseBox3DEncoder",
         default_value="SparseBox3DEncoder",
         description="Anchor encoder type",
-        display_name="Anchor encoder type"
+        display_name="Anchor encoder type",
     )
     vel_dims: int = INT_FIELD(
         value=3,
@@ -205,26 +526,26 @@ class Sparse4DAnchorEncoderConfig:
         valid_min=1,
         valid_max="inf",
         description="Velocity dimensions",
-        display_name="Velocity dimensions"
+        display_name="Velocity dimensions",
     )
     embed_dims: List[int] = LIST_FIELD(
         arrList=[128, 32, 32, 64],
         default_value=[128, 32, 32, 64],
         description="Embedding dimensions",
-        display_name="Embedding dimensions"
+        display_name="Embedding dimensions",
     )
     mode: str = STR_FIELD(
         value="cat",
         default_value="cat",
         description="Mode",
         valid_options="cat,add",
-        display_name="Mode"
+        display_name="Mode",
     )
     output_fc: bool = BOOL_FIELD(
         value=False,
         default_value=False,
         description="Output FC",
-        display_name="Output FC"
+        display_name="Output FC",
     )
     in_loops: int = INT_FIELD(
         value=1,
@@ -232,7 +553,7 @@ class Sparse4DAnchorEncoderConfig:
         valid_min=1,
         valid_max="inf",
         description="In loops",
-        display_name="In loops"
+        display_name="In loops",
     )
     out_loops: int = INT_FIELD(
         value=4,
@@ -240,13 +561,13 @@ class Sparse4DAnchorEncoderConfig:
         valid_min=1,
         valid_max="inf",
         description="Out loops",
-        display_name="Out loops"
+        display_name="Out loops",
     )
     pos_embed_only: bool = BOOL_FIELD(
         value=False,
         default_value=False,
         description="Pos embed only",
-        display_name="Pos embed only"
+        display_name="Pos embed only",
     )
 
 
@@ -260,7 +581,7 @@ class Sparse4DKpsGeneratorConfig:
         valid_min=1,
         valid_max="inf",
         description="Embedding dimensions",
-        display_name="Embedding dimensions"
+        display_name="Embedding dimensions",
     )
     num_learnable_pts: int = INT_FIELD(
         value=6,
@@ -268,7 +589,7 @@ class Sparse4DKpsGeneratorConfig:
         valid_min=1,
         valid_max="inf",
         description="Number of learnable points",
-        display_name="Number of learnable points"
+        display_name="Number of learnable points",
     )
     fix_scale: List[List[Any]] = LIST_FIELD(
         arrList=[
@@ -278,7 +599,7 @@ class Sparse4DKpsGeneratorConfig:
             [0, 0.45, 0],
             [0, -0.45, 0],
             [0, 0, 0.45],
-            [0, 0, -0.45]
+            [0, 0, -0.45],
         ],
         default_value=[
             [0, 0, 0],
@@ -287,10 +608,10 @@ class Sparse4DKpsGeneratorConfig:
             [0, 0.45, 0],
             [0, -0.45, 0],
             [0, 0, 0.45],
-            [0, 0, -0.45]
+            [0, 0, -0.45],
         ],
         description="Fixed scale",
-        display_name="Fixed scale"
+        display_name="Fixed scale",
     )
 
 
@@ -302,13 +623,13 @@ class Sparse4DLossClsConfig:
         value="focal",
         default_value="focal",
         description="Classification loss type",
-        display_name="Classification loss type"
+        display_name="Classification loss type",
     )
     use_sigmoid: bool = BOOL_FIELD(
         value=True,
         default_value=True,
         description="Use sigmoid",
-        display_name="Use sigmoid"
+        display_name="Use sigmoid",
     )
     gamma: float = FLOAT_FIELD(
         value=2.0,
@@ -316,7 +637,7 @@ class Sparse4DLossClsConfig:
         valid_min=0,
         valid_max="inf",
         description="Focal loss gamma",
-        display_name="Focal loss gamma"
+        display_name="Focal loss gamma",
     )
     alpha: float = FLOAT_FIELD(
         value=0.25,
@@ -324,7 +645,7 @@ class Sparse4DLossClsConfig:
         valid_min=0,
         valid_max=1,
         description="Focal loss alpha",
-        display_name="Focal loss alpha"
+        display_name="Focal loss alpha",
     )
     loss_weight: float = FLOAT_FIELD(
         value=2.0,
@@ -332,7 +653,7 @@ class Sparse4DLossClsConfig:
         valid_min=0,
         valid_max="inf",
         description="Loss weight",
-        display_name="Loss weight"
+        display_name="Loss weight",
     )
 
 
@@ -344,7 +665,7 @@ class Sparse4DLossRegConfig:
         value="sparse_box_3d",
         default_value="sparse_box_3d",
         description="Regression loss type",
-        display_name="Regression loss type"
+        display_name="Regression loss type",
     )
     box_weight: float = FLOAT_FIELD(
         value=0.25,
@@ -352,13 +673,13 @@ class Sparse4DLossRegConfig:
         valid_min=0,
         valid_max="inf",
         description="Box loss weight",
-        display_name="Box loss weight"
+        display_name="Box loss weight",
     )
     cls_allow_reverse: list = LIST_FIELD(
         arrList=[],
         default_value=[],
         description="Class allow reverse",
-        display_name="Class allow reverse"
+        display_name="Class allow reverse",
     )
 
 
@@ -370,7 +691,7 @@ class Sparse4DLossIDConfig:
         value="cross_entropy_label_smooth",
         default_value="cross_entropy_label_smooth",
         description="ID loss type",
-        display_name="ID loss type"
+        display_name="ID loss type",
     )
     num_ids: int = INT_FIELD(
         value=70,
@@ -378,7 +699,7 @@ class Sparse4DLossIDConfig:
         valid_min=1,
         valid_max="inf",
         description="Number of IDs",
-        display_name="Number of IDs"
+        display_name="Number of IDs",
     )
 
 
@@ -389,17 +710,17 @@ class Sparse4DLossConfig:
     cls: Sparse4DLossClsConfig = DATACLASS_FIELD(
         Sparse4DLossClsConfig(),
         description="Classification loss config",
-        display_name="Classification loss config"
+        display_name="Classification loss config",
     )
     reg: Sparse4DLossRegConfig = DATACLASS_FIELD(
         Sparse4DLossRegConfig(),
         description="Regression loss config",
-        display_name="Regression loss config"
+        display_name="Regression loss config",
     )
     id: Sparse4DLossIDConfig = DATACLASS_FIELD(
         Sparse4DLossIDConfig(),
         description="ID loss config",
-        display_name="ID loss config"
+        display_name="ID loss config",
     )
 
 
@@ -411,7 +732,7 @@ class Sparse4DDecoderConfig:
         value="SparseBox3DDecoder",
         default_value="SparseBox3DDecoder",
         description="Decoder type",
-        display_name="Decoder type"
+        display_name="Decoder type",
     )
     score_threshold: float = FLOAT_FIELD(
         value=0.05,
@@ -419,7 +740,7 @@ class Sparse4DDecoderConfig:
         valid_min=0,
         valid_max=1,
         description="Score threshold",
-        display_name="Score threshold"
+        display_name="Score threshold",
     )
 
 
@@ -431,7 +752,7 @@ class Sparse4DBNNeckConfig:
         value="bnneck",
         default_value="bnneck",
         description="BNNeck type",
-        display_name="BNNeck type"
+        display_name="BNNeck type",
     )
     feat_dim: int = INT_FIELD(
         value=256,
@@ -439,7 +760,7 @@ class Sparse4DBNNeckConfig:
         valid_min=1,
         valid_max="inf",
         description="Feature dimension",
-        display_name="Feature dimension"
+        display_name="Feature dimension",
     )
     num_ids: int = INT_FIELD(
         value=70,
@@ -447,7 +768,7 @@ class Sparse4DBNNeckConfig:
         valid_min=1,
         valid_max="inf",
         description="Number of IDs",
-        display_name="Number of IDs"
+        display_name="Number of IDs",
     )
 
 
@@ -459,7 +780,7 @@ class Sparse4DVisibilityNetConfig:
         value="visibility_net",
         default_value="visibility_net",
         description="VisibilityNet type",
-        display_name="VisibilityNet type"
+        display_name="VisibilityNet type",
     )
     embedding_dim: int = INT_FIELD(
         value=256,
@@ -467,7 +788,7 @@ class Sparse4DVisibilityNetConfig:
         valid_min=1,
         valid_max="inf",
         description="Embedding dimension",
-        display_name="Embedding dimension"
+        display_name="Embedding dimension",
     )
     hidden_channels: int = INT_FIELD(
         value=32,
@@ -475,7 +796,7 @@ class Sparse4DVisibilityNetConfig:
         valid_min=1,
         valid_max="inf",
         description="Hidden channels",
-        display_name="Hidden channels"
+        display_name="Hidden channels",
     )
 
 
@@ -489,7 +810,7 @@ class Sparse4DSamplerConfig:
         valid_min=1,
         valid_max="inf",
         description="Number of DN groups",
-        display_name="Number of DN groups"
+        display_name="Number of DN groups",
     )
     num_temp_dn_groups: int = INT_FIELD(
         value=3,
@@ -497,13 +818,13 @@ class Sparse4DSamplerConfig:
         valid_min=0,
         valid_max="inf",
         description="Number of temporal DN groups",
-        display_name="Number of temporal DN groups"
+        display_name="Number of temporal DN groups",
     )
     dn_noise_scale: List[float] = LIST_FIELD(
         arrList=[2.0, 2.0, 2.0, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5],
         default_value=[2.0, 2.0, 2.0, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5],
         description="DN noise scale",
-        display_name="DN noise scale"
+        display_name="DN noise scale",
     )
     max_dn_gt: int = INT_FIELD(
         value=128,
@@ -511,13 +832,13 @@ class Sparse4DSamplerConfig:
         valid_min=1,
         valid_max="inf",
         description="Maximum DN ground truth",
-        display_name="Maximum DN ground truth"
+        display_name="Maximum DN ground truth",
     )
     add_neg_dn: bool = BOOL_FIELD(
         value=True,
         default_value=True,
         description="Add negative DN",
-        display_name="Add negative DN"
+        display_name="Add negative DN",
     )
     cls_weight: float = FLOAT_FIELD(
         value=2.0,
@@ -525,7 +846,7 @@ class Sparse4DSamplerConfig:
         valid_min=0,
         valid_max="inf",
         description="Classification weight",
-        display_name="Classification weight"
+        display_name="Classification weight",
     )
     box_weight: float = FLOAT_FIELD(
         value=0.25,
@@ -533,19 +854,19 @@ class Sparse4DSamplerConfig:
         valid_min=0,
         valid_max="inf",
         description="Box weight",
-        display_name="Box weight"
+        display_name="Box weight",
     )
     reg_weights: List[float] = LIST_FIELD(
         arrList=[2.0, 2.0, 2.0, 0.5, 0.5, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0],
         default_value=[2.0, 2.0, 2.0, 0.5, 0.5, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0],
         description="Regression weights",
-        display_name="Regression weights"
+        display_name="Regression weights",
     )
     use_temporal_align: bool = BOOL_FIELD(
         value=False,
         default_value=False,
         description="Use temporal alignment",
-        display_name="Use temporal alignment"
+        display_name="Use temporal alignment",
     )
     gt_assign_threshold: float = FLOAT_FIELD(
         value=0.5,
@@ -553,7 +874,7 @@ class Sparse4DSamplerConfig:
         valid_min=0,
         valid_max=1,
         description="GT assign threshold",
-        display_name="GT assign threshold"
+        display_name="GT assign threshold",
     )
 
 
@@ -566,14 +887,16 @@ class Sparse4DDeformableModelConfig:
         default_value=256,
         valid_min=1,
         valid_max="inf",
-        description="Embedding dimensions"
+        display_name="Embedding dimensions",
+        description="Embedding dimensions",
     )
     num_groups: int = INT_FIELD(
         value=8,
         default_value=8,
         valid_min=1,
         valid_max="inf",
-        description="Number of groups"
+        display_name="Number of groups",
+        description="Number of groups",
     )
     num_levels: int = INT_FIELD(
         value=4,
@@ -581,7 +904,7 @@ class Sparse4DDeformableModelConfig:
         valid_min=1,
         valid_max="inf",
         description="Number of levels",
-        display_name="Number of levels"
+        display_name="Number of levels",
     )
     attn_drop: float = FLOAT_FIELD(
         value=0.15,
@@ -589,26 +912,26 @@ class Sparse4DDeformableModelConfig:
         valid_min=0,
         valid_max=1,
         description="Attention dropout",
-        display_name="Attention dropout"
+        display_name="Attention dropout",
     )
     use_deformable_func: bool = BOOL_FIELD(
         value=True,
         default_value=True,
         description="Use deformable function",
-        display_name="Use deformable function"
+        display_name="Use deformable function",
     )
     use_camera_embed: bool = BOOL_FIELD(
         value=False,
         default_value=False,
         description="Use camera embedding",
-        display_name="Use camera embedding"
+        display_name="Use camera embedding",
     )
     residual_mode: str = STR_FIELD(
         value="cat",
         default_value="cat",
         description="Residual mode",
         valid_options="cat,add",
-        display_name="Residual mode"
+        display_name="Residual mode",
     )
     num_cams: int = INT_FIELD(
         value=6,
@@ -616,7 +939,7 @@ class Sparse4DDeformableModelConfig:
         valid_min=1,
         valid_max="inf",
         description="Number of cameras",
-        display_name="Number of cameras"
+        display_name="Number of cameras",
     )
     max_num_cams: int = INT_FIELD(
         value=20,
@@ -624,7 +947,7 @@ class Sparse4DDeformableModelConfig:
         valid_min=1,
         valid_max="inf",
         description="Maximum number of cameras",
-        display_name="Maximum number of cameras"
+        display_name="Maximum number of cameras",
     )
     proj_drop: float = FLOAT_FIELD(
         value=0.0,
@@ -632,12 +955,12 @@ class Sparse4DDeformableModelConfig:
         valid_min=0,
         valid_max=1,
         description="Projection dropout",
-        display_name="Projection dropout"
+        display_name="Projection dropout",
     )
     kps_generator: Sparse4DKpsGeneratorConfig = DATACLASS_FIELD(
         Sparse4DKpsGeneratorConfig(),
         description="KPS generator config",
-        display_name="KPS generator config"
+        display_name="KPS generator config",
     )
 
 
@@ -649,7 +972,7 @@ class Sparse4DRefineLayerConfig:
         value="sparse_box_3d_refinement_module",
         default_value="sparse_box_3d_refinement_module",
         description="Refine layer type",
-        display_name="Refine layer type"
+        display_name="Refine layer type",
     )
     embed_dims: int = INT_FIELD(
         value=256,
@@ -657,19 +980,19 @@ class Sparse4DRefineLayerConfig:
         valid_min=1,
         valid_max="inf",
         description="Embedding dimensions",
-        display_name="Embedding dimensions"
+        display_name="Embedding dimensions",
     )
     refine_yaw: bool = BOOL_FIELD(
         value=True,
         default_value=True,
         description="Refine yaw",
-        display_name="Refine yaw"
+        display_name="Refine yaw",
     )
     with_quality_estimation: bool = BOOL_FIELD(
         value=True,
         default_value=True,
         description="With quality estimation",
-        display_name="With quality estimation"
+        display_name="With quality estimation",
     )
 
 
@@ -681,7 +1004,7 @@ class Sparse4DGraphModelConfig:
         value="MultiheadAttention",
         default_value="MultiheadAttention",
         description="Graph model type",
-        display_name="Graph model type"
+        display_name="Graph model type",
     )
     embed_dims: int = INT_FIELD(
         value=512,
@@ -689,7 +1012,7 @@ class Sparse4DGraphModelConfig:
         valid_min=1,
         valid_max="inf",
         description="Embedding dimensions",
-        display_name="Embedding dimensions"
+        display_name="Embedding dimensions",
     )
     num_heads: int = INT_FIELD(
         value=8,
@@ -697,13 +1020,13 @@ class Sparse4DGraphModelConfig:
         valid_min=1,
         valid_max="inf",
         description="Number of heads",
-        display_name="Number of heads"
+        display_name="Number of heads",
     )
     batch_first: bool = BOOL_FIELD(
         value=True,
         default_value=True,
         description="Batch first",
-        display_name="Batch first"
+        display_name="Batch first",
     )
     dropout: float = FLOAT_FIELD(
         value=0.1,
@@ -711,7 +1034,7 @@ class Sparse4DGraphModelConfig:
         valid_min=0,
         valid_max=1,
         description="Dropout rate",
-        display_name="Dropout rate"
+        display_name="Dropout rate",
     )
 
 
@@ -723,7 +1046,7 @@ class Sparse4DNormLayerConfig:
         value="LN",
         default_value="LN",
         description="Norm layer type",
-        display_name="Norm layer type"
+        display_name="Norm layer type",
     )
     normalized_shape: int = INT_FIELD(
         value=256,
@@ -731,7 +1054,7 @@ class Sparse4DNormLayerConfig:
         valid_min=1,
         valid_max="inf",
         description="Normalized shape",
-        display_name="Normalized shape"
+        display_name="Normalized shape",
     )
 
 
@@ -743,13 +1066,10 @@ class Sparse4DActConfig:
         value="ReLU",
         default_value="ReLU",
         description="Activation type",
-        display_name="Activation type"
+        display_name="Activation type",
     )
     inplace: bool = BOOL_FIELD(
-        value=True,
-        default_value=True,
-        description="Inplace",
-        display_name="Inplace"
+        value=True, default_value=True, description="Inplace", display_name="Inplace"
     )
 
 
@@ -761,7 +1081,7 @@ class Sparse4DFFNConfig:
         value="AsymmetricFFN",
         default_value="AsymmetricFFN",
         description="FFN type",
-        display_name="FFN type"
+        display_name="FFN type",
     )
     in_channels: int = INT_FIELD(
         value=512,
@@ -769,12 +1089,12 @@ class Sparse4DFFNConfig:
         valid_min=1,
         valid_max="inf",
         description="In channels",
-        display_name="In channels"
+        display_name="In channels",
     )
     pre_norm: Sparse4DNormLayerConfig = DATACLASS_FIELD(
         Sparse4DNormLayerConfig(),
         description="Pre-norm config",
-        display_name="Pre-norm config"
+        display_name="Pre-norm config",
     )
     embed_dims: int = INT_FIELD(
         value=256,
@@ -782,7 +1102,7 @@ class Sparse4DFFNConfig:
         valid_min=1,
         valid_max="inf",
         description="Embedding dimensions",
-        display_name="Embedding dimensions"
+        display_name="Embedding dimensions",
     )
     feedforward_channels: int = INT_FIELD(
         value=1024,
@@ -790,7 +1110,7 @@ class Sparse4DFFNConfig:
         valid_min=1,
         valid_max="inf",
         description="Feedforward channels",
-        display_name="Feedforward channels"
+        display_name="Feedforward channels",
     )
     num_fcs: int = INT_FIELD(
         value=2,
@@ -798,7 +1118,7 @@ class Sparse4DFFNConfig:
         valid_min=1,
         valid_max="inf",
         description="Number of feedforward channels",
-        display_name="Number of feedforward channels"
+        display_name="Number of feedforward channels",
     )
     ffn_drop: float = FLOAT_FIELD(
         value=0.1,
@@ -806,12 +1126,12 @@ class Sparse4DFFNConfig:
         valid_min=0,
         valid_max=1,
         description="FFN dropout",
-        display_name="FFN dropout"
+        display_name="FFN dropout",
     )
     act_cfg: Sparse4DActConfig = DATACLASS_FIELD(
         Sparse4DActConfig(),
         description="Activation config",
-        display_name="Activation config"
+        display_name="Activation config",
     )
 
 
@@ -823,7 +1143,7 @@ class Sparse4DHeadConfig:
         value="sparse4d",
         default_value="sparse4d",
         description="Head type",
-        display_name="Head type"
+        display_name="Head type",
     )
     num_output: int = INT_FIELD(
         value=300,
@@ -831,7 +1151,7 @@ class Sparse4DHeadConfig:
         valid_min=1,
         valid_max="inf",
         description="Number of output instances",
-        display_name="Number of output instances"
+        display_name="Number of output instances",
     )
     cls_threshold_to_reg: float = FLOAT_FIELD(
         value=0.05,
@@ -839,25 +1159,25 @@ class Sparse4DHeadConfig:
         valid_min=0,
         valid_max=1,
         description="Classification threshold for regression",
-        display_name="Classification threshold for regression"
+        display_name="Classification threshold for regression",
     )
     decouple_attn: bool = BOOL_FIELD(
         value=True,
         default_value=True,
         description="Decouple attention",
-        display_name="Decouple attention"
+        display_name="Decouple attention",
     )
     return_feature: bool = BOOL_FIELD(
         value=True,
         default_value=True,
         description="Return instance features",
-        display_name="Return instance features"
+        display_name="Return instance features",
     )
     use_reid_sampling: bool = BOOL_FIELD(
         value=False,
         default_value=False,
         description="Use Re-ID sampling",
-        display_name="Use Re-ID sampling"
+        display_name="Use Re-ID sampling",
     )
     embed_dims: int = INT_FIELD(
         value=256,
@@ -865,7 +1185,7 @@ class Sparse4DHeadConfig:
         valid_min=1,
         valid_max="inf",
         description="Embedding dimensions",
-        display_name="Embedding dimensions"
+        display_name="Embedding dimensions",
     )
     reid_dims: int = INT_FIELD(
         value=0,
@@ -873,7 +1193,7 @@ class Sparse4DHeadConfig:
         valid_min=0,
         valid_max="inf",
         description="Re-ID dimensions",
-        display_name="Re-ID dimensions"
+        display_name="Re-ID dimensions",
     )
     num_groups: int = INT_FIELD(
         value=8,
@@ -881,7 +1201,7 @@ class Sparse4DHeadConfig:
         valid_min=1,
         valid_max="inf",
         description="Number of groups",
-        display_name="Number of groups"
+        display_name="Number of groups",
     )
     num_decoder: int = INT_FIELD(
         value=6,
@@ -889,7 +1209,7 @@ class Sparse4DHeadConfig:
         valid_min=1,
         valid_max="inf",
         description="Number of decoder layers",
-        display_name="Number of decoder layers"
+        display_name="Number of decoder layers",
     )
     num_single_frame_decoder: int = INT_FIELD(
         value=1,
@@ -897,7 +1217,7 @@ class Sparse4DHeadConfig:
         valid_min=1,
         valid_max="inf",
         description="Number of single-frame decoder layers",
-        display_name="Number of single-frame decoder layers"
+        display_name="Number of single-frame decoder layers",
     )
     drop_out: float = FLOAT_FIELD(
         value=0.1,
@@ -905,85 +1225,149 @@ class Sparse4DHeadConfig:
         valid_min=0,
         valid_max=1,
         description="Dropout rate",
-        display_name="Dropout rate"
+        display_name="Dropout rate",
     )
     temporal: bool = BOOL_FIELD(
         value=True,
         default_value=True,
         description="Enable temporal modeling",
-        display_name="Enable temporal modeling"
+        display_name="Enable temporal modeling",
     )
     with_quality_estimation: bool = BOOL_FIELD(
         value=True,
         default_value=True,
         description="Enable quality estimation",
-        display_name="Enable quality estimation"
+        display_name="Enable quality estimation",
     )
     operation_order: List[str] = LIST_FIELD(
         arrList=[
-            "deformable", "ffn", "norm", "refine", "temp_gnn", "gnn", "norm",
-            "deformable", "ffn", "norm", "refine", "temp_gnn", "gnn", "norm",
-            "deformable", "ffn", "norm", "refine", "temp_gnn", "gnn", "norm",
-            "deformable", "ffn", "norm", "refine", "temp_gnn", "gnn", "norm",
-            "deformable", "ffn", "norm", "refine", "temp_gnn", "gnn", "norm",
-            "deformable", "ffn", "norm", "refine"
+            "deformable",
+            "ffn",
+            "norm",
+            "refine",
+            "temp_gnn",
+            "gnn",
+            "norm",
+            "deformable",
+            "ffn",
+            "norm",
+            "refine",
+            "temp_gnn",
+            "gnn",
+            "norm",
+            "deformable",
+            "ffn",
+            "norm",
+            "refine",
+            "temp_gnn",
+            "gnn",
+            "norm",
+            "deformable",
+            "ffn",
+            "norm",
+            "refine",
+            "temp_gnn",
+            "gnn",
+            "norm",
+            "deformable",
+            "ffn",
+            "norm",
+            "refine",
+            "temp_gnn",
+            "gnn",
+            "norm",
+            "deformable",
+            "ffn",
+            "norm",
+            "refine",
         ],
         default_value=[
-            "deformable", "ffn", "norm", "refine", "temp_gnn", "gnn", "norm",
-            "deformable", "ffn", "norm", "refine", "temp_gnn", "gnn", "norm",
-            "deformable", "ffn", "norm", "refine", "temp_gnn", "gnn", "norm",
-            "deformable", "ffn", "norm", "refine", "temp_gnn", "gnn", "norm",
-            "deformable", "ffn", "norm", "refine", "temp_gnn", "gnn", "norm",
-            "deformable", "ffn", "norm", "refine"
+            "deformable",
+            "ffn",
+            "norm",
+            "refine",
+            "temp_gnn",
+            "gnn",
+            "norm",
+            "deformable",
+            "ffn",
+            "norm",
+            "refine",
+            "temp_gnn",
+            "gnn",
+            "norm",
+            "deformable",
+            "ffn",
+            "norm",
+            "refine",
+            "temp_gnn",
+            "gnn",
+            "norm",
+            "deformable",
+            "ffn",
+            "norm",
+            "refine",
+            "temp_gnn",
+            "gnn",
+            "norm",
+            "deformable",
+            "ffn",
+            "norm",
+            "refine",
+            "temp_gnn",
+            "gnn",
+            "norm",
+            "deformable",
+            "ffn",
+            "norm",
+            "refine",
         ],
         description="Operation order",
-        display_name="Operation order"
+        display_name="Operation order",
     )
     visibility_net: Sparse4DVisibilityNetConfig = DATACLASS_FIELD(
         Sparse4DVisibilityNetConfig(),
         description="Visibility net config",
-        display_name="Visibility net config"
+        display_name="Visibility net config",
     )
     instance_bank: Sparse4DInstanceBankConfig = DATACLASS_FIELD(
         Sparse4DInstanceBankConfig(),
         description="Instance bank config",
-        display_name="Instance bank config"
+        display_name="Instance bank config",
     )
     anchor_encoder: Sparse4DAnchorEncoderConfig = DATACLASS_FIELD(
         Sparse4DAnchorEncoderConfig(),
         description="Anchor encoder config",
-        display_name="Anchor encoder config"
+        display_name="Anchor encoder config",
     )
     sampler: Sparse4DSamplerConfig = DATACLASS_FIELD(
         Sparse4DSamplerConfig(),
         description="Sampler config",
-        display_name="Sampler config"
+        display_name="Sampler config",
     )
     reg_weights: List[float] = LIST_FIELD(
         arrList=[2.0, 2.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
         default_value=[2.0, 2.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
         description="Regression weights",
-        display_name="Regression weights"
+        display_name="Regression weights",
     )
     loss: Sparse4DLossConfig = DATACLASS_FIELD(
-        Sparse4DLossConfig(),
-        description="Loss config",
-        display_name="Loss config"
+        Sparse4DLossConfig(), description="Loss config", display_name="Loss config"
     )
     bnneck: Sparse4DBNNeckConfig = DATACLASS_FIELD(
         Sparse4DBNNeckConfig(),
         description="BN neck config",
-        display_name="BN neck config"
+        display_name="BN neck config",
     )
     deformable_model: Sparse4DDeformableModelConfig = DATACLASS_FIELD(
         Sparse4DDeformableModelConfig(),
         description="Deformable model config",
-        display_name="Deformable model config"
+        display_name="Deformable model config",
     )
     refine_layer: Sparse4DRefineLayerConfig = DATACLASS_FIELD(
         Sparse4DRefineLayerConfig(),
         description="Refine layer config",
-        display_name="Refine layer config"
+        display_name="Refine layer config",
     )
     valid_vel_weight: float = FLOAT_FIELD(
         value=-1,
@@ -991,32 +1375,35 @@ class Sparse4DHeadConfig:
         valid_min=-1,
         valid_max="inf",
         description="Valid velocity weight",
-        display_name="Valid velocity weight"
+        display_name="Valid velocity weight",
     )
     graph_model: Sparse4DGraphModelConfig = DATACLASS_FIELD(
         Sparse4DGraphModelConfig(),
         description="Graph model config",
-        display_name="Graph model config"
+        display_name="Graph model config",
     )
     temp_graph_model: Sparse4DGraphModelConfig = DATACLASS_FIELD(
         Sparse4DGraphModelConfig(),
         description="Temp graph model config",
-        display_name="Temp graph model config"
+        display_name="Temp graph model config",
     )
     decoder: Sparse4DDecoderConfig = DATACLASS_FIELD(
         Sparse4DDecoderConfig(),
         description="Decoder config",
-        display_name="Decoder config"
+        display_name="Decoder config",
     )
     norm_layer: Sparse4DNormLayerConfig = DATACLASS_FIELD(
         Sparse4DNormLayerConfig(),
         description="Norm layer config",
-        display_name="Norm layer config"
+        display_name="Norm layer config",
     )
     ffn: Sparse4DFFNConfig = DATACLASS_FIELD(
-        Sparse4DFFNConfig(),
-        description="FFN config",
-        display_name="FFN config"
+        Sparse4DFFNConfig(), description="FFN config", display_name="FFN config"
+    )
+    loose_to_tight: Sparse4DLooseToTightConfig = DATACLASS_FIELD(
+        Sparse4DLooseToTightConfig(),
+        description="Loose-to-tight geometric 2D distillation config",
+        display_name="Loose-to-tight config",
     )
 
 
@@ -1028,7 +1415,7 @@ class Sparse4DModelConfig:
         value="sparse4d",
         default_value="sparse4d",
         description="Model type",
-        display_name="Model type"
+        display_name="Model type",
     )
     embed_dims: int = INT_FIELD(
         value=256,
@@ -1036,49 +1423,62 @@ class Sparse4DModelConfig:
         valid_min=1,
         valid_max="inf",
         description="Embedding dimensions",
-        display_name="Embedding dimensions"
+        display_name="Embedding dimensions",
     )
     use_grid_mask: bool = BOOL_FIELD(
         value=True,
         default_value=True,
         description="Use grid mask",
-        display_name="Use grid mask"
+        display_name="Use grid mask",
     )
     use_deformable_func: bool = BOOL_FIELD(
         value=True,
         default_value=True,
         description="Use deformable function",
-        display_name="Use deformable function"
+        display_name="Use deformable function",
     )
     input_shape: List[int] = LIST_FIELD(
         arrList=[1408, 512],
         default_value=[1408, 512],
         description="Input image shape",
-        display_name="Input image shape"
+        display_name="Input image shape",
     )
     backbone: Sparse4DBackboneConfig = DATACLASS_FIELD(
         Sparse4DBackboneConfig(),
         description="Backbone config",
-        display_name="Backbone config"
+        display_name="Backbone config",
     )
     neck: Sparse4DNeckConfig = DATACLASS_FIELD(
-        Sparse4DNeckConfig(),
-        description="Neck config",
-        display_name="Neck config"
+        Sparse4DNeckConfig(), description="Neck config", display_name="Neck config"
     )
     depth_branch: Sparse4DDepthBranchConfig = DATACLASS_FIELD(
         Sparse4DDepthBranchConfig(),
         description="Depth branch config",
-        display_name="Depth branch config"
+        display_name="Depth branch config",
     )
     head: Sparse4DHeadConfig = DATACLASS_FIELD(
-        Sparse4DHeadConfig(),
-        description="Head config",
-        display_name="Head config"
+        Sparse4DHeadConfig(), description="Head config", display_name="Head config"
     )
     use_temporal_align: bool = BOOL_FIELD(
         value=False,
         default_value=False,
         description="Use temporal alignment",
-        display_name="Use temporal alignment"
+        display_name="Use temporal alignment",
+    )
+    cotrain_param_touch: bool = BOOL_FIELD(
+        value=False,
+        default_value=False,
+        description="Keep route-specific parameters in the distributed autograd graph",
+        display_name="Co-training parameter touch",
+    )
+    sv_scene_keywords: List[str] = LIST_FIELD(
+        arrList=["SV2D"],
+        default_value=["SV2D"],
+        description="Scene-name keywords identifying calibration-free SV2D batches",
+        display_name="SV2D scene keywords",
+    )
+    sv_aux_head: Sparse4DSVAuxHeadConfig = DATACLASS_FIELD(
+        Sparse4DSVAuxHeadConfig(),
+        description="Calibration-free single-view auxiliary head config",
+        display_name="SV auxiliary head config",
     )

@@ -3,6 +3,8 @@
 
 """Main PTL model for Sparse4D."""
 
+import itertools
+
 import torch
 import pytorch_lightning as pl
 
@@ -10,17 +12,24 @@ import nvidia_tao_pytorch.core.loggers.api_logging as status_logging
 from nvidia_tao_pytorch.core.lightning.tao_lightning_module import TAOLightningModule
 from nvidia_tao_pytorch.cv.sparse4d.model.sparse4d import build_model
 from nvidia_tao_pytorch.cv.sparse4d.model.criterion import SetCriterion
+from nvidia_tao_pytorch.cv.sparse4d.utils.stability import (
+    nvschema_fps_override,
+    scrub_nan_gradients,
+)
 
 
 class Sparse4DPlModel(TAOLightningModule):
     """PyTorch Lightning Module for Sparse4D 3D Object Detection and Tracking."""
 
-    def __init__(self, experiment_spec, export=False):
+    def __init__(self, experiment_spec, export=False, build_training_losses=False):
         """Initialize the Sparse4D PyTorch Lightning Module.
 
         Args:
             experiment_spec: The experiment specification.
             export: Whether to export the model.
+            build_training_losses: Build training-only dependencies and register
+                auxiliary parameters before checkpoint restoration/DDP setup.
+                Set this to True for Trainer.fit; evaluation/export need no MLP.
         """
         super().__init__(experiment_spec)
         self.model_config = self.experiment_spec.model
@@ -29,7 +38,42 @@ class Sparse4DPlModel(TAOLightningModule):
 
         # Build the model
         self._build_model(export)
-        self.criterion = SetCriterion(self.model_config, self.model.head.instance_bank)
+        ltt_config = self.model_config.head.get("loose_to_tight", {}) or {}
+        sv_aux_config = self.model_config.get("sv_aux_head", {}) or {}
+        ltt_pseudo_loss = all(
+            (
+                bool(ltt_config.get("enable", False)),
+                bool(ltt_config.get("pseudo_enable", False)),
+            )
+        )
+        route_specific_loss = bool(
+            ltt_pseudo_loss or sv_aux_config.get("enable", False)
+        )
+        # A configured sampler route is not proof of equal runtime branching.
+        sync_positive_counts = not route_specific_loss
+        self.criterion = SetCriterion(
+            self.model_config,
+            self.model.head.instance_bank,
+            class_names=list(self.dataset_config["classes"]),
+            sync_positive_counts=sync_positive_counts,
+            scrub_nan_gradients=bool(self.train_config.get("scrub_nan_gradients", False)),
+        ) if build_training_losses else None
+
+        self.cotrain_param_touch = bool(
+            self.model_config.get("cotrain_param_touch", False)
+        )
+        self.cotrain_loss_sync = bool(
+            self.cotrain_param_touch or
+            ltt_config.get("pseudo_enable", False) or
+            sv_aux_config.get("enable", False)
+        )
+        self.nan_gradient_scrubbing = bool(
+            self.train_config.get("scrub_nan_gradients", False)
+        )
+        loss_keys = list(self.criterion.loss_keys) if self.criterion is not None else []
+        if self.cotrain_param_touch:
+            loss_keys.append("loss_param_touch")
+        self.cotrain_loss_keys = tuple(sorted(loss_keys))
 
         # Set up monitoring and logging
         self.status_logging_dict = {}
@@ -38,7 +82,7 @@ class Sparse4DPlModel(TAOLightningModule):
         self.val_stats = {}
 
         # Set the checkpoint filename
-        self.checkpoint_filename = 'sparse4d_model'
+        self.checkpoint_filename = "sparse4d_model"
 
         # get num_iters_per_epoch from experiment_spec
         batch_size = self.dataset_config.batch_size
@@ -46,7 +90,9 @@ class Sparse4DPlModel(TAOLightningModule):
         num_bev_groups = self.dataset_config.num_bev_groups
         num_nodes = self.train_config.num_nodes
         self.num_epochs = self.train_config.num_epochs
-        self.num_iters_per_epoch = int(1000 * num_bev_groups // (num_nodes * num_gpus * batch_size))
+        self.num_iters_per_epoch = int(
+            1000 * num_bev_groups // (num_nodes * num_gpus * batch_size)
+        )
 
     def _build_model(self, export):
         """Internal function to build the model."""
@@ -63,38 +109,90 @@ class Sparse4DPlModel(TAOLightningModule):
             The loss dictionary.
         """
         # Forward pass
-        batch['img'] = batch['img'].float()
-        outputs = self.model(batch['img'], batch)
+        if self.criterion is None:
+            raise RuntimeError("Construct Sparse4DPlModel with build_training_losses=True for fit.")
+        batch["img"] = batch["img"].float()
+        outputs = self.model(batch["img"], batch)
 
         loss_dict = self.criterion(outputs, batch)
 
+        if self.cotrain_param_touch:
+            # Route-specific batches intentionally leave parts of the network
+            # inactive. A graph-connected zero keeps DDP's reducer contract
+            # stable, but it creates explicit zero gradients. Optimizers such as
+            # AdamW can therefore still apply weight decay and advance optimizer
+            # state for otherwise inactive parameters. Keep this opt-in disabled
+            # unless standard DDP reducer behavior is specifically required.
+            loss_dict["loss_param_touch"] = self._parameter_touch_zero(
+                self.parameters()
+            )
+
+        if self.cotrain_loss_sync:
+            zero_ref = next(iter(loss_dict.values())) * 0.0
+            loss_dict = self._sync_cotrain_loss_keys(loss_dict, zero_ref)
+
         # log the lr
-        pg0_lr = self.optimizers().optimizer.param_groups[0]['lr']
-        self.log('lr', pg0_lr, on_step=True, prog_bar=True)   # one call, one value
+        pg0_lr = self.optimizers().optimizer.param_groups[0]["lr"]
+        self.log("lr", pg0_lr, on_step=True, prog_bar=True)  # one call, one value
 
         # Log losses
         for loss_name, loss_value in loss_dict.items():
+            if loss_name == "loss_param_touch":
+                continue  # DDP graph connectivity, not a training KPI.
             # Ensure loss_value is a scalar before logging
             if isinstance(loss_value, torch.Tensor) and loss_value.numel() > 1:
                 loss_value = loss_value.mean()
-            self.log(f'{loss_name}', loss_value, on_step=True, prog_bar=True)
+            self.log(f"{loss_name}", loss_value, on_step=True, prog_bar=True)
 
         # Calculate total loss
-        total_loss = sum([v.mean() if isinstance(v, torch.Tensor) and v.numel() > 1 else v
-                          for k, v in loss_dict.items() if 'loss' in k])
-        self.log('loss', total_loss, on_step=True, prog_bar=True)
+        total_loss = sum(
+            [
+                v.mean() if isinstance(v, torch.Tensor) and v.numel() > 1 else v
+                for k, v in loss_dict.items()
+                if "loss" in k
+            ]
+        )
+        self.log("loss", total_loss, on_step=True, prog_bar=True)
         return total_loss
+
+    @staticmethod
+    def _parameter_touch_zero(parameters):
+        """Return a finite graph zero connected to every trainable parameter.
+
+        The resulting explicit zero gradients participate in optimizer steps;
+        notably, AdamW may weight-decay otherwise inactive parameters.
+        """
+        terms = [
+            torch.nan_to_num(parameter, nan=0.0, posinf=0.0, neginf=0.0).sum() * 0.0
+            for parameter in parameters
+            if parameter.requires_grad
+        ]
+        return sum(terms) if terms else torch.zeros(())
+
+    def _sync_cotrain_loss_keys(self, losses, zero_ref):
+        """Fill a configuration-derived schema without per-step collectives."""
+        unexpected = set(losses).difference(self.cotrain_loss_keys)
+        if unexpected:
+            raise ValueError(f"Losses absent from configured schema: {sorted(unexpected)}")
+        return {key: losses.get(key, zero_ref) for key in self.cotrain_loss_keys}
+
+    def on_after_backward(self):
+        """Drop numerical NaNs without hiding mixed-precision overflows."""
+        if self.nan_gradient_scrubbing:
+            scrub_nan_gradients(self.parameters())
 
     def on_train_epoch_end(self):
         """Log Training metrics to status.json"""
         self.status_logging_dict = {}
         for k, v in self.trainer.logged_metrics.items():
+            if k == "loss_param_touch":
+                continue
             self.status_logging_dict[k] = v.item()
 
         status_logging.get_status_logger().kpi = self.status_logging_dict
         status_logging.get_status_logger().write(
             message="Train metrics generated.",
-            status_level=status_logging.Status.RUNNING
+            status_level=status_logging.Status.RUNNING,
         )
 
     def on_validation_epoch_start(self):
@@ -112,8 +210,8 @@ class Sparse4DPlModel(TAOLightningModule):
             The validation output.
         """
         # Forward pass in evaluation mode
-        batch['img'] = batch['img'].float()
-        outputs = self.model(batch['img'], batch)
+        batch["img"] = batch["img"].float()
+        outputs = self.model(batch["img"], batch)
         self.val_dataset.update_results(outputs)
 
         return outputs
@@ -138,7 +236,7 @@ class Sparse4DPlModel(TAOLightningModule):
                 status_logging.get_status_logger().kpi = self.status_logging_dict
                 status_logging.get_status_logger().write(
                     message="Eval metrics generated.",
-                    status_level=status_logging.Status.RUNNING
+                    status_level=status_logging.Status.RUNNING,
                 )
 
         self.val_dataset.clear_results()
@@ -146,10 +244,10 @@ class Sparse4DPlModel(TAOLightningModule):
 
     def forward(self, batch):
         """Forward pass for inference only."""
-        img = batch['img']
+        img = batch["img"]
 
         # Use simple_test if available, otherwise the standard model call
-        if hasattr(self.model, 'simple_test'):
+        if hasattr(self.model, "simple_test"):
             outputs = self.model.simple_test(img, batch)
         else:
             outputs = self.model(img, batch)
@@ -162,7 +260,7 @@ class Sparse4DPlModel(TAOLightningModule):
 
     def predict_step(self, batch, batch_idx):
         """Predict step. Inference."""
-        outputs = self.model(batch['img'], batch)
+        outputs = self.model(batch["img"], batch)
         self.test_dataset.update_results(outputs)
         return outputs
 
@@ -182,13 +280,20 @@ class Sparse4DPlModel(TAOLightningModule):
         viz_down_sample = self.experiment_spec.visualize.viz_down_sample
 
         tracking = self.experiment_spec.inference.tracking
-        self.test_dataset.format_results(
-            results, jsonfile_prefix=jsonfile_prefix, tracking=tracking,
-            output_nvschema=output_nvschema,
-            show=show, out_dir=out_dir, pipeline=pipeline,
-            vis_score_threshold=vis_score_threshold,
-            n_images_col=n_images_col, viz_down_sample=viz_down_sample
-        )
+        nvschema_fps = self.experiment_spec.inference.get("nvschema_fps", 0.0)
+        with nvschema_fps_override(nvschema_fps):
+            self.test_dataset.format_results(
+                results,
+                jsonfile_prefix=jsonfile_prefix,
+                tracking=tracking,
+                output_nvschema=output_nvschema,
+                show=show,
+                out_dir=out_dir,
+                pipeline=pipeline,
+                vis_score_threshold=vis_score_threshold,
+                n_images_col=n_images_col,
+                viz_down_sample=viz_down_sample,
+            )
 
     def on_test_epoch_start(self):
         """Test epoch start."""
@@ -197,8 +302,8 @@ class Sparse4DPlModel(TAOLightningModule):
     def test_step(self, batch, batch_idx):
         """Test step."""
         # Get model predictions in test mode
-        batch['img'] = batch['img'].float()
-        outputs = self.model.simple_test(batch['img'], batch)
+        batch["img"] = batch["img"].float()
+        outputs = self.model.simple_test(batch["img"], batch)
         self.test_dataset.update_results(outputs)
         return outputs
 
@@ -215,18 +320,20 @@ class Sparse4DPlModel(TAOLightningModule):
         jsonfile_prefix = self.experiment_spec.inference.jsonfile_prefix
         metrics = self.experiment_spec.evaluate.metrics
 
-        scores = self.test_dataset.evaluate(
-            results,
-            metrics=metrics,
-            jsonfile_prefix=jsonfile_prefix,
-            output_nvschema=output_nvschema,
-            show=show,
-            out_dir=out_dir,
-            pipeline=pipeline,
-            vis_score_threshold=vis_score_threshold,
-            n_images_col=n_images_col,
-            viz_down_sample=viz_down_sample
-        )
+        nvschema_fps = self.experiment_spec.inference.get("nvschema_fps", 0.0)
+        with nvschema_fps_override(nvschema_fps):
+            scores = self.test_dataset.evaluate(
+                results,
+                metrics=metrics,
+                jsonfile_prefix=jsonfile_prefix,
+                output_nvschema=output_nvschema,
+                show=show,
+                out_dir=out_dir,
+                pipeline=pipeline,
+                vis_score_threshold=vis_score_threshold,
+                n_images_col=n_images_col,
+                viz_down_sample=viz_down_sample,
+            )
         self.test_dataset.clear_results()
         self.status_logging_dict = {}
         for k, v in scores.items():
@@ -234,7 +341,7 @@ class Sparse4DPlModel(TAOLightningModule):
         status_logging.get_status_logger().kpi = self.status_logging_dict
         status_logging.get_status_logger().write(
             message="Test metrics generated.",
-            status_level=status_logging.Status.RUNNING
+            status_level=status_logging.Status.RUNNING,
         )
 
         return scores
@@ -248,12 +355,20 @@ class Sparse4DPlModel(TAOLightningModule):
         optim_config = self.train_config.optim
         bb_lr_mult = optim_config.paramwise_cfg.custom_keys.img_backbone.lr_mult
         backbone, others = [], []
-        for name, p in self.model.named_parameters():
+        seen = set()
+        named_parameters = itertools.chain(
+            self.model.named_parameters(prefix="model"),
+            self.criterion.named_parameters(prefix="criterion"),
+        )
+        for name, p in named_parameters:
+            if id(p) in seen or not p.requires_grad:
+                continue
+            seen.add(id(p))
             (backbone if "img_backbone" in name else others).append(p)
 
         param_groups = [
             {"params": backbone, "lr": optim_config.lr * bb_lr_mult},
-            {"params": others},                          # base LR
+            {"params": others},  # base LR
         ]
 
         optimizer = torch.optim.AdamW(
@@ -284,7 +399,7 @@ class Sparse4DPlModel(TAOLightningModule):
             "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": scheduler,
-                "interval": "step",   # step every iteration
+                "interval": "step",  # step every iteration
                 "frequency": 1,
             },
         }
