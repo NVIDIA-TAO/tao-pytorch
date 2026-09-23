@@ -166,9 +166,13 @@ class Omniverse3DDetTrackDataset(Dataset):
         self.ann_file = self.anno_file
         self.sync_route = bool(sync_route)
         self.real_scene_keywords = list(real_scene_keywords or [])
+        if real_block_prob is not None and float(real_block_prob) != -1.0 and not (
+            0.0 <= float(real_block_prob) <= 1.0
+        ):
+            raise ValueError("real_block_prob must be exactly -1 (auto) or in [0, 1]")
         self.real_block_prob = (
             None
-            if real_block_prob is None or float(real_block_prob) < 0
+            if real_block_prob is None or float(real_block_prob) == -1.0
             else float(real_block_prob)
         )
         self.scene_switch_iters = int(scene_switch_iters)
@@ -492,8 +496,12 @@ class Omniverse3DDetTrackDataset(Dataset):
             return [osp.join(ann_file, name) for name in ann_files]
         elif ann_file.endswith(".txt"):
             with open(ann_file, "r") as f:
-                lines = [line.strip() for line in f if line.strip()]
-            return [line.split()[0] for line in lines]
+                lines = [line.strip() for line in f
+                         if line.strip() and not line.lstrip().startswith("#")]
+            paths = [osp.abspath(osp.expanduser(line.split()[0])) for line in lines]
+            if len(set(paths)) != len(paths):
+                raise ValueError("Duplicate annotation PKL paths in split")
+            return paths
         return None
 
     def _load_pkl_files(self, ann_paths):

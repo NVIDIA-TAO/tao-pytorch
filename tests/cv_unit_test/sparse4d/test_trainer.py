@@ -258,8 +258,10 @@ def test_positive_count_sync_policy_is_wired_conservatively(_train_spec):
 @pytest.mark.cv_unit
 @pytest.mark.sparse4d
 @pytest.mark.train
-def test_trainer_fit(_train_spec):
+@pytest.mark.parametrize("parameter_touch", [False, True])
+def test_trainer_fit(_train_spec, parameter_touch):
     """Run Sparse4DPlModel through a real Trainer fit and validation cycle."""
+    _train_spec.model.cotrain_param_touch = parameter_touch
     dm = Sparse4DDataModule(_train_spec)
     model = Sparse4DPlModel(_train_spec, build_training_losses=True)
     _load_temporary_checkpoint(model, _train_spec.train.pretrained_model_path)
@@ -271,6 +273,9 @@ def test_trainer_fit(_train_spec):
     assert trainer.global_step == 1
     assert not torch.equal(model.model.weight.detach(), initial_weight)
     assert dm.val_dataset._test_evaluate_calls == 1
+    assert "loss_param_touch" not in trainer.logged_metrics
+    assert "loss_param_touch" not in model.status_logging_dict
+    assert "loss" in model.status_logging_dict
 
 
 @pytest.mark.cv_unit

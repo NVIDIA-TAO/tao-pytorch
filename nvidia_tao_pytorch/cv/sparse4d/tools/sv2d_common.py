@@ -59,6 +59,8 @@ def validate_scene_name(scene_name: str) -> str:
         )
     if "\x00" in scene_name:
         raise ValueError("SV2D scene_name must not contain a NUL character")
+    if "+" in scene_name:
+        raise ValueError("scene_name must not contain '+', the runtime BEV-group separator")
     return scene_name
 
 

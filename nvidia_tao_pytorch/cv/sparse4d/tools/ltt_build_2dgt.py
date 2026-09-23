@@ -13,6 +13,7 @@ from typing import Dict, Optional, Sequence, Tuple
 import numpy as np
 
 from nvidia_tao_pytorch.cv.sparse4d.tools import ltt_data, ltt_extract
+from nvidia_tao_pytorch.cv.sparse4d.tools.sv2d_common import validate_scene_name
 
 
 SCHEMA_VERSION = "ltt_2dgt/v1"
@@ -129,7 +130,7 @@ def build_sidecars(
     output_dir.mkdir(parents=True, exist_ok=True)
     outputs = []
     for scene_path in scene_paths:
-        scene = Path(scene_path).resolve().name
+        scene = validate_scene_name(Path(scene_path).resolve().name)
         columns, camera_names = build_scene(
             scene_path,
             name_to_id,

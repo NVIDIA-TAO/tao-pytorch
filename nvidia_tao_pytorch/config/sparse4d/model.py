@@ -44,6 +44,7 @@ class Sparse4DNeckConfig:
         default_value=4,
         valid_min=1,
         valid_max="inf",
+        description="Number of output levels",
         display_name="Number of output levels",
     )
     start_level: int = INT_FIELD(
@@ -886,6 +887,7 @@ class Sparse4DDeformableModelConfig:
         default_value=256,
         valid_min=1,
         valid_max="inf",
+        display_name="Embedding dimensions",
         description="Embedding dimensions",
     )
     num_groups: int = INT_FIELD(
@@ -893,6 +895,7 @@ class Sparse4DDeformableModelConfig:
         default_value=8,
         valid_min=1,
         valid_max="inf",
+        display_name="Number of groups",
         description="Number of groups",
     )
     num_levels: int = INT_FIELD(

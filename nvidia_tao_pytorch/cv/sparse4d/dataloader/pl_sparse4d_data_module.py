@@ -215,10 +215,14 @@ class Sparse4DDataModule(pl.LightningDataModule):
             self.dataset_config.get("real_scene_keywords", []) or []
         )
         configured_real_probability = self.dataset_config.get("real_block_prob", -1.0)
+        if configured_real_probability is not None and float(configured_real_probability) != -1.0 and not (
+            0.0 <= float(configured_real_probability) <= 1.0
+        ):
+            raise ValueError("real_block_prob must be exactly -1 (auto) or in [0, 1]")
         self.real_block_prob = (
             None
             if configured_real_probability is None or
-            float(configured_real_probability) < 0
+            float(configured_real_probability) == -1.0
             else float(configured_real_probability)
         )
         self.scene_switch_iters = self.dataset_config.get("scene_switch_iters", 0)

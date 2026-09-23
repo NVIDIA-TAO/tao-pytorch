@@ -301,8 +301,8 @@ class Omniverse3DDetTrackDatasetConfig:
     use_h5_file_for_rgb: bool = BOOL_FIELD(
         value=False,
         default_value=False,
-        description="Use H5 file",
-        display_name="Use H5 file",
+        description="Read RGB camera images from HDF5 files instead of image directories",
+        display_name="Use HDF5 for RGB images",
     )
     use_h5_file_for_depth: bool = BOOL_FIELD(
         value=True,
@@ -329,7 +329,7 @@ class Omniverse3DDetTrackDatasetConfig:
         default_value=0,
         valid_min=0,
         valid_max="inf",
-        description="Number of pkl files sampled per epoch; zero disables sampling",
+        description="Number of PKLs sampled per epoch; zero disables sampling. Requires lazy_load=True",
         display_name="PKL sample size per epoch",
     )
     pkl_cam_counts_path: str = STR_FIELD(
@@ -357,7 +357,7 @@ class Omniverse3DDetTrackDatasetConfig:
         default_value=-1,
         valid_min=-1,
         valid_max="inf",
-        description="Maximum training cameras per frame; a non-positive value disables sampling",
+        description="Limit training cameras per frame to reduce GPU memory; a non-positive value disables sampling",
         display_name="Maximum cameras per frame",
     )
     eval_dist_fcn: str = STR_FIELD(
@@ -448,7 +448,7 @@ class Omniverse3DDetTrackDatasetConfig:
         value=True,
         default_value=True,
         description="Mark samples with an RT-DETR scene cache as lacking 3D ground truth",
-        display_name="Mark RT-DETR samples as real",
+        display_name="Treat RT-DETR-cached samples as 2D-only",
     )
     resize_to_canonical_2d: bool = BOOL_FIELD(
         value=False,
@@ -489,7 +489,7 @@ class Omniverse3DDetTrackDatasetConfig:
         default_value=-1.0,
         valid_min=-1.0,
         valid_max=1.0,
-        description="Probability of a real-data route block; -1 derives it from scene counts",
+        description="Probability in [0, 1], or exactly -1 for automatic scene-count weighting; (-1, 0) is invalid",
         display_name="Real route block probability",
     )
     scene_switch_iters: int = INT_FIELD(

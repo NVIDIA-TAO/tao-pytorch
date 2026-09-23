@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 import re
@@ -15,6 +16,7 @@ from typing import Dict, Optional, Sequence, Tuple
 import numpy as np
 
 from nvidia_tao_pytorch.cv.sparse4d.tools import ltt_data
+from nvidia_tao_pytorch.cv.sparse4d.tools.sv2d_common import validate_scene_name
 
 
 SCHEMA_VERSION = "ltt_rtdetr2d/v1"
@@ -48,9 +50,11 @@ def parse_camera_archive(
     frame_stride: int = 1,
     max_frames: int = 0,
     raw_counts: Optional[dict] = None,
+    class_name_map: Optional[dict] = None,
 ) -> Tuple[dict, int]:
     """Parse one camera archive without extracting untrusted tar paths."""
     raw_counts = raw_counts if raw_counts is not None else {}
+    class_name_map = {**RTDETR_TO_WAREHOUSE, **dict(class_name_map or {})}
     frame_ids, class_ids, boxes, scores = [], [], [], []
     seen_frames = set()
     stride = max(1, int(frame_stride))
@@ -77,10 +81,15 @@ def parse_camera_archive(
                     continue
                 detector_name = parts[0]
                 raw_counts[detector_name] = raw_counts.get(detector_name, 0) + 1
-                warehouse_name = RTDETR_TO_WAREHOUSE.get(detector_name)
-                class_id = name_to_id.get(warehouse_name) if warehouse_name else None
-                if class_id is None:
+                warehouse_name = class_name_map.get(detector_name, detector_name)
+                if warehouse_name is None:
                     continue
+                class_id = name_to_id.get(warehouse_name)
+                if class_id is None:
+                    raise ValueError(
+                        f"Unmapped detector class {detector_name!r}; add a class-map "
+                        "alias or explicitly map it to null to drop it"
+                    )
                 try:
                     x_min, y_min, x_max, y_max = (
                         float(parts[index]) for index in range(4, 8)
@@ -135,6 +144,7 @@ def build_cache(
     frame_stride: int = 1,
     max_frames_per_camera: int = 0,
     scene_name: Optional[str] = None,
+    class_name_map: Optional[dict] = None,
 ) -> dict:
     """Build one safe ``ltt_rtdetr2d/v1`` scene cache."""
     rtdetr_dir = Path(rtdetr_dir).expanduser().resolve()
@@ -161,6 +171,7 @@ def build_cache(
             frame_stride=frame_stride,
             max_frames=max_frames_per_camera,
             raw_counts=raw_counts,
+            class_name_map=class_name_map,
         )
         parts.append(columns)
         frame_counts[camera_names[camera_index]] = num_frames
@@ -182,7 +193,7 @@ def build_cache(
         valid_cameras = valid_cameras[valid_order]
     columns["valid_frame_id"] = valid_frame_ids
     columns["valid_cam"] = valid_cameras
-    scene = scene_name or rtdetr_dir.parent.name
+    scene = validate_scene_name(scene_name or rtdetr_dir.parent.name)
     metadata = {
         "schema_version": SCHEMA_VERSION,
         "scene": scene,
@@ -193,7 +204,7 @@ def build_cache(
         "num_rows": int(len(columns["frame_id"])),
         "num_valid_frame_cameras": int(len(valid_frame_ids)),
         "source": "RT-DETR KITTI labels.tar.gz",
-        "class_map": RTDETR_TO_WAREHOUSE,
+        "class_map": {**RTDETR_TO_WAREHOUSE, **dict(class_name_map or {})},
         "raw_class_counts": raw_counts,
         "frames_per_camera": frame_counts,
     }
@@ -222,6 +233,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rtdetr-dir", required=True)
     parser.add_argument("--class-config")
+    parser.add_argument("--class-map", type=json.loads, help="JSON label aliases; null explicitly drops a label")
     parser.add_argument("--out", required=True)
     parser.add_argument("--scene-name")
     parser.add_argument("--cam-map")
@@ -246,6 +258,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         frame_stride=args.frame_stride,
         max_frames_per_camera=args.max_frames_per_cam,
         scene_name=args.scene_name,
+        class_name_map=args.class_map,
     )
     print(
         f"[saved] {output_path}: {metadata['num_rows']} detections from "

@@ -137,6 +137,8 @@ class Sparse4DPlModel(TAOLightningModule):
 
         # Log losses
         for loss_name, loss_value in loss_dict.items():
+            if loss_name == "loss_param_touch":
+                continue  # DDP graph connectivity, not a training KPI.
             # Ensure loss_value is a scalar before logging
             if isinstance(loss_value, torch.Tensor) and loss_value.numel() > 1:
                 loss_value = loss_value.mean()
@@ -183,6 +185,8 @@ class Sparse4DPlModel(TAOLightningModule):
         """Log Training metrics to status.json"""
         self.status_logging_dict = {}
         for k, v in self.trainer.logged_metrics.items():
+            if k == "loss_param_touch":
+                continue
             self.status_logging_dict[k] = v.item()
 
         status_logging.get_status_logger().kpi = self.status_logging_dict

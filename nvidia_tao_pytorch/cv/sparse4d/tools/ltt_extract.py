@@ -18,9 +18,14 @@ import json
 import os
 from pathlib import Path
 import re
-from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
+
+try:
+    import ijson as _ijson
+except ImportError:
+    _ijson = None
 
 from nvidia_tao_pytorch.cv.sparse4d.model.loose_to_tight_mlp import (
     camera_view_geometry,
@@ -40,68 +45,88 @@ def iter_gt_frames(
     frame_stride: int = 1,
     max_frames: int = 0,
 ) -> Iterator[Tuple[int, list]]:
-    """Yield strided ``(frame_id, annotations)`` pairs from one scene.
+    """Yield frames from per-frame or monolithic ground truth.
 
-    Per-frame ``ground_truth_final`` files are preferred.  Monolithic JSON is
-    streamed with optional ``ijson`` when installed; the stdlib fallback is
-    suitable for small fixtures but loads the whole document.
+    Per-frame files are sorted numerically. Monolithic JSON preserves source
+    order with either the optional streaming parser or the standard-library
+    fallback, so installed dependencies cannot change sampling results.
     """
-    scene_dir = os.fspath(scene_dir)
+    scene = Path(scene_dir).expanduser()
     stride = max(1, int(frame_stride))
-    per_frame_dir = os.path.join(scene_dir, "ground_truth_final")
+    limit = max(0, int(max_frames))
+    per_frame_dir = scene / "ground_truth_final"
     emitted = 0
-    if os.path.isdir(per_frame_dir):
-        files = glob.glob(os.path.join(per_frame_dir, "ground_truth_*.json"))
-        indexed = []
-        for path in files:
+    if per_frame_dir.is_dir():
+        indexed = {}
+        for path in sorted(per_frame_dir.glob("ground_truth_*.json")):
             try:
-                frame_id = int(Path(path).stem.rsplit("_", 1)[-1])
+                frame_id = int(path.stem.rsplit("_", 1)[-1])
             except ValueError:
                 continue
-            indexed.append((frame_id, path))
-        for frame_id, path in sorted(indexed):
+            prior_path = indexed.get(frame_id)
+            if prior_path is not None:
+                raise ValueError(
+                    f"Duplicate normalized frame ID {frame_id} in "
+                    f"{per_frame_dir}: {prior_path.name!r} and {path.name!r}"
+                )
+            indexed[frame_id] = path
+        for frame_id, path in sorted(indexed.items()):
             if frame_id % stride:
                 continue
-            with open(path, "r", encoding="utf-8") as stream:
+            with path.open("r", encoding="utf-8") as stream:
                 annotations = json.load(stream)
+            if not isinstance(annotations, list):
+                raise ValueError(f"Ground-truth frame must contain a list: {path}")
             yield frame_id, annotations
             emitted += 1
-            if 0 < max_frames <= emitted:
+            if limit and emitted >= limit:
                 return
         return
 
-    gt_path = os.path.join(scene_dir, "ground_truth.json")
-    if not os.path.isfile(gt_path):
+    ground_truth_path = scene / "ground_truth.json"
+    if not ground_truth_path.is_file():
         return
-    try:
-        import ijson  # type: ignore
-    except ImportError:
-        with open(gt_path, "r", encoding="utf-8") as stream:
-            items: Iterable[Tuple[str, list]] = json.load(stream).items()
+
+    def selected_frames(items):
+        """Yield validated, strided frames from key/annotation pairs."""
+        emitted_count = 0
+        normalized_keys = {}
         for key, annotations in items:
             try:
                 frame_id = int(key)
             except (TypeError, ValueError):
                 continue
+            key_text = str(key)
+            prior_key = normalized_keys.get(frame_id)
+            if prior_key is not None:
+                raise ValueError(
+                    f"Duplicate normalized frame ID {frame_id} in "
+                    f"{ground_truth_path}: {prior_key!r} and {key_text!r}"
+                )
+            normalized_keys[frame_id] = key_text
             if frame_id % stride:
                 continue
+            if limit and emitted_count >= limit:
+                continue
+            if not isinstance(annotations, list):
+                raise ValueError(
+                    f"Ground-truth frame {frame_id!r} must contain a list"
+                )
             yield frame_id, annotations
-            emitted += 1
-            if 0 < max_frames <= emitted:
-                return
+            emitted_count += 1
+
+    if _ijson is None:
+        with ground_truth_path.open("r", encoding="utf-8") as stream:
+            document = json.load(stream)
+        if not isinstance(document, dict):
+            raise ValueError(
+                "Monolithic ground truth must contain an object: "
+                f"{ground_truth_path}"
+            )
+        yield from selected_frames(document.items())
     else:
-        with open(gt_path, "rb") as stream:
-            for key, annotations in ijson.kvitems(stream, ""):
-                try:
-                    frame_id = int(key)
-                except (TypeError, ValueError):
-                    continue
-                if frame_id % stride:
-                    continue
-                yield frame_id, annotations
-                emitted += 1
-                if 0 < max_frames <= emitted:
-                    return
+        with ground_truth_path.open("rb") as stream:
+            yield from selected_frames(_ijson.kvitems(stream, ""))
 
 
 def has_ground_truth(scene_dir: os.PathLike | str) -> bool:
@@ -228,8 +253,11 @@ def _decode_camera(name: str, value: dict) -> Optional[Tuple[str, dict]]:
     if intrinsic is None or world2cam is None:
         camera_matrix = value.get("cameraMatrix")
         if camera_matrix is not None:
-            intrinsic = np.eye(3, dtype=np.float64)
-            world2cam = _reshape_world2cam(camera_matrix)
+            raise ValueError(
+                f"Camera {name!r}: cameraMatrix-only calibration is a projection, "
+                "not a rigid transform. LTT geometry requires separate "
+                "intrinsics and world-to-camera extrinsics."
+            )
     if intrinsic is None or world2cam is None:
         return None
 

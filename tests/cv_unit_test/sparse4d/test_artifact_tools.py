@@ -261,6 +261,7 @@ def test_rtdetr_builder_drops_pallet_and_writes_safe_npz(tmp_path):
         {name: index for index, name in enumerate(class_names)},
         camera_map={"cam_a": "CameraA"},
         confidence_threshold=0.4,
+        class_name_map={"pallet": None},
     )
 
     assert metadata["cam_names"] == ["CameraA"]

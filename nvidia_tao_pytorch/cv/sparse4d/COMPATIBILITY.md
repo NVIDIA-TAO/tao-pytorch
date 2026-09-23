@@ -26,6 +26,29 @@ unchanged:
 - Default training raises on non-finite losses and does not clip classification
   logits. `train.scrub_nan_gradients=true` explicitly opts into clipping,
   backward-safe loss replacement, and NaN-gradient scrubbing.
+- `loss_param_touch` stays in the gradient graph when enabled, but is not
+  published as a training KPI. Core's metric allowlist excludes it.
+- `dataset.real_block_prob` accepts exactly `-1` for automatic weighting or
+  values in `[0, 1]`. Fractional negative values are invalid.
+
+## Companion data preparation and service schema
+
+Core's generated Sparse4D schema must ship with a runtime image containing this
+implementation. The core compatibility note documents the evaluation-default
+change and the release-image gate; auxiliary artifact paths remain explicit
+mounted paths, not automatically bound FTMS assets.
+
+Native and data-service lazy-index producers preserve symlinked mount paths and
+interpret relative split rows against the working directory. Duplicate PKL rows
+are rejected. Prefer absolute container-visible split paths and rebuild indexes
+after moving datasets.
+
+RT-DETR labels outside the configured taxonomy now require an explicit alias or
+drop rule. The native producer accepts `--class-map '{"Human":"person","pallet":null}'`;
+data-services uses `rtdetr_2d.class_map`. Scene names must not contain the reserved
+`+` BEV-group separator. LTT geometry requires separate camera intrinsics and
+rigid world-to-camera extrinsics; projection-only `cameraMatrix` is rejected.
+The two LTT producers share frame ordering and duplicate-ID validation.
 
 ## Temporal state and deployment
 

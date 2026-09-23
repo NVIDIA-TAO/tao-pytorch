@@ -56,13 +56,16 @@ def resolve_annotation_paths(ann_file: os.PathLike | str) -> list[str]:
         if not osp.isfile(ann_file):
             raise FileNotFoundError(f"Annotation split not found: {ann_file}")
         with open(ann_file, "r", encoding="utf-8") as stream:
-            paths = [line.split()[0] for line in stream if line.strip()]
+            paths = [line.split()[0] for line in stream
+                     if line.strip() and not line.lstrip().startswith("#")]
     else:
         raise ValueError(
             f"Expected a split .txt file or annotation directory: {ann_file}"
         )
 
     paths = [osp.abspath(osp.expanduser(path)) for path in paths]
+    if len(set(paths)) != len(paths):
+        raise ValueError("Duplicate annotation PKL paths in split")
     if not paths:
         raise ValueError(f"No annotation PKLs found in: {ann_file}")
     missing = [path for path in paths if not osp.isfile(path)]
