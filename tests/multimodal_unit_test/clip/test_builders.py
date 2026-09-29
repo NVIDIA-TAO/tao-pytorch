@@ -4,6 +4,11 @@
 """Unit tests for CLIP model builders."""
 
 import pytest
+import torch.nn as nn
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from nvidia_tao_pytorch.multimodal.clip.model.clip import build_model
 
 from nvidia_tao_pytorch.multimodal.clip.model.builders import (
     _parse_aug_config,
@@ -12,6 +17,54 @@ from nvidia_tao_pytorch.multimodal.clip.model.builders import (
     OPENAI_CLIP_MEAN,
     OPENAI_CLIP_STD,
 )
+
+
+@pytest.mark.multimodal_unit
+@pytest.mark.parametrize(
+    ('vision_freeze', 'vision_mode', 'text_freeze', 'text_mode', 'expected'),
+    [
+        (True, 'full', False, 'frozen', (False, True)),
+        (True, 'lora', False, 'full', (False, False)),
+        (True, 'frozen', False, 'full', (True, False)),
+    ],
+)
+def test_peft_modes_override_model_freeze_flags(
+    vision_freeze, vision_mode, text_freeze, text_mode, expected,
+):
+    """Builders receive the effective PEFT modes and emit conflict warnings."""
+    config = SimpleNamespace(
+        model=SimpleNamespace(
+            type='siglip2-so400m-patch16-256', image_size=256,
+            freeze_vision_encoder=vision_freeze,
+            freeze_text_encoder=text_freeze,
+            init_logit_scale=None, init_logit_bias=None,
+        ),
+        dataset=SimpleNamespace(augmentation=None),
+        train=SimpleNamespace(loss_type='siglip'),
+        peft=SimpleNamespace(
+            enabled=True,
+            vision=SimpleNamespace(mode=vision_mode),
+            text=SimpleNamespace(mode=text_mode),
+        ),
+    )
+    with patch(
+        'nvidia_tao_pytorch.multimodal.clip.model.clip.build_siglip2_model',
+        return_value=(nn.Module(), None, None, None),
+    ) as builder, patch(
+        'nvidia_tao_pytorch.multimodal.clip.model.clip.logging.warning'
+    ) as warning:
+        build_model(config)
+
+    assert (
+        builder.call_args.kwargs['freeze_vision_encoder'],
+        builder.call_args.kwargs['freeze_text_encoder'],
+    ) == expected
+    assert warning.call_count == sum(
+        (vision_freeze != expected[0], text_freeze != expected[1])
+    )
+    for call in warning.call_args_list:
+        assert 'overrides model.freeze_%s_encoder=%s' in call.args[0]
+        assert 'PEFT tower mode controls trainability' in call.args[0]
 
 
 @pytest.mark.multimodal_unit
