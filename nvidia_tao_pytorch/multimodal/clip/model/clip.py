@@ -5,6 +5,7 @@
 
 import open_clip
 
+from nvidia_tao_pytorch.core.tlt_logging import logging
 from nvidia_tao_pytorch.multimodal.clip.utils.model_configs import (
     map_clip_model_cfg,
     radio_model_configs,
@@ -63,6 +64,23 @@ def build_model(experiment_config,
         experiment_config.model, 'freeze_vision_encoder', False)
     freeze_text = getattr(
         experiment_config.model, 'freeze_text_encoder', False)
+    peft_config = getattr(experiment_config, 'peft', None)
+    if peft_config is not None and getattr(peft_config, 'enabled', False):
+        for tower_name, requested_freeze in (
+            ('vision', freeze_vision), ('text', freeze_text)
+        ):
+            mode = getattr(getattr(peft_config, tower_name), 'mode')
+            effective_freeze = mode == 'frozen'
+            if requested_freeze != effective_freeze:
+                logging.warning(
+                    'PEFT %s.mode=%s overrides model.freeze_%s_encoder=%s; '
+                    'the PEFT tower mode controls trainability.',
+                    tower_name, mode, tower_name, requested_freeze,
+                )
+            if tower_name == 'vision':
+                freeze_vision = effective_freeze
+            else:
+                freeze_text = effective_freeze
     canonicalize_text = getattr(
         experiment_config.model, 'canonicalize_text', False)
 

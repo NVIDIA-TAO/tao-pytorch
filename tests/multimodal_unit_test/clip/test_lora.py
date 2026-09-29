@@ -258,6 +258,29 @@ def test_lora_rejects_block_counts_outside_the_tower_depth(num_last_blocks):
         inject_lora(_TinyCLIP(), config)
 
 
+@pytest.mark.parametrize(
+    ('field', 'value'),
+    [
+        ('rank', 0),
+        ('alpha', 0),
+        ('dropout', -0.1),
+        ('dropout', 1.0),
+        ('dropout', 1.5),
+    ],
+)
+def test_invalid_lora_hyperparameters_fail_before_model_mutation(field, value):
+    """Invalid LoRA values identify their field and leave the model intact."""
+    model = _TinyCLIP()
+    config = _hybrid_config('lora', 'frozen')
+    setattr(config.vision, field, value)
+
+    with pytest.raises(ValueError, match=f'peft\\.vision\\.{field}'):
+        inject_lora(model, config)
+
+    assert all(parameter.requires_grad for parameter in model.parameters())
+    assert not any(isinstance(module, LoRALinear) for module in model.modules())
+
+
 @pytest.mark.parametrize('calibration', [False, True])
 def test_logit_calibration_is_controlled_independently(calibration):
     """Logit parameters follow train_logit_calibration, not tower mode."""

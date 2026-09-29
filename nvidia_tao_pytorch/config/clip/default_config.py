@@ -164,7 +164,7 @@ class CLIPLoRATargetConfig:
         default_value=0.05,
         valid_min=0.0,
         valid_max=1.0,
-        description="Dropout applied to LoRA input.",
+        description="Dropout applied to LoRA input; must be less than 1.0.",
         display_name="Dropout",
     )
 
