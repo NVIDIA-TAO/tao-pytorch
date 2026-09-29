@@ -569,6 +569,76 @@ def stereo_config(tmp_path):
     yield experiment_config
 
 
+TRACE_BATCH = 1
+PROBE_BATCH = 2
+
+
+def _assert_batch_axis_is_dynamic(output_path, trace_batch=TRACE_BATCH, probe_batch=PROBE_BATCH):
+    """Assert an exported stereo graph is valid at a batch size it was not traced at.
+
+    Two independent checks:
+      1. no axis-0 Slice on a 4-D tensor carries a constant bound equal to `trace_batch`
+      2. shape inference with the input batch pinned to `probe_batch` yields that output batch
+    """
+    from onnx import numpy_helper, shape_inference
+
+    model_onnx = shape_inference.infer_shapes(onnx.load(output_path))
+
+    # Only Constant *nodes* can supply Slice bounds here, and materialising every weight
+    # initializer would cost hundreds of MB for nothing.
+    const = {}
+    for node in model_onnx.graph.node:
+        if node.op_type == "Constant":
+            for attr in node.attribute:
+                if attr.name == "value":
+                    const[node.output[0]] = numpy_helper.to_array(attr.t).tolist()
+    for tensor in model_onnx.graph.initializer:
+        if len(tensor.dims) <= 1 and int(numpy_helper.to_array(tensor).size) <= 8:
+            const[tensor.name] = numpy_helper.to_array(tensor).tolist()
+
+    ranks = {vi.name: len(vi.type.tensor_type.shape.dim)
+             for vi in list(model_onnx.graph.value_info) + list(model_onnx.graph.input)}
+
+    examined = 0
+    for node in model_onnx.graph.node:
+        if node.op_type != "Slice" or len(node.input) < 4:
+            continue
+        if const.get(node.input[3]) != [0]:
+            continue
+        # Rank distinguishes a feature slice from a shape-vector slice (shape vectors are
+        # rank 1). Rank 3 is included so ViT token tensors (B, N, C) are covered too --
+        # FoundationStereo slices vit_feat with the same batch size. A missing rank must not
+        # silently skip the node, or the test could "pass" having checked nothing; the
+        # `examined` counter below guards that.
+        if ranks.get(node.input[0]) not in (3, 4):
+            continue
+        examined += 1
+        starts, ends = const.get(node.input[1]), const.get(node.input[2])
+        assert ends != [trace_batch] and starts != [trace_batch], (
+            f"Slice node {node.name!r} has the traced batch size baked into its bounds "
+            f"(starts={starts}, ends={ends}). Read the batch size with .shape[0], not len(), "
+            f"so the tracer keeps it dynamic."
+        )
+
+    # Guard against the check above degenerating into a no-op: this graph splits left from right
+    # with axis-0 slices on 4-D feature maps, so there must be some.
+    assert examined > 0, (
+        "no axis-0 Slice on a 3-D/4-D tensor was examined, so assertion 1 checked nothing. "
+        "Shape inference probably failed to assign ranks; the test cannot vouch for this graph."
+    )
+
+    for tensor in model_onnx.graph.input:
+        dim = tensor.type.tensor_type.shape.dim[0]
+        dim.dim_value = probe_batch
+        dim.ClearField("dim_param")
+    inferred = shape_inference.infer_shapes(model_onnx, strict_mode=True, data_prop=True)
+    out_batch = inferred.graph.output[0].type.tensor_type.shape.dim[0].dim_value
+    assert out_batch == probe_batch, (
+        f"with the input batch pinned to {probe_batch} the output batch inferred as {out_batch}; "
+        "the batch axis is annotated dynamic but the graph body is not batch-polymorphic"
+    )
+
+
 @pytest.mark.cv_unit
 @pytest.mark.depth_net
 @pytest.mark.export
@@ -584,10 +654,15 @@ def test_stereo_export_batch_axis_is_really_dynamic(stereo_config, tmp_path):
     Reshape volume mismatch.
 
     Two assertions, either of which alone would have caught the defect:
-      1. no axis-0 Slice on a 4-D tensor carries a constant bound equal to the trace batch
+      1. no axis-0 Slice on a feature tensor carries a constant bound equal to the trace batch
       2. shape inference with the input batch pinned to 2 yields an output batch of 2
+
+    Only FastFoundationStereo is exercised. FoundationStereo shares the idiom verbatim, and has
+    one more frozen site (it slices `vit_feat` as well), but exporting it needs a multiple-of-14
+    input for the ViT backbone and produces a ~1.5 GB ONNX in ~55 s, which is too heavy for a
+    unit test. `_assert_batch_axis_is_dynamic` is factored out so that gap can be closed cheaply
+    if the parent model gains a lighter export path.
     """
-    from onnx import numpy_helper, shape_inference
     from nvidia_tao_pytorch.cv.depth_net.scripts.export import stereo_onnx_export
 
     model = build_pl_model(stereo_config, export=True)
@@ -599,45 +674,11 @@ def test_stereo_export_batch_axis_is_really_dynamic(stereo_config, tmp_path):
         input_shape=[stereo_config.export.input_channel,
                      stereo_config.export.input_height,
                      stereo_config.export.input_width],
-        input_batch_size=1,
+        input_batch_size=TRACE_BATCH,
         output_file=output_path,
         on_cpu=True,
         opset_version=stereo_config.export.opset_version,
         valid_iters=stereo_config.model.valid_iters,
         dynamic_axis=True,
     )
-
-    model_onnx = shape_inference.infer_shapes(onnx.load(output_path))
-
-    # (1) no baked batch bound on a feature-map slice
-    const = {t.name: numpy_helper.to_array(t).tolist() for t in model_onnx.graph.initializer}
-    for node in model_onnx.graph.node:
-        if node.op_type == "Constant":
-            for attr in node.attribute:
-                if attr.name == "value":
-                    const[node.output[0]] = numpy_helper.to_array(attr.t).tolist()
-    ranks = {vi.name: len(vi.type.tensor_type.shape.dim)
-             for vi in list(model_onnx.graph.value_info) + list(model_onnx.graph.input)}
-    for node in model_onnx.graph.node:
-        if node.op_type != "Slice" or len(node.input) < 4:
-            continue
-        if const.get(node.input[3]) != [0] or ranks.get(node.input[0]) != 4:
-            continue
-        starts, ends = const.get(node.input[1]), const.get(node.input[2])
-        assert ends != [1] and starts != [1], (
-            f"Slice node {node.name!r} has the traced batch size baked into its bounds "
-            f"(starts={starts}, ends={ends}). Read the batch size with .shape[0], not len(), "
-            f"so the tracer keeps it dynamic."
-        )
-
-    # (2) the graph must actually infer at a batch size it was not traced at
-    for tensor in model_onnx.graph.input:
-        dim = tensor.type.tensor_type.shape.dim[0]
-        dim.dim_value = 2
-        dim.ClearField("dim_param")
-    inferred = shape_inference.infer_shapes(model_onnx, strict_mode=True, data_prop=True)
-    out_batch = inferred.graph.output[0].type.tensor_type.shape.dim[0].dim_value
-    assert out_batch == 2, (
-        f"with the input batch pinned to 2 the output batch inferred as {out_batch}; "
-        "the batch axis is annotated dynamic but the graph body is not batch-polymorphic"
-    )
+    _assert_batch_axis_is_dynamic(output_path)
