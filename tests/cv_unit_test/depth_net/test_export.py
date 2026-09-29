@@ -14,6 +14,7 @@ from dataclasses import replace
 from nvidia_tao_pytorch.ssl.mae.scripts.export import create_onnx_model
 from nvidia_tao_pytorch.cv.depth_net.model.build_pl_model import build_pl_model
 from nvidia_tao_pytorch.config.depth_net.default_config import ExperimentConfig
+import nvidia_tao_pytorch.cv.depth_net
 
 
 @pytest.fixture
@@ -541,3 +542,102 @@ def test_export_with_invalid_input_shape_metric(mock_metric_model, metric_config
             output_names=output_names,
             dynamic_axis=True
         )
+
+
+@pytest.fixture
+def stereo_config(tmp_path):
+    """FastFoundationStereo config taken from the shipped bp2 spec.
+
+    The bp2 topology is a tightly coupled set of width overrides, so the spec is loaded rather
+    than hand-assembled -- the schema defaults are the full-FoundationStereo ones and do not
+    form a valid FastFoundationStereo. Only the export block is shrunk, to keep the test quick.
+    """
+    spec = os.path.join(
+        os.path.dirname(nvidia_tao_pytorch.cv.depth_net.__file__),
+        "experiment_specs", "experiment_fast_foundation_stereo.yaml",
+    )
+    experiment_config = OmegaConf.merge(
+        OmegaConf.structured(ExperimentConfig()), OmegaConf.load(spec),
+    )
+    experiment_config.model.valid_iters = 1
+    experiment_config.export.onnx_file = os.path.join(tmp_path, "stereo_dynbatch.onnx")
+    experiment_config.export.input_channel = 3
+    experiment_config.export.input_height = 64
+    experiment_config.export.input_width = 96
+    experiment_config.export.batch_size = -1
+    experiment_config.export.opset_version = 17
+    yield experiment_config
+
+
+@pytest.mark.cv_unit
+@pytest.mark.depth_net
+@pytest.mark.export
+def test_stereo_export_batch_axis_is_really_dynamic(stereo_config, tmp_path):
+    """A dynamic-batch stereo export must be valid at batch sizes other than the traced one.
+
+    Regression test. The stereo models run left and right through the backbone as a single
+    batch-axis concat and then un-concatenate by slicing with the batch size. When that batch
+    size is read with len(), it is a Python int and torch.onnx's tracer freezes it into the
+    graph, so the slices become Slice(starts=[0], ends=[1]) / Slice(starts=[1], ends=[INT_MAX]).
+    The resulting ONNX is annotated dynamic but is only numerically valid at the traced batch
+    size of 1 — TensorRT rejects it with "reshape changes volume" and ONNX Runtime with a
+    Reshape volume mismatch.
+
+    Two assertions, either of which alone would have caught the defect:
+      1. no axis-0 Slice on a 4-D tensor carries a constant bound equal to the trace batch
+      2. shape inference with the input batch pinned to 2 yields an output batch of 2
+    """
+    from onnx import numpy_helper, shape_inference
+    from nvidia_tao_pytorch.cv.depth_net.scripts.export import stereo_onnx_export
+
+    model = build_pl_model(stereo_config, export=True)
+    model.eval()
+    output_path = stereo_config.export.onnx_file
+
+    stereo_onnx_export(
+        model=model.model,
+        input_shape=[stereo_config.export.input_channel,
+                     stereo_config.export.input_height,
+                     stereo_config.export.input_width],
+        input_batch_size=1,
+        output_file=output_path,
+        on_cpu=True,
+        opset_version=stereo_config.export.opset_version,
+        valid_iters=stereo_config.model.valid_iters,
+        dynamic_axis=True,
+    )
+
+    model_onnx = shape_inference.infer_shapes(onnx.load(output_path))
+
+    # (1) no baked batch bound on a feature-map slice
+    const = {t.name: numpy_helper.to_array(t).tolist() for t in model_onnx.graph.initializer}
+    for node in model_onnx.graph.node:
+        if node.op_type == "Constant":
+            for attr in node.attribute:
+                if attr.name == "value":
+                    const[node.output[0]] = numpy_helper.to_array(attr.t).tolist()
+    ranks = {vi.name: len(vi.type.tensor_type.shape.dim)
+             for vi in list(model_onnx.graph.value_info) + list(model_onnx.graph.input)}
+    for node in model_onnx.graph.node:
+        if node.op_type != "Slice" or len(node.input) < 4:
+            continue
+        if const.get(node.input[3]) != [0] or ranks.get(node.input[0]) != 4:
+            continue
+        starts, ends = const.get(node.input[1]), const.get(node.input[2])
+        assert ends != [1] and starts != [1], (
+            f"Slice node {node.name!r} has the traced batch size baked into its bounds "
+            f"(starts={starts}, ends={ends}). Read the batch size with .shape[0], not len(), "
+            f"so the tracer keeps it dynamic."
+        )
+
+    # (2) the graph must actually infer at a batch size it was not traced at
+    for tensor in model_onnx.graph.input:
+        dim = tensor.type.tensor_type.shape.dim[0]
+        dim.dim_value = 2
+        dim.ClearField("dim_param")
+    inferred = shape_inference.infer_shapes(model_onnx, strict_mode=True, data_prop=True)
+    out_batch = inferred.graph.output[0].type.tensor_type.shape.dim[0].dim_value
+    assert out_batch == 2, (
+        f"with the input batch pinned to 2 the output batch inferred as {out_batch}; "
+        "the batch axis is annotated dynamic but the graph body is not batch-polymorphic"
+    )
