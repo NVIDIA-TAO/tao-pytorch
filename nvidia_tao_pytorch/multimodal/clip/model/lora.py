@@ -22,6 +22,7 @@ currently supported in LoRA mode.
 """
 
 import math
+from numbers import Integral, Real
 
 import torch
 import torch.nn as nn
@@ -172,6 +173,27 @@ def _preflight_lora_towers(model, towers, resolved_modes):
     for tower_name, tower_config in towers:
         if resolved_modes[tower_name] != 'lora':
             continue
+        rank = tower_config.rank
+        alpha = tower_config.alpha
+        dropout = tower_config.dropout
+        if isinstance(rank, bool) or not isinstance(rank, Integral) or rank < 1:
+            raise ValueError(
+                f"peft.{tower_name}.rank must be an integer >= 1, got {rank!r}."
+            )
+        if (
+            isinstance(alpha, bool) or not isinstance(alpha, Real) or
+            not math.isfinite(alpha) or alpha <= 0
+        ):
+            raise ValueError(
+                f"peft.{tower_name}.alpha must be positive and finite, got {alpha!r}."
+            )
+        if (
+            isinstance(dropout, bool) or not isinstance(dropout, Real) or
+            not math.isfinite(dropout) or not 0 <= dropout < 1
+        ):
+            raise ValueError(
+                f"peft.{tower_name}.dropout must be in [0, 1), got {dropout!r}."
+            )
         blocks = list(model.get_encoder_blocks(tower_name))
         num_last_blocks = tower_config.num_last_blocks
         if not 0 <= num_last_blocks <= len(blocks):
