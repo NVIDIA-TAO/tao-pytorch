@@ -1,7 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# FROM nvcr.io/nvstaging/tao/tao_pytorch_base_image@sha256:23c2385c3d9232cf0e8b4d37d13fc7e9c9db8fece5c0f6475e5f7924dc6ac06a
-# Select base image based on architecture
+# Select base image based on architecture.
+#
+# The *_DIGEST defaults below are only consumed by local builds (release/docker/deploy.sh).
+# The release CI resolves the base from docker/manifest.json (resolve_base_image stage),
+# flattens it and substitutes it for the base-<arch> stage with BuildKit
+# `--build-context base-<arch>=docker-image://...`, so the digests here are never read
+# there. Keep them equal to docker/manifest.json so local and CI builds start from the
+# same base, and treat docker/manifest.json as the source of truth.
 ARG TARGETARCH # provided by Docker if using BuildKit. Else pass in explicitly.
 ARG X86_DIGEST=224a161014b5c7ac864e5d1055600d4d27c08a2e23e89bc6e5102a474d2ffae2
 ARG ARM64_DIGEST=2e095fb1db53458140769418dcd3c0cae46042a8554a94b5cb0bea86ec8811c0
@@ -38,7 +44,9 @@ RUN cd tao-core && pip install --upgrade pip setuptools wheel && python setup.py
     cp nvidia_tao_core/microservices/nginx.conf /etc/nginx/ && \
     cd .. && rm -rf tao-core
 
-COPY dist/*.whl /opt/nvidia/wheels/
+# The requirements pins and the FC video dependency script ride the same COPY as the
+# wheels: one instruction, one filesystem layer (see the layer-cap note below).
+COPY dist/*.whl docker/requirements-pip.txt release/docker/ensure_fc_video_deps.sh /opt/nvidia/wheels/
 
 # Copying tlt-converter and building it in the docker.
 # ENV TRT_LIB_PATH="/usr/lib/x86_64-linux-gnu"
@@ -64,12 +72,20 @@ ENV FLASK_APP=nvidia_tao_core.microservices.app
 
 ENV RUN_CLI=0
 
-# Install the TAO wheels, fix LD_LIBRARY_PATH ordering, and strip git metadata (NGC
-# security scan) in a SINGLE RUN layer. The base image already ships ~120 filesystem
-# layers and overlay2 caps a container at 128, so every extra RUN/COPY layer counts;
-# collapsing these three steps into one keeps the release image buildable.
+# Install the TAO wheels, enforce the FC video dependency contract, fix LD_LIBRARY_PATH
+# ordering, and strip git metadata (NGC security scan) in a SINGLE RUN layer. The base
+# image already ships ~120 filesystem layers and overlay2 caps a container at 128, so
+# every extra RUN/COPY layer counts; collapsing these steps into one keeps the release
+# image buildable.
+#
+# ensure_fc_video_deps.sh makes av/onnxscript match docker/requirements-pip.txt on
+# WHATEVER base this build was handed: PyAV is source-built against the base's
+# restricted FFmpeg (never the PyPI wheel, which bundles libx264/libx265 -- TAO-2183),
+# onnxscript is pinned, decord is removed, and the result is verified. A base without
+# the restricted FFmpeg fails the build with an actionable message.
 RUN cd /opt/nvidia/wheels && ls ./*.whl | xargs -I'{}' python -m pip install '{}' && rm -f *.whl && \
-    python -c 'import importlib.util; from importlib.metadata import version; import av, onnxscript; assert version("av") == "17.1.0"; assert version("onnxscript") == "0.7.1"; assert importlib.util.find_spec("decord") is None; print(f"FC video dependencies: av={av.__version__}, onnxscript={onnxscript.__version__}, decord=absent")' && \
+    bash /opt/nvidia/wheels/ensure_fc_video_deps.sh /opt/nvidia/wheels/requirements-pip.txt && \
+    rm -f /opt/nvidia/wheels/ensure_fc_video_deps.sh /opt/nvidia/wheels/requirements-pip.txt && \
     ARCH_LIB_PATH="/usr/lib/$(uname -m)-linux-gnu" && \
     sed -i "s|export LD_LIBRARY_PATH=${ARCH_LIB_PATH}:\${LD_LIBRARY_PATH}|export LD_LIBRARY_PATH=\${LD_LIBRARY_PATH}:${ARCH_LIB_PATH}|g" /etc/bash.bashrc && \
     { find / -type d -name ".git" -exec rm -rf {} + 2>/dev/null; \
