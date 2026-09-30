@@ -458,3 +458,26 @@ class TestExportHelpers:
 
         assert not output_file.exists()
         assert config_file.read_text(encoding="utf-8") == "existing"
+
+
+@pytest.mark.multimodal_unit
+class TestExportOutputNaming:
+    """The onnx_file contract documented on VideoCLIPExportConfig.onnx_file."""
+
+    def test_separate_derives_vision_and_text_files_from_the_full_path(self, tmp_path):
+        """onnx_file keeps its extension; separate exports <stem>_vision/<stem>_text."""
+        output_file = tmp_path / "model.onnx"
+        artifacts = export_module._expected_export_artifacts(SimpleNamespace(
+            checkpoint="model.ckpt", onnx_file=str(output_file), encoder_type="separate",
+        ))
+        assert str(tmp_path / "model_vision.onnx") in artifacts
+        assert str(tmp_path / "model_text.onnx") in artifacts
+        assert str(output_file) not in artifacts
+
+    def test_none_onnx_file_defaults_to_checkpoint_stem(self, tmp_path):
+        """A null onnx_file writes <checkpoint stem>.onnx for the combined export."""
+        checkpoint = tmp_path / "run" / "model.ckpt"
+        artifacts = export_module._expected_export_artifacts(SimpleNamespace(
+            checkpoint=str(checkpoint), onnx_file=None, encoder_type="combined",
+        ))
+        assert str(tmp_path / "run" / "model.onnx") in artifacts
