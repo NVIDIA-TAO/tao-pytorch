@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="540" viewBox="0 0 980 540" role="img" aria-labelledby="title desc">
+  <title id="title">TAO PyTorch package module map</title>
+  <desc id="desc">The nvidia_tao_pytorch package groups domain model families over shared core infrastructure, config schemas, and backbones, with tao-core as a submodule.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#475569"/>
+    </marker>
+    <style>
+      .zone { fill: #f8fafc; stroke: #94a3b8; stroke-width: 1.2; stroke-dasharray: 6 4; rx: 12; }
+      .family { fill: #eef2ff; stroke: #4f46e5; stroke-width: 1.7; rx: 10; }
+      .shared { fill: #ecfdf5; stroke: #047857; stroke-width: 1.7; rx: 10; }
+      .config { fill: #fef3c7; stroke: #b45309; stroke-width: 1.7; rx: 10; }
+      .ext { fill: #fee2e2; stroke: #b91c1c; stroke-width: 1.7; rx: 10; }
+      .label { font: 600 15px Arial, sans-serif; fill: #111827; }
+      .small { font: 12px Arial, sans-serif; fill: #374151; }
+      .zonelabel { font: 700 13px Arial, sans-serif; fill: #64748b; letter-spacing: 1px; }
+      .path { stroke: #475569; stroke-width: 2; fill: none; marker-end: url(#arrow); }
+    </style>
+  </defs>
+
+  <text x="490" y="28" text-anchor="middle" class="label">nvidia_tao_pytorch Module Map</text>
+
+  <rect x="30" y="50" width="920" height="160" class="zone"/>
+  <text x="50" y="72" class="zonelabel">DOMAIN MODEL FAMILIES (one console command each)</text>
+
+  <rect x="55" y="90" width="250" height="100" class="family"/>
+  <text x="180" y="114" text-anchor="middle" class="label">cv/ (22 commands)</text>
+  <text x="180" y="134" text-anchor="middle" class="small">dino, rtdetr, grounding_dino,</text>
+  <text x="180" y="151" text-anchor="middle" class="small">mask2former, segformer, depth_net, ...</text>
+  <text x="180" y="168" text-anchor="middle" class="small">+ shared backbone/, backbone_v2/</text>
+
+  <rect x="335" y="90" width="200" height="100" class="family"/>
+  <text x="435" y="114" text-anchor="middle" class="label">multimodal/ + ssl/</text>
+  <text x="435" y="134" text-anchor="middle" class="small">clip, radio</text>
+  <text x="435" y="151" text-anchor="middle" class="small">dinov3, mae, nvdinov2</text>
+
+  <rect x="565" y="90" width="180" height="100" class="family"/>
+  <text x="655" y="114" text-anchor="middle" class="label">sdg/ + pointcloud/</text>
+  <text x="655" y="134" text-anchor="middle" class="small">stylegan_xl</text>
+  <text x="655" y="151" text-anchor="middle" class="small">pointpillars (pcdet fork)</text>
+
+  <rect x="775" y="90" width="150" height="100" class="config"/>
+  <text x="850" y="114" text-anchor="middle" class="label">config/</text>
+  <text x="850" y="134" text-anchor="middle" class="small">one package per task</text>
+  <text x="850" y="151" text-anchor="middle" class="small">common/ bases</text>
+  <text x="850" y="168" text-anchor="middle" class="small">utils/types.py fields</text>
+
+  <rect x="30" y="230" width="920" height="140" class="zone"/>
+  <text x="50" y="252" class="zonelabel">SHARED CORE</text>
+
+  <rect x="55" y="268" width="290" height="84" class="shared"/>
+  <text x="200" y="292" text-anchor="middle" class="label">core/entrypoint.py + hydra/</text>
+  <text x="200" y="312" text-anchor="middle" class="small">subtask discovery, GPU handling,</text>
+  <text x="200" y="329" text-anchor="middle" class="small">subprocess/torchrun launch, telemetry</text>
+
+  <rect x="375" y="268" width="280" height="84" class="shared"/>
+  <text x="515" y="292" text-anchor="middle" class="label">core/ training stack</text>
+  <text x="515" y="312" text-anchor="middle" class="small">initialize_experiments, TAOLightningModule,</text>
+  <text x="515" y="329" text-anchor="middle" class="small">callbacks/EMA, cookbooks (.tlt), distributed</text>
+
+  <rect x="685" y="268" width="240" height="84" class="shared"/>
+  <text x="805" y="292" text-anchor="middle" class="label">core/ model services</text>
+  <text x="805" y="312" text-anchor="middle" class="small">quantization backends, distillation,</text>
+  <text x="805" y="329" text-anchor="middle" class="small">evaluation registry, export helpers</text>
+
+  <rect x="30" y="390" width="920" height="130" class="zone"/>
+  <text x="50" y="412" class="zonelabel">EXTERNAL AND VENDORED SOURCES</text>
+
+  <rect x="55" y="428" width="400" height="72" class="ext"/>
+  <text x="255" y="452" text-anchor="middle" class="label">tao-core/ (git submodule)</text>
+  <text x="255" y="472" text-anchor="middle" class="small">telemetry, FTMS network configurations,</text>
+  <text x="255" y="489" text-anchor="middle" class="small">microservice integration</text>
+
+  <rect x="495" y="428" width="430" height="72" class="ext"/>
+  <text x="710" y="452" text-anchor="middle" class="label">third_party/onnx/ + vendored forks</text>
+  <text x="710" y="472" text-anchor="middle" class="small">torch.onnx.utils fork for export; pruning/ (torch-pruning);</text>
+  <text x="710" y="489" text-anchor="middle" class="small">pointcloud pcdet (OpenPCDet)</text>
+
+  <path d="M180 190 L200 268" class="path"/>
+  <path d="M435 190 L435 230 L400 268" class="path"/>
+  <path d="M655 190 L655 230 L600 268" class="path"/>
+  <path d="M850 190 L850 230 L805 268" class="path"/>
+  <path d="M255 352 L255 428" class="path"/>
+  <path d="M710 352 L710 428" class="path"/>
+</svg>
