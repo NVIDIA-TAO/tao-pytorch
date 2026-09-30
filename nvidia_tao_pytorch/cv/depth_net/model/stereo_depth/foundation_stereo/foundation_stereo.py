@@ -168,7 +168,12 @@ class FoundationStereo(nn.Module):
         Returns:
             Initial disparity and list of predicted disparities.
         """
-        batch_size = len(left_image)
+        # Use .shape[0], not len(): len() returns a Python int, which torch.onnx's
+        # tracer freezes into the graph as a constant. The left/right un-concatenation
+        # below would then be exported as Slice with literal bounds [0:1] / [1:], making
+        # a dynamic-batch ONNX valid only at the traced batch size. .shape[0] stays a
+        # traced value and is emitted as Shape/Gather, so the slices follow the real batch.
+        batch_size = left_image.shape[0]
         low_memory = low_memory or (self.args.get('low_memory', False))
         with AUTOCAST('cuda', enabled=self.args.mixed_precision):
             out, vit_feat = self.feature(torch.cat([left_image, right_image], dim=0))
