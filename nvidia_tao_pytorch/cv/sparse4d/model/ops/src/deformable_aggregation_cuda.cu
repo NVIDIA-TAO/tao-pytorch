@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 1993-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 1993-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -182,9 +182,10 @@ __global__ void deformable_aggregation_kernel(
     const int loc_offset = ((anchor_index * num_pts + pts_index) * num_cams + cam_index) << 1;
 
     const float loc_w = sample_location[loc_offset];
-    if (loc_w <= 0 || loc_w >= 1) return;
     const float loc_h = sample_location[loc_offset + 1];
-    if (loc_h <= 0 || loc_h >= 1) return;
+    // Reject unless proven valid. Comparisons against NaN are false, so the
+    // previous invalid-value checks allowed NaN locations to be accumulated.
+    if (!(loc_w > 0 && loc_w < 1 && loc_h > 0 && loc_h < 1)) return;
     
     int cam_scale_index = cam_index * num_scale + scale_index;
     const int value_offset = (batch_index * num_feat + scale_start_index[cam_scale_index]) * num_embeds + channel_index;
@@ -246,9 +247,9 @@ __global__ void deformable_aggregation_grad_kernel(
     const int loc_offset = ((anchor_index * num_pts + pts_index) * num_cams + cam_index) << 1;
 
     const float loc_w = sample_location[loc_offset];
-    if (loc_w <= 0 || loc_w >= 1) return;
     const float loc_h = sample_location[loc_offset + 1];
-    if (loc_h <= 0 || loc_h >= 1) return;
+    // Keep backward consistent with the accepted-only forward predicate.
+    if (!(loc_w > 0 && loc_w < 1 && loc_h > 0 && loc_h < 1)) return;
     
     const float grad = grad_output[anchor_index*num_embeds + channel_index];
 

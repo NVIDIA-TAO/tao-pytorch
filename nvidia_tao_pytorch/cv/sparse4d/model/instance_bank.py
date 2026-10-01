@@ -63,7 +63,8 @@ class InstanceBank(nn.Module):
         max_time_interval=2,
         reid_dims=None,
         use_temporal_align=False,
-        grid_filter=None
+        grid_filter=None,
+        reset_on_time_gap=False,
     ):
         """Initialize InstanceBank.
 
@@ -89,16 +90,21 @@ class InstanceBank(nn.Module):
         self.confidence_decay = confidence_decay
         self.max_time_interval = max_time_interval
         self.use_temporal_align = use_temporal_align
+        self.reset_on_time_gap = reset_on_time_gap
         self.time_interval = self.default_time_interval
 
         # filter out new anchors that are nearby cached anchors
-        self.grid_filter = AnchorSelector(grid_size=grid_filter) if grid_filter is not None else None
+        self.grid_filter = (
+            AnchorSelector(grid_size=grid_filter) if grid_filter is not None else None
+        )
 
         # Setup anchor handler if provided
         self.anchor_handler = anchor_handler
         if isinstance(anchor, str):
             if anchor == "":
-                logging.info("Initializing anchor with zeros. Please provide a valid anchor path.")
+                logging.info(
+                    "Initializing anchor with zeros. Please provide a valid anchor path."
+                )
                 anchor = np.zeros([num_anchor, 3])
             else:
                 anchor = np.load(anchor)
@@ -134,6 +140,19 @@ class InstanceBank(nn.Module):
 
     def reset(self):
         """Reset the InstanceBank."""
+        self.reset_temporal_state()
+        self.prev_id = 0
+        self.group_indices = None
+        self.scene_indices = None
+
+    def reset_temporal_state(self):
+        """Clear recurrent state without reusing globally allocated IDs.
+
+        Group, scene, and timestamp boundaries invalidate every cached tensor
+        and assignment. The global ID counter and current data indices
+        deliberately survive so later tracks stay globally unique and the head
+        can continue detecting future boundaries.
+        """
         self.cached_feature = None
         self.cached_anchor = None
         self.metas = None
@@ -141,9 +160,7 @@ class InstanceBank(nn.Module):
         self.confidence = None
         self.temp_confidence = None
         self.instance_id = None
-        self.prev_id = 0
-        self.group_indices = None
-        self.scene_indices = None
+        self.time_interval = self.default_time_interval
         self.reset_gt_index_mapping()
 
     def reset_gt_index_mapping(self):
@@ -154,32 +171,47 @@ class InstanceBank(nn.Module):
         self.cached_query_indices = None
 
     def reset_gt_index_mapping_by_data_indices(self, reset_flags):
-        """Reset the gt index mapping by data indices."""
-        if any(reset_flags):
-            self.gt_index_mapping = None
-            self.cached_gt_index_mapping = None
-            self.cached_query_indices = None
+        """Forget assignments only in slots crossing a data boundary."""
+        for mappings in (self.gt_index_mapping, self.cached_gt_index_mapping):
+            if mappings is not None:
+                for index, reset in enumerate(reset_flags):
+                    if reset:
+                        mappings[index] = {}
+        # Query indices remain valid for unchanged slots. Empty mappings above
+        # ensure stale indices cannot preserve assignments in changed slots.
 
     def get(self, batch_size, metas=None, dn_metas=None):
         """Get the instance feature, anchor, and re-ID feature."""
-        instance_feature = torch.tile(
-            self.instance_feature[None], (batch_size, 1, 1)
-        )
+        instance_feature = torch.tile(self.instance_feature[None], (batch_size, 1, 1))
         anchor = torch.tile(self.anchor[None], (batch_size, 1, 1))
         if self.reid_feature is not None:
-            reid_feature = torch.tile(
-                self.reid_feature[None], (batch_size, 1, 1)
-            )
+            reid_feature = torch.tile(self.reid_feature[None], (batch_size, 1, 1))
         else:
             reid_feature = None
 
-        if (
-            self.cached_anchor is not None and batch_size == self.cached_anchor.shape[0]
-        ):
+        if self.cached_anchor is not None and batch_size == self.cached_anchor.shape[0]:
             history_time = self.metas["timestamp"]
             time_interval = metas["timestamp"] - history_time
             time_interval = time_interval.to(dtype=instance_feature.dtype)
             self.mask = torch.abs(time_interval) <= self.max_time_interval
+
+            # A long gap or clip-boundary timestamp reset can otherwise carry a
+            # poisoned recurrent feature into every later clip. Keep IDs globally
+            # unique, but discard all temporal tensors when explicitly requested.
+            if self.reset_on_time_gap and not bool(torch.any(self.mask).item()):
+                self.reset_temporal_state()
+                time_interval = instance_feature.new_full(
+                    (batch_size,), self.default_time_interval
+                )
+                self.time_interval = time_interval
+                return (
+                    instance_feature,
+                    anchor,
+                    None,
+                    None,
+                    time_interval,
+                    reid_feature,
+                )
 
             if self.anchor_handler is not None:
                 if "img_metas" in metas and "T_global" in metas["img_metas"][0]:
@@ -202,7 +234,9 @@ class InstanceBank(nn.Module):
                 )[0]
 
             if (
-                self.anchor_handler is not None and dn_metas is not None and batch_size == dn_metas["dn_anchor"].shape[0]
+                self.anchor_handler is not None and
+                dn_metas is not None and
+                batch_size == dn_metas["dn_anchor"].shape[0]
             ):
                 num_dn_group, num_dn = dn_metas["dn_anchor"].shape[1:3]
                 dn_anchor = self.anchor_handler.anchor_projection(
@@ -219,7 +253,10 @@ class InstanceBank(nn.Module):
                 time_interval.new_tensor(self.default_time_interval),
             )
         else:
-            self.reset()
+            # A missing cache or batch-size change is also a temporal boundary,
+            # not a new inference run. Do not recycle instance IDs or discard the
+            # data indices that Sparse4DHead recorded for this batch.
+            self.reset_temporal_state()
             time_interval = instance_feature.new_tensor(
                 [self.default_time_interval] * batch_size
             )
@@ -255,17 +292,14 @@ class InstanceBank(nn.Module):
         if self.grid_filter is not None:
             # filter out new anchors that are nearby cached anchors
             selected_anchor, selected_feature, _ = self.grid_filter.select_top_anchors(
-                anchor, self.cached_anchor, instance_feature, confidence, N)
+                anchor, self.cached_anchor, instance_feature, confidence, N
+            )
         else:
             _, (selected_feature, selected_anchor), _ = topk(
                 confidence, N, instance_feature, anchor
             )
-        selected_feature = torch.cat(
-            [self.cached_feature, selected_feature], dim=1
-        )
-        selected_anchor = torch.cat(
-            [self.cached_anchor, selected_anchor], dim=1
-        )
+        selected_feature = torch.cat([self.cached_feature, selected_feature], dim=1)
+        selected_anchor = torch.cat([self.cached_anchor, selected_anchor], dim=1)
         instance_feature = torch.where(
             self.mask[:, None, None], selected_feature, instance_feature
         )
@@ -278,9 +312,7 @@ class InstanceBank(nn.Module):
             )
 
         if num_dn > 0:
-            instance_feature = torch.cat(
-                [instance_feature, dn_instance_feature], dim=1
-            )
+            instance_feature = torch.cat([instance_feature, dn_instance_feature], dim=1)
             anchor = torch.cat([anchor, dn_anchor], dim=1)
         return instance_feature, anchor
 
@@ -328,7 +360,8 @@ class InstanceBank(nn.Module):
         instance_id = confidence.new_full(confidence.shape, -1).long()
 
         if (
-            self.instance_id is not None and self.instance_id.shape[0] == instance_id.shape[0]
+            self.instance_id is not None and
+            self.instance_id.shape[0] == instance_id.shape[0]
         ):
             instance_id[:, : self.instance_id.shape[1]] = self.instance_id
 
@@ -352,9 +385,7 @@ class InstanceBank(nn.Module):
                 temp_conf = confidence
         else:
             temp_conf = self.temp_confidence
-        instance_id = topk(temp_conf, self.num_temp_instances, instance_id)[1][
-            0
-        ]
+        instance_id = topk(temp_conf, self.num_temp_instances, instance_id)[1][0]
         instance_id = instance_id.squeeze(dim=-1)
         self.instance_id = F.pad(
             instance_id,
@@ -373,7 +404,9 @@ class InstanceBank(nn.Module):
     def cache_gt_index_mapping(self, gt_index_mapping):
         """Cache the gt index mapping."""
         self.gt_index_mapping = gt_index_mapping
-        self.cached_gt_index_mapping = topk_gt_index_mapping(self.cached_query_indices, self.gt_index_mapping)
+        self.cached_gt_index_mapping = topk_gt_index_mapping(
+            self.cached_query_indices, self.gt_index_mapping
+        )
 
     def update_query_indices_in_cached_gt_index_mapping(self, query_indices):
         """Update the query indices in cached gt index mapping."""
@@ -383,8 +416,12 @@ class InstanceBank(nn.Module):
             query_index_mapping_c2n = {}
             for query_idx_next, query_idx_curr in enumerate(query_indices[i]):
                 query_index_mapping_c2n[int(query_idx_curr)] = query_idx_next
-            for query_idx_curr, (gt_idx, instance_id) in self.cached_gt_index_mapping[i].items():
-                gt_index_mapping_updated_batch[query_index_mapping_c2n[query_idx_curr]] = (gt_idx, instance_id)
+            for query_idx_curr, (gt_idx, instance_id) in self.cached_gt_index_mapping[
+                i
+            ].items():
+                gt_index_mapping_updated_batch[
+                    query_index_mapping_c2n[query_idx_curr]
+                ] = (gt_idx, instance_id)
             gt_index_mapping_updated.append(gt_index_mapping_updated_batch)
         self.cached_gt_index_mapping = gt_index_mapping_updated
 

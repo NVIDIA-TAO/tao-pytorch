@@ -9,12 +9,16 @@ import torch.nn as nn
 from typing import Dict
 
 from nvidia_tao_pytorch.cv.sparse4d.model.grid_mask import GridMask
-from nvidia_tao_pytorch.cv.sparse4d.model.backbone.registry import SPARSE4D_BACKBONE_REGISTRY
+from nvidia_tao_pytorch.cv.sparse4d.model.backbone.registry import (
+    SPARSE4D_BACKBONE_REGISTRY,
+)
 
 from nvidia_tao_pytorch.cv.sparse4d.model.neck import build_neck
 from nvidia_tao_pytorch.cv.sparse4d.model.sparse4d_head import build_head
 from nvidia_tao_pytorch.cv.sparse4d.model.blocks import DenseDepthNet
-from nvidia_tao_pytorch.cv.sparse4d.model.ops.deformable_aggregation import feature_maps_format
+from nvidia_tao_pytorch.cv.sparse4d.model.ops.deformable_aggregation import (
+    feature_maps_format,
+)
 
 
 class Sparse4D(nn.Module):
@@ -43,21 +47,32 @@ class Sparse4D(nn.Module):
         self.head_config = self.model_config["head"]
         self.depth_branch_config = self.model_config["depth_branch"]
         self.backbone_type = self.backbone_config["type"]
-        self.img_backbone = SPARSE4D_BACKBONE_REGISTRY.get(self.backbone_type)(out_indices=[0, 1, 2, 3], freeze_norm=True)
+        self.img_backbone = SPARSE4D_BACKBONE_REGISTRY.get(self.backbone_type)(
+            out_indices=[0, 1, 2, 3], freeze_norm=True
+        )
         del self.img_backbone.global_pool
         del self.img_backbone.fc
+        # TAO 7.2's timm checkpoint_seq uses use_reentrant=False, so activation
+        # checkpointing remains compatible with co-training parameter touching.
         self.img_backbone.set_grad_checkpointing(True)
         self.img_neck = build_neck(self.neck_config)
         self.head = build_head(self.config)
         self.use_grid_mask = self.model_config["use_grid_mask"]
         self.use_deformable_func = self.model_config["use_deformable_func"]
+        sv_aux_config = self.model_config.get("sv_aux_head", None)
+        self.sv_aux_enabled = bool(
+            sv_aux_config is not None and sv_aux_config.get("enable", False)
+        )
         depth_branch = self.model_config["depth_branch"]
         use_grid_mask = self.model_config["use_grid_mask"]
         if depth_branch is not None:
             if isinstance(depth_branch, nn.Module):
                 self.depth_branch = depth_branch
             else:
-                self.depth_branch = DenseDepthNet(embed_dims=depth_branch['embed_dims'], num_depth_layers=depth_branch['num_depth_layers'])
+                self.depth_branch = DenseDepthNet(
+                    embed_dims=depth_branch["embed_dims"],
+                    num_depth_layers=depth_branch["num_depth_layers"],
+                )
         else:
             self.depth_branch = None
 
@@ -69,32 +84,35 @@ class Sparse4D(nn.Module):
     def init_weights(self):
         """Initialize model weights."""
         # Initialize backbone
-        if hasattr(self.img_backbone, 'init_weights'):
+        if hasattr(self.img_backbone, "init_weights"):
             self.img_backbone.init_weights()
 
         # Initialize neck if present
-        if self.img_neck is not None and hasattr(self.img_neck, 'init_weights'):
+        if self.img_neck is not None and hasattr(self.img_neck, "init_weights"):
             self.img_neck.init_weights()
 
         # Initialize head
-        if hasattr(self.head, 'init_weights'):
+        if hasattr(self.head, "init_weights"):
             self.head.init_weights()
 
         # Initialize depth branch if present
-        if self.depth_branch is not None and hasattr(self.depth_branch, 'init_weights'):
+        if self.depth_branch is not None and hasattr(self.depth_branch, "init_weights"):
             self.depth_branch.init_weights()
 
-    def extract_feat(self, img, return_depth=False, metas=None):
+    def extract_feat(self, img, return_depth=False, metas=None, return_raw=False):
         """Extract features from input images.
 
         Args:
             img: Input images tensor [B, N, C, H, W] or [B*N, C, H, W]
             return_depth: Whether to return depth predictions
             metas: Additional metadata information
+            return_raw: Whether to also return pre-format FPN feature maps
 
         Returns:
             feature_maps: Extracted feature maps
             depths: Depth predictions (if return_depth=True)
+            raw_feature_maps: Pre-format ``[B, N, C, H, W]`` FPN maps when
+                ``return_raw=True``
         """
         bs = img.shape[0]
         if img.dim() == 5:  # multi-view
@@ -118,9 +136,12 @@ class Sparse4D(nn.Module):
 
         # Reshape feature maps to [batch_size, num_cams, channels, height, width]
         for i, feat in enumerate(feature_maps):
-            feature_maps[i] = torch.reshape(
-                feat, (bs, num_cams) + feat.shape[1:]
-            )
+            feature_maps[i] = torch.reshape(feat, (bs, num_cams) + feat.shape[1:])
+
+        # The deformable representation flattens cameras and spatial levels. Keep
+        # the original per-level layout for the calibration-free SV auxiliary
+        # criterion before formatting it for the Sparse4D head.
+        raw_feature_maps = list(feature_maps) if return_raw else None
 
         # Generate depth predictions if requested
         if return_depth and self.depth_branch is not None:
@@ -135,6 +156,8 @@ class Sparse4D(nn.Module):
         if self.use_deformable_func:
             feature_maps = feature_maps_format(feature_maps)
 
+        if return_raw:
+            return feature_maps, depths, raw_feature_maps
         if return_depth:
             return feature_maps, depths
         return feature_maps
@@ -153,7 +176,7 @@ class Sparse4D(nn.Module):
         # Handle case where data is passed as a dict for compatibility with dataloaders
         if metas is None and isinstance(data, dict):
             # If all data is in a single dict, extract components
-            if 'img_metas' in data:
+            if "img_metas" in data:
                 metas = data
             elif len(data) > 0:
                 metas = data
@@ -174,10 +197,18 @@ class Sparse4D(nn.Module):
             Loss dictionary
         """
         # Extract features and depth predictions
-        feature_maps, depths = self.extract_feat(img, True, metas)
+        if self.sv_aux_enabled:
+            feature_maps, depths, raw_feature_maps = self.extract_feat(
+                img, True, metas, return_raw=True
+            )
+        else:
+            feature_maps, depths = self.extract_feat(img, True, metas)
+            raw_feature_maps = None
         # Get outputs from head
         model_outs = self.head(feature_maps, metas)
 
+        if self.sv_aux_enabled:
+            return (model_outs, depths, raw_feature_maps)
         return (model_outs, depths)
 
     def forward_test(self, img, metas):
@@ -248,8 +279,6 @@ def build_model(experiment_config, export=False):
         Sparse4D model instance
     """
     # Create model instance
-    model = Sparse4D(
-        config=experiment_config
-    )
+    model = Sparse4D(config=experiment_config)
 
     return model
