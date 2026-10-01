@@ -13,6 +13,16 @@ import torchvision
 from PIL import Image
 import torch.nn.functional as F
 
+# Max rows (N) per eager F.grid_sample call in bilinear_sampler. In eager mode the
+# (N, C, 1, W) stereo sample is dispatched to cuDNN's grid sampler, which raises
+# CUDNN_STATUS_NOT_SUPPORTED above N_max = 65535 * max(1, 1024 // (roundup4(C) * roundup4(W_out)))
+# (measured fit, e.g. 196,605 rows for the FFS bp2 geo volume, C=28 and W_out=9).
+# 65,535 is the minimum of N_max over all shapes, so it is safe without per-model tuning.
+GRID_SAMPLE_MAX_ROWS = 65535
+# Historical low_memory chunk size, kept only for traced/exported graphs (ONNX/TensorRT
+# GridSample has no such limit) so the exported graph is unchanged.
+_TRACED_LOW_MEMORY_ROWS = 102400
+
 
 class InputPadder:
     """Pads images such that dimensions are divisible by a given factor."""
@@ -612,6 +622,9 @@ def bilinear_sampler(img, coords, mask=False, low_memory=False):
         low_memory (bool, optional): If True, processes the batch in smaller chunks
                                      to conserve GPU memory. This is beneficial for
                                      very large input batches. Defaults to False.
+                                     In eager mode the batch is always chunked to at
+                                     most `GRID_SAMPLE_MAX_ROWS` rows per call to stay
+                                     under the cuDNN grid sampler batch limit.
 
     Returns:
         torch.Tensor or tuple:
@@ -639,11 +652,13 @@ def bilinear_sampler(img, coords, mask=False, low_memory=False):
     # Concatenate x and y grids to form the sampling grid for F.grid_sample
     grid = torch.cat([xgrid, ygrid], dim=-1).to(img.dtype)
 
-    if low_memory:
-        B = img.shape[0]
+    tracing = torch.jit.is_tracing() or torch.onnx.is_in_onnx_export()
+    B = img.shape[0]
+    if low_memory or (not tracing and B > GRID_SAMPLE_MAX_ROWS):
+        # Process the batch in chunks (bitwise identical to a single call). Eager
+        # chunks stay under the cuDNN batch limit; traced graphs are left unchanged.
+        bs = _TRACED_LOW_MEMORY_ROWS if tracing else GRID_SAMPLE_MAX_ROWS
         out = []
-        bs = 102400  # Batch size for low memory processing
-        # Process the batch in chunks
         for b in np.arange(0, B, bs):
             tmp = F.grid_sample(img[b:b + bs], grid[b:b + bs], align_corners=True)
             out.append(tmp)
