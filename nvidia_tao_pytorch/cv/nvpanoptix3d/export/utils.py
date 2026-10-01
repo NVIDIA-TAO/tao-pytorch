@@ -5,6 +5,31 @@
 
 import torch
 
+from nvidia_tao_pytorch.cv.nvpanoptix3d.model.vggt.layers.attention import (
+    Attention,
+    MemEffAttention,
+)
+
+
+def patch_xformers_attention_for_export(model: torch.nn.Module) -> None:
+    """Patch xformers attention modules for ONNX export tracing.
+
+    xformers memory_efficient_attention relies on CUTLASS ops with
+    c10::SymInt arguments that the legacy JIT tracer cannot export.
+    For each MemEffAttention module in the model, this function replaces
+    ``forward`` with ``Attention.forward`` so export uses the
+    scaled-dot-product-attention path that is traceable.
+
+    This helper is shared by the NVPanoptix3D and NVPanoptix3Dv2 ONNX
+    exporters so both trace the same attention path.
+
+    Args:
+        model: Model tree whose MemEffAttention modules are patched in-place.
+    """
+    for module in model.modules():
+        if isinstance(module, MemEffAttention):
+            module.forward = Attention.forward.__get__(module, Attention)
+
 
 def load_2d_model(model: torch.nn.Module, checkpoint_path: str, device: str) -> torch.nn.Module:
     """Load a checkpoint into the model, handling common Lightning/DDP prefixes.
