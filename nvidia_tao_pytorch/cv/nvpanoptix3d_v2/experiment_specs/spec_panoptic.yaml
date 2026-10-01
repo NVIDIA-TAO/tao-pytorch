@@ -1,0 +1,124 @@
+results_dir: /results/nvpanoptix3d_v2_panoptic
+model:
+  model_type: panoptic
+  img_size: 518
+  patch_size: 14
+  embed_dim: 1024
+  backbone:
+    pretrained_backbone_path: ""
+    metric_depth_head:
+      enable: true
+      feat_dim: 2048
+      hidden_dims: [256, 64]
+      metric_context_views: 5
+  panoptic:
+    feature_fusion:
+      dino_dim: 1024
+      vggt_dim: 2048
+      hidden_dim: 768
+      num_heads: 12
+      num_layers: 3
+      ff_dim_mult: 4
+    panoptic_decoder:
+      hidden_dim: 768
+      mask_dim: 384
+      ff_dim: 2048
+      num_queries: 200
+      num_heads: 8
+      dec_layers: 6
+      fixed_vocab: true
+      label_mode: sigmoid
+      deep_supervision: true
+      enable_objectness: true
+    upscaler:
+      input_dim: 768
+      dim: 384
+      output_stride: 2
+      patch_size: 14
+      color_feats: true
+      n_freqs: 20
+      num_heads: 4
+      num_layers: 2
+train:
+  num_gpus: 8
+  gpu_ids: [0, 1, 2, 3, 4, 5, 6, 7]
+  num_nodes: 1
+  seed: 42
+  num_epochs: 50
+  val_check_interval: 1.0
+  accum_iter: 1
+  lr: 1.0e-4
+  min_lr: 1.0e-6
+  weight_decay: 0.05
+  warmup_epochs: 2
+  precision: fp32
+  is_dry_run: false
+  checkpointer:
+    enable_topk: true
+    monitor: val/mAP
+    save_top_k: 2
+  pretrained_model_path: null
+  cudnn:
+    benchmark: true
+    deterministic: false
+  metric_depth:
+    weight: 5.0
+    silog_weight: 1.0
+    absrel_weight: 0.1
+    silog_lambda: 0.85
+    min_depth: 0.1
+    max_depth: 30.0
+  panoptic:
+    class_weight: 2.0
+    rank_weight: 0.5
+    objectness_weight: 1.0
+    objectness_no_object_weight: 0.1
+    objectness_ignore_overlap_threshold: 0.5
+    mask_weight: 20.0
+    dice_weight: 1.0
+    num_loss_points: 12288
+dataset:
+  panoptic:
+    train_preprocessed_root: /workspace/nvpanoptix3d_v2/data/pre_scannetpp_v2
+    val_preprocessed_root: /workspace/nvpanoptix3d_v2/data/pre_scannetpp_v2_val
+    photometric_augmentation:
+      enabled: true
+      color_jitter_prob: 0.8
+      brightness: 0.10
+      contrast: 0.10
+      saturation: 0.15
+      gamma_exposure_prob: 0.5
+      gamma: 0.10
+      exposure_ev: 0.15
+      grayscale_prob: 0.05
+    num_views: 5
+    randomize_view_order: true
+    pairs_per_scene: 50
+    batch_size: 1
+    resolution:
+      - [518, 518]
+      - [518, 378]
+      - [518, 322]
+evaluate:
+  checkpoint: /results/nvpanoptix3d_v2/train/nvpanoptix3d_v2_panoptic_model_latest.pth
+  num_gpus: 1
+  gpu_ids: [0]
+  cls_threshold: 0.1
+  mask_threshold: 0.25
+  overlap_threshold: 0.5
+inference:
+  checkpoint: /results/nvpanoptix3d_v2/train/nvpanoptix3d_v2_panoptic_model_latest.pth
+  num_gpus: 1
+  gpu_ids: [0]
+  output_dir: null
+  cls_threshold: 0.1
+  mask_threshold: 0.25
+  overlap_threshold: 0.5
+  categories_json: null
+export:
+  checkpoint: /results/nvpanoptix3d_v2/train/nvpanoptix3d_v2_panoptic_model_latest.pth
+  onnx_file: ""
+  categories_json: null
+  input_width: 518
+  input_height: 518
+  num_views: 5
