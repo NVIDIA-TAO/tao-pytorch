@@ -11,6 +11,34 @@ from scipy.ndimage import zoom
 from typing import Dict, Tuple
 
 
+LTT_BOX2D_KEY = "gt_boxes_2d_visible"
+
+
+def transform_boxes_xyxy(boxes_xyxy, transform, img_w=None, img_h=None):
+    """Apply an affine homography to xyxy boxes and return their new AABBs."""
+    boxes_xyxy = np.asarray(boxes_xyxy, dtype=np.float64)
+    if boxes_xyxy.size == 0:
+        return boxes_xyxy.astype(np.float32).reshape(-1, 4)
+
+    matrix = np.asarray(transform, dtype=np.float64)[:3, :3]
+    x_min, y_min, x_max, y_max = boxes_xyxy.T
+    x_corners = np.stack([x_min, x_max, x_min, x_max], axis=1)
+    y_corners = np.stack([y_min, y_min, y_max, y_max], axis=1)
+    corners = np.stack([x_corners, y_corners, np.ones_like(x_corners)], axis=1)
+    transformed = np.einsum("ij,njk->nik", matrix, corners)
+    scale = np.clip(transformed[:, 2, :], 1e-6, None)
+    x_out = transformed[:, 0, :] / scale
+    y_out = transformed[:, 1, :] / scale
+    boxes_out = np.stack(
+        [x_out.min(1), y_out.min(1), x_out.max(1), y_out.max(1)], axis=1
+    )
+    if img_w is not None:
+        boxes_out[:, [0, 2]] = np.clip(boxes_out[:, [0, 2]], 0.0, float(img_w))
+    if img_h is not None:
+        boxes_out[:, [1, 3]] = np.clip(boxes_out[:, [1, 3]], 0.0, float(img_h))
+    return boxes_out.astype(np.float32)
+
+
 def normalize_image(img, mean, std, to_rgb=True):
     """Normalize an image with mean and std.
 
@@ -24,7 +52,9 @@ def normalize_image(img, mean, std, to_rgb=True):
         Normalized image
     """
     # Apply normalization
-    assert img.dtype != np.uint8, f"img.dtype: {img.dtype} != np.uint8, Image is not uint8"
+    assert (
+        img.dtype != np.uint8
+    ), f"img.dtype: {img.dtype} != np.uint8, Image is not uint8"
     mean = np.float64(mean.reshape(1, -1))
     stdinv = 1 / np.float64(std.reshape(1, -1))
     if to_rgb:
@@ -54,10 +84,20 @@ class ResizeCropFlipImage:
         imgs = results["img"]
         N = len(imgs)
         new_imgs = []
+        has_ltt_boxes = LTT_BOX2D_KEY in results and results[LTT_BOX2D_KEY] is not None
+        ltt_boxes = (
+            np.asarray(results[LTT_BOX2D_KEY], dtype=np.float32)
+            if has_ltt_boxes
+            else None
+        )
+        has_detections = (
+            "det_boxes_2d" in results and results["det_boxes_2d"] is not None
+        )
 
         for i in range(N):
             img, mat = self._img_transform(np.uint8(imgs[i]), aug_config)
-            new_imgs.append(np.array(img).astype(np.float32))
+            transformed_image = np.array(img).astype(np.float32)
+            new_imgs.append(transformed_image)
 
             if "lidar2img" in results:
                 results["lidar2img"][i] = mat @ results["lidar2img"][i]
@@ -65,12 +105,32 @@ class ResizeCropFlipImage:
             if "cam_intrinsic" in results:
                 results["cam_intrinsic"][i][:3, :3] *= aug_config["resize"]
 
+            image_height, image_width = transformed_image.shape[:2]
+            if has_ltt_boxes and ltt_boxes.shape[0] > 0:
+                ltt_boxes[:, i, :] = transform_boxes_xyxy(
+                    ltt_boxes[:, i, :],
+                    mat,
+                    img_w=image_width,
+                    img_h=image_height,
+                )
+            if has_detections and len(results["det_boxes_2d"][i]) > 0:
+                results["det_boxes_2d"][i] = transform_boxes_xyxy(
+                    results["det_boxes_2d"][i],
+                    mat,
+                    img_w=image_width,
+                    img_h=image_height,
+                )
+
         results["img"] = new_imgs
         results["img_shape"] = [x.shape[:2] for x in new_imgs]
+        if has_ltt_boxes:
+            results[LTT_BOX2D_KEY] = ltt_boxes
 
         return results
 
-    def _img_transform(self, img: np.ndarray, aug_configs: Dict) -> Tuple[Image.Image, np.ndarray]:
+    def _img_transform(
+        self, img: np.ndarray, aug_configs: Dict
+    ) -> Tuple[Image.Image, np.ndarray]:
         """Transform a single image.
 
         Args:
@@ -124,11 +184,13 @@ class ResizeCropFlipImage:
 
         # Apply rotation
         rotate_rad = rotate / 180 * np.pi
-        rot_matrix = np.array([
-            [np.cos(rotate_rad), np.sin(rotate_rad), 0],
-            [-np.sin(rotate_rad), np.cos(rotate_rad), 0],
-            [0, 0, 1]
-        ])
+        rot_matrix = np.array(
+            [
+                [np.cos(rotate_rad), np.sin(rotate_rad), 0],
+                [-np.sin(rotate_rad), np.cos(rotate_rad), 0],
+                [0, 0, 1],
+            ]
+        )
         rot_center = np.array([crop[2] - crop[0], crop[3] - crop[1]]) / 2
         rot_matrix[:2, 2] = -rot_matrix[:2, :2] @ rot_center + rot_center
         transform_matrix = rot_matrix @ transform_matrix
@@ -235,12 +297,14 @@ class BBoxRotation:
         rot_sin = np.sin(angle)
 
         # Create rotation matrix
-        rot_mat = np.array([
-            [rot_cos, -rot_sin, 0, 0],
-            [rot_sin, rot_cos, 0, 0],
-            [0, 0, 1, 0],
-            [0, 0, 0, 1]
-        ])
+        rot_mat = np.array(
+            [
+                [rot_cos, -rot_sin, 0, 0],
+                [rot_sin, rot_cos, 0, 0],
+                [0, 0, 1, 0],
+                [0, 0, 0, 1],
+            ]
+        )
         rot_mat_inv = np.linalg.inv(rot_mat)
 
         # Apply rotation to camera projections
@@ -248,6 +312,14 @@ class BBoxRotation:
             num_view = len(results["lidar2img"])
             for view in range(num_view):
                 results["lidar2img"][view] = results["lidar2img"][view] @ rot_mat_inv
+
+        # This matrix is named after its source annotation field but follows the
+        # same ego-to-camera convention as lidar2img. Rotate its ego frame too.
+        if "cam2world_transform" in results:
+            for view in range(len(results["cam2world_transform"])):
+                results["cam2world_transform"][view] = (
+                    results["cam2world_transform"][view] @ rot_mat_inv
+                )
 
         # Apply rotation to global transform
         if "lidar2global" in results:
@@ -275,11 +347,7 @@ class BBoxRotation:
 
         rot_cos = np.cos(angle)
         rot_sin = np.sin(angle)
-        rot_mat_T = np.array([
-            [rot_cos, rot_sin, 0],
-            [-rot_sin, rot_cos, 0],
-            [0, 0, 1]
-        ])
+        rot_mat_T = np.array([[rot_cos, rot_sin, 0], [-rot_sin, rot_cos, 0], [0, 0, 1]])
 
         # Rotate center coordinates
         bbox_3d[:, :3] = bbox_3d[:, :3] @ rot_mat_T
@@ -343,9 +411,7 @@ class PhotoMetricDistortionMultiViewImage:
             )
             # random brightness
             if random.randint(2):
-                delta = random.uniform(
-                    -self.brightness_delta, self.brightness_delta
-                )
+                delta = random.uniform(-self.brightness_delta, self.brightness_delta)
                 img += delta
 
             # mode == 0 --> do random contrast first
@@ -353,9 +419,7 @@ class PhotoMetricDistortionMultiViewImage:
             mode = random.randint(2)
             if mode == 1:
                 if random.randint(2):
-                    alpha = random.uniform(
-                        self.contrast_lower, self.contrast_upper
-                    )
+                    alpha = random.uniform(self.contrast_lower, self.contrast_upper)
                     img *= alpha
 
             # convert color from BGR to HSV
@@ -379,9 +443,7 @@ class PhotoMetricDistortionMultiViewImage:
             # random contrast
             if mode == 0:
                 if random.randint(2):
-                    alpha = random.uniform(
-                        self.contrast_lower, self.contrast_upper
-                    )
+                    alpha = random.uniform(self.contrast_lower, self.contrast_upper)
                     img *= alpha
 
             # randomly swap channels
@@ -436,8 +498,6 @@ class NormalizeMultiviewImage:
             for img in results["img"]
         ]
 
-        results["img_norm_cfg"] = dict(
-            mean=self.mean, std=self.std, to_rgb=self.to_rgb
-        )
+        results["img_norm_cfg"] = dict(mean=self.mean, std=self.std, to_rgb=self.to_rgb)
 
         return results

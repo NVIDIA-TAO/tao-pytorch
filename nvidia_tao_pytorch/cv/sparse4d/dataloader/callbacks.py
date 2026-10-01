@@ -11,27 +11,22 @@ from nvidia_tao_pytorch.core.tlt_logging import logging
 class PklResampleCallback(Callback):
     """Re-sample pkl files at every epoch boundary.
 
-    Calls ``dataset.resample_pkls(epoch)`` every *num_iters_per_epoch*
-    global steps, then refreshes the batch sampler so it picks up the
-    new flags/groups/scenes.  DataLoader workers are restarted
-    automatically by Lightning at epoch boundaries.
+    Resampling happens after an epoch has consumed its final batch, so the next
+    epoch cannot prefetch from stale worker-side dataset copies. The training
+    entrypoint reloads the DataLoader each epoch while this callback is active.
 
     Args:
-        num_iters_per_epoch: Trigger interval in global steps.
+        num_iters_per_epoch: Historical step-count argument retained for
+            compatibility and diagnostics.
     """
 
     def __init__(self, num_iters_per_epoch):
         super().__init__()
         self.num_iters_per_epoch = num_iters_per_epoch
 
-    def on_train_batch_start(self, trainer, pl_module, batch, batch_idx):
-        """Check if we should resample at this step."""
-        global_step = trainer.global_step
-        if global_step == 0 or global_step % self.num_iters_per_epoch != 0:
-            return
-
-        current_epoch = global_step // self.num_iters_per_epoch
-
+    def on_train_epoch_end(self, trainer, pl_module):
+        """Resample before Lightning constructs the next epoch's DataLoader."""
+        current_epoch = int(trainer.current_epoch) + 1
         train_dataloader = trainer.train_dataloader
         if train_dataloader is None:
             return
@@ -42,10 +37,21 @@ class PklResampleCallback(Callback):
 
         logging.info(
             f"[PklResampleCallback] Resampling pkl files for epoch {current_epoch} "
-            f"at step {global_step}"
+            f"after step {trainer.global_step}"
         )
         dataset.resample_pkls(current_epoch)
 
         batch_sampler = train_dataloader.batch_sampler
         if hasattr(batch_sampler, "update_from_dataset"):
             batch_sampler.update_from_dataset()
+
+        # Persistent-worker DataLoaders cache their iterator on the loader.
+        # Explicitly retire it once; Lightning will build a fresh loader/iterator
+        # for the next epoch.
+        # Private PyTorch API: verified against TAO's 2.11.0a0 nv26.03 runtime.
+        # Recheck this retirement path when upgrading the container/PyTorch.
+        iterator = getattr(train_dataloader, "_iterator", None)
+        if iterator is not None and hasattr(iterator, "_shutdown_workers"):
+            iterator._shutdown_workers()
+        if hasattr(train_dataloader, "_iterator"):
+            train_dataloader._iterator = None

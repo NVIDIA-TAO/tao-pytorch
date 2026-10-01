@@ -28,10 +28,18 @@ from spatialai_data_utils.eval.detection.data_classes import DetectionConfig
 from spatialai_data_utils.eval.tracking.data_classes import TrackingConfig
 from spatialai_data_utils.visualization import COLOR_MAP
 from spatialai_data_utils.core.boxes.aicity_box import AICityBox
-from spatialai_data_utils.converters.nusc_results_to_nvschema import convert_sparse4d_to_nvschema
+from spatialai_data_utils.converters.nusc_results_to_nvschema import (
+    convert_sparse4d_to_nvschema,
+)
 
 from nvidia_tao_pytorch.core.tlt_logging import logging
 from nvidia_tao_pytorch.cv.sparse4d.model.box3d import W, L, H, YAW
+
+
+_GENERATED_ANNOTATION_CACHE_FILENAMES = {
+    "_lazy_index.pkl",
+    "_pkl_cam_counts.pkl",
+}
 
 
 class Omniverse3DDetTrackDataset(Dataset):
@@ -46,36 +54,42 @@ class Omniverse3DDetTrackDataset(Dataset):
     }
     ID_COLOR_MAP = [c[::-1] for c in COLOR_MAP]  # rgb to bgr
 
-    def __init__(self,
-                 data_root: str,
-                 anno_file: str,
-                 classes: List[str],
-                 class_config=None,
-                 load_interval: int = 1,
-                 max_frames: int = -1,
-                 max_cameras: int = -1,
-                 with_velocity: bool = True,
-                 modality: Dict = None,
-                 test_mode: bool = False,
-                 use_valid_flag: bool = False,
-                 augmentation: Dict = None,
-                 sequences_split_num: int = 1,
-                 with_seq_flag: bool = False,
-                 keep_consistent_seq_aug: bool = True,
-                 tracking: bool = False,
-                 tracking_threshold: float = 0.2,
-                 same_scene_in_batch: bool = True,
-                 frame_drop_prob: float = 0,
-                 fps_drop_prob: float = 0,
-                 target_fps_choices: List[int] = None,
-                 transforms=None,
-                 train_dataset_cfg: Dict = None,
-                 lazy_load: bool = False,
-                 lazy_load_cache_size: int = 50,
-                 pkl_sample_size: int = 0,
-                 pkl_cam_counts_path: str = None,
-                 eval_dist_fcn: str = "iou_3d",
-                 eval_hota: bool = True):
+    def __init__(
+        self,
+        data_root: str,
+        anno_file: str,
+        classes: List[str],
+        class_config=None,
+        load_interval: int = 1,
+        max_frames: int = -1,
+        max_cameras: int = -1,
+        with_velocity: bool = True,
+        modality: Dict = None,
+        test_mode: bool = False,
+        use_valid_flag: bool = False,
+        augmentation: Dict = None,
+        sequences_split_num: int = 1,
+        with_seq_flag: bool = False,
+        keep_consistent_seq_aug: bool = True,
+        tracking: bool = False,
+        tracking_threshold: float = 0.2,
+        same_scene_in_batch: bool = True,
+        frame_drop_prob: float = 0,
+        fps_drop_prob: float = 0,
+        target_fps_choices: List[int] = None,
+        transforms=None,
+        train_dataset_cfg: Dict = None,
+        lazy_load: bool = False,
+        lazy_load_cache_size: int = 50,
+        pkl_sample_size: int = 0,
+        pkl_cam_counts_path: str = None,
+        eval_dist_fcn: str = "iou_3d",
+        eval_hota: bool = True,
+        sync_route: bool = False,
+        real_scene_keywords: List[str] = None,
+        real_block_prob: float = None,
+        scene_switch_iters: int = 0,
+    ):
         """Initialize Sparse4D dataset.
 
         Args:
@@ -104,9 +118,13 @@ class Omniverse3DDetTrackDataset(Dataset):
             lazy_load: Defer pkl loading to __getitem__ using a pre-built index
             lazy_load_cache_size: Max number of pkl files held in the LRU cache
             pkl_sample_size: If >0, sample this many pkl files per epoch (balanced by camera count)
-            pkl_cam_counts_path: Path to pickle mapping pkl_path -> num_cameras
+            pkl_cam_counts_path: Optional override for the embedded pkl_path -> num_cameras mapping
             eval_dist_fcn: Distance function for evaluation: "center_distance", "iou_3d", or "both"
             eval_hota: Whether to run HOTA tracking evaluation
+            sync_route: Keep all distributed ranks on the same supervision route
+            real_scene_keywords: Scene-name markers for real 2D-supervised data
+            real_block_prob: Probability of drawing a real-scene distributed block
+            scene_switch_iters: Fixed number of iterations before switching scenes
         """
         self.data_root = data_root
         self.anno_file = anno_file
@@ -114,7 +132,9 @@ class Omniverse3DDetTrackDataset(Dataset):
         self.max_frames = max_frames
         self.max_cameras = max_cameras
         self.with_velocity = with_velocity
-        self.modality = modality if modality else {'use_camera': True, 'use_lidar': False}
+        self.modality = (
+            modality if modality else {"use_camera": True, "use_lidar": False}
+        )
         self.test_mode = test_mode
         self.use_valid_flag = use_valid_flag
         self.augmentation = augmentation
@@ -127,15 +147,35 @@ class Omniverse3DDetTrackDataset(Dataset):
         self.same_scene_in_batch = same_scene_in_batch
         self.frame_drop_prob = frame_drop_prob
         self.fps_drop_prob = fps_drop_prob
-        self.target_fps_choices = target_fps_choices if target_fps_choices is not None else [30, 20, 15, 10, 6, 5, 3, 2, 1]
+        self.target_fps_choices = (
+            target_fps_choices
+            if target_fps_choices is not None
+            else [30, 20, 15, 10, 6, 5, 3, 2, 1]
+        )
         self.train_dataset_cfg = train_dataset_cfg
         self.lazy_load = lazy_load
         self.lazy_load_cache_size = lazy_load_cache_size
         self.pkl_sample_size = pkl_sample_size
         self.pkl_cam_counts_path = pkl_cam_counts_path
+        if self.pkl_sample_size > 0 and not self.lazy_load:
+            raise ValueError("pkl_sample_size > 0 requires lazy_load=True")
         self.eval_dist_fcn = eval_dist_fcn
         self.eval_hota = eval_hota
+        # Preserve the historical alias used by annotation loading and by the
+        # sampler's optional sidecar discovery.
         self.ann_file = self.anno_file
+        self.sync_route = bool(sync_route)
+        self.real_scene_keywords = list(real_scene_keywords or [])
+        if real_block_prob is not None and float(real_block_prob) != -1.0 and not (
+            0.0 <= float(real_block_prob) <= 1.0
+        ):
+            raise ValueError("real_block_prob must be exactly -1 (auto) or in [0, 1]")
+        self.real_block_prob = (
+            None
+            if real_block_prob is None or float(real_block_prob) == -1.0
+            else float(real_block_prob)
+        )
+        self.scene_switch_iters = int(scene_switch_iters)
 
         # Initialize class-related attributes based on class_config or classes input
         if class_config is not None:
@@ -147,15 +187,21 @@ class Omniverse3DDetTrackDataset(Dataset):
             self.DefaultAttribute = {}
             static_like_keywords = ["box", "pallet", "crate", "basket"]
             for cls_name in self.CLASSES:
-                is_static = any(keyword in cls_name.lower() for keyword in static_like_keywords)
-                self.DefaultAttribute[cls_name] = f"{cls_name}.{'static' if is_static else 'moving'}"
+                is_static = any(
+                    keyword in cls_name.lower() for keyword in static_like_keywords
+                )
+                self.DefaultAttribute[
+                    cls_name
+                ] = f"{cls_name}.{'static' if is_static else 'moving'}"
 
             # Dynamically create CLASS_RANGE (e.g., default all to 40)
             # use dict.fromkeys()
             self.CLASS_RANGE = dict.fromkeys(self.CLASSES, 40)
             # Dynamically create PRETTY_CLASS_NAMES (PascalCase from various inputs)
             self.PRETTY_CLASS_NAMES = {
-                cls_name: "".join(word.capitalize() for word in cls_name.replace('-', '_').split('_'))
+                cls_name: "".join(
+                    word.capitalize() for word in cls_name.replace("-", "_").split("_")
+                )
                 for cls_name in self.CLASSES
             }
         self.cat2id = {name: i for i, name in enumerate(self.CLASSES)}
@@ -169,7 +215,7 @@ class Omniverse3DDetTrackDataset(Dataset):
             "min_recall": 0.1,
             "min_precision": 0.1,
             "max_boxes_per_sample": 500,
-            "mean_ap_weight": 5
+            "mean_ap_weight": 5,
         }
         self.TrackConfigs = {
             "tracking_names": self.CLASSES,
@@ -180,11 +226,25 @@ class Omniverse3DDetTrackDataset(Dataset):
             "min_recall": 0.1,
             "max_boxes_per_sample": 500,
             "metric_worst": {
-                "amota": 0.0, "amotp": 2.0, "recall": 0.0, "motar": 0.0, "mota": 0.0, "motp": 2.0,
-                "mt": 0.0, "ml": -1.0, "faf": 500, "gt": -1, "tp": 0.0, "fp": -1.0, "fn": -1.0,
-                "ids": -1.0, "frag": -1.0, "tid": 20, "lgd": 20
+                "amota": 0.0,
+                "amotp": 2.0,
+                "recall": 0.0,
+                "motar": 0.0,
+                "mota": 0.0,
+                "motp": 2.0,
+                "mt": 0.0,
+                "ml": -1.0,
+                "faf": 500,
+                "gt": -1,
+                "tp": 0.0,
+                "fp": -1.0,
+                "fn": -1.0,
+                "ids": -1.0,
+                "frag": -1.0,
+                "tid": 20,
+                "lgd": 20,
             },
-            "num_thresholds": 40
+            "num_thresholds": 40,
         }
 
         # Initialize lazy loading data structures
@@ -226,7 +286,9 @@ class Omniverse3DDetTrackDataset(Dataset):
         return len(self.data_infos)
 
     def _set_global_configs(self, class_config):
-        assert len(class_config["CLASS_LIST"]) > 0, "CLASS_LIST in class_config cannot be empty"
+        assert (
+            len(class_config["CLASS_LIST"]) > 0
+        ), "CLASS_LIST in class_config cannot be empty"
         self.CLASSES = class_config["CLASS_LIST"]
         self.CLASS_RANGE = class_config["CLASS_RANGE_DICT"]
         self.DefaultAttribute = class_config["ATTRIBUTE_DICT"]
@@ -262,10 +324,23 @@ class Omniverse3DDetTrackDataset(Dataset):
             "min_recall": 0.1,
             "max_boxes_per_sample": 500,
             "metric_worst": {
-                "amota": 0.0, "amotp": 1.0, "recall": 0.0, "motar": 0.0,
-                "mota": 0.0, "motp": 1.0, "mt": 0.0, "ml": -1.0, "faf": 500,
-                "gt": -1, "tp": 0.0, "fp": -1.0, "fn": -1.0, "ids": -1.0,
-                "frag": -1.0, "tid": 20, "lgd": 20,
+                "amota": 0.0,
+                "amotp": 1.0,
+                "recall": 0.0,
+                "motar": 0.0,
+                "mota": 0.0,
+                "motp": 1.0,
+                "mt": 0.0,
+                "ml": -1.0,
+                "faf": 500,
+                "gt": -1,
+                "tp": 0.0,
+                "fp": -1.0,
+                "fn": -1.0,
+                "ids": -1.0,
+                "frag": -1.0,
+                "tid": 20,
+                "lgd": 20,
             },
             "num_thresholds": 40,
         }
@@ -307,7 +382,8 @@ class Omniverse3DDetTrackDataset(Dataset):
                                     bin_counts[curr_flag] / self.sequences_split_num
                                 ),
                             )
-                        ) + [bin_counts[curr_flag]]
+                        ) +
+                        [bin_counts[curr_flag]]
                     )
 
                     for sub_seq_idx in (
@@ -321,9 +397,7 @@ class Omniverse3DDetTrackDataset(Dataset):
                 assert (
                     len(np.bincount(new_flags)) <=
                     len(np.bincount(self.flag)) * self.sequences_split_num
-                ), (
-                    f"{len(np.bincount(new_flags))} > {len(np.bincount(self.flag))} * {self.sequences_split_num}"
-                )
+                ), f"{len(np.bincount(new_flags))} > {len(np.bincount(self.flag))} * {self.sequences_split_num}"
                 self.flag = np.array(new_flags, dtype=np.int64)
 
         for data_idx in range(len(self.data_infos)):
@@ -343,7 +417,10 @@ class Omniverse3DDetTrackDataset(Dataset):
             resize = np.random.uniform(*self.augmentation["resize_lim"])
             resize_dims = (int(W * resize), int(H * resize))
             newW, newH = resize_dims
-            crop_h = (int((1 - np.random.uniform(* self.augmentation["bot_pct_lim"])) * newH) - fH)
+            crop_h = (
+                int((1 - np.random.uniform(*self.augmentation["bot_pct_lim"])) * newH) -
+                fH
+            )
             crop_w = int(np.random.uniform(0, max(0, newW - fW)))
             crop = (crop_w, crop_h, crop_w + fW, crop_h + fH)
             flip = False
@@ -355,7 +432,7 @@ class Omniverse3DDetTrackDataset(Dataset):
             resize = max(fH / H, fW / W)
             resize_dims = (int(W * resize), int(H * resize))
             newW, newH = resize_dims
-            crop_h = (int((1 - np.mean(self.augmentation["bot_pct_lim"])) * newH) - fH)
+            crop_h = int((1 - np.mean(self.augmentation["bot_pct_lim"])) * newH) - fH
             crop_w = int(max(0, newW - fW) / 2)
             crop = (crop_w, crop_h, crop_w + fW, crop_h + fH)
             flip = False
@@ -408,12 +485,23 @@ class Omniverse3DDetTrackDataset(Dataset):
             - Single .pkl file: returns None (caller loads directly)
         """
         if osp.isdir(ann_file):
-            ann_files = sorted([n for n in os.listdir(ann_file) if n.endswith(".pkl")])
+            ann_files = sorted(
+                name
+                for name in os.listdir(ann_file)
+                if name.endswith(".pkl") and
+                not name.endswith("_lazy_index.pkl") and
+                name not in _GENERATED_ANNOTATION_CACHE_FILENAMES and
+                osp.isfile(osp.join(ann_file, name))
+            )
             return [osp.join(ann_file, name) for name in ann_files]
         elif ann_file.endswith(".txt"):
             with open(ann_file, "r") as f:
-                lines = [line.strip() for line in f if line.strip()]
-            return [line.split()[0] for line in lines]
+                lines = [line.strip() for line in f
+                         if line.strip() and not line.lstrip().startswith("#")]
+            paths = [osp.abspath(osp.expanduser(line.split()[0])) for line in lines]
+            if len(set(paths)) != len(paths):
+                raise ValueError("Duplicate annotation PKL paths in split")
+            return paths
         return None
 
     def _load_pkl_files(self, ann_paths):
@@ -421,11 +509,15 @@ class Omniverse3DDetTrackDataset(Dataset):
         data = {"infos": [], "metadata": {}}
         for ann_idx, ann_path in enumerate(ann_paths):
             start_time = time.time()
-            with open(ann_path, 'rb') as f:
+            with open(ann_path, "rb") as f:
                 data_scene = pickle.load(f)
 
             scene_infos = data_scene["infos"]
-            if not self.test_mode and self.fps_drop_prob > 0 and random.random() < self.fps_drop_prob:
+            if (
+                not self.test_mode and
+                self.fps_drop_prob > 0 and
+                random.random() < self.fps_drop_prob
+            ):
                 scene_infos, local_fps = self._apply_fps_drop(scene_infos)
             else:
                 local_fps = int(FPS)
@@ -447,13 +539,15 @@ class Omniverse3DDetTrackDataset(Dataset):
         if ann_paths is not None:
             data = self._load_pkl_files(ann_paths)
         else:
-            with open(ann_file, 'rb') as f:
+            with open(ann_file, "rb") as f:
                 data = pickle.load(f)
 
-        data_infos = sorted(data["infos"], key=lambda e: (e['scene_name'], e['timestamp']))
+        data_infos = sorted(
+            data["infos"], key=lambda e: (e["scene_name"], e["timestamp"])
+        )
 
         if self.max_frames > 0:
-            data_infos = data_infos[:self.max_frames]
+            data_infos = data_infos[: self.max_frames]
         if not self.test_mode and self.max_cameras > 0:
             data_infos = self.camera_sampling(data_infos)
 
@@ -479,31 +573,44 @@ class Omniverse3DDetTrackDataset(Dataset):
 
     def _get_lazy_index_cache_path(self, ann_file):
         """Get the path to the cached lazy index file."""
-        if ann_file.endswith(".txt"):
-            return ann_file.replace(".txt", "_lazy_index.pkl")
-        elif osp.isdir(ann_file):
+        if osp.isdir(ann_file):
             return osp.join(ann_file, "_lazy_index.pkl")
+        if ann_file.endswith(".txt"):
+            return f"{ann_file[:-len('.txt')]}_lazy_index.pkl"
         return None
 
     def load_annotations_lazy(self, ann_file):
         """Load annotations lazily using a pre-built index file.
 
-        The index file must be created beforehand using tools/build_lazy_index.py.
+        Build the index with tao-ds ``annotations sparse4d_prepare`` or the
+        TAO-native ``build_lazy_index`` module.
         """
         logging.info(f"** loading annotations (lazy mode) {ann_file} ...")
 
         if not (osp.isdir(ann_file) or ann_file.endswith(".txt")):
+            if self.pkl_sample_size > 0:
+                raise ValueError(
+                    "pkl_sample_size > 0 requires a lazy-loaded .txt split or "
+                    "annotation directory"
+                )
             logging.info("Single pkl file detected, falling back to normal loading")
             self.lazy_load = False
             return self.load_annotations(ann_file)
 
         cache_path = self._get_lazy_index_cache_path(ann_file)
+        prepare_hint = (
+            "In tao-ds run `annotations sparse4d_prepare -e <spec.yaml> "
+            f"operation=lazy_index lazy_index.annotation_source={ann_file}`. "
+            "The spec must supply results_dir."
+        )
 
         if not cache_path or not osp.exists(cache_path):
             raise FileNotFoundError(
                 f"Lazy index cache not found at: {cache_path}\n"
                 f"Please build the index first by running:\n"
-                f"  python tools/build_lazy_index.py {ann_file}"
+                "  python -m "
+                "nvidia_tao_pytorch.cv.sparse4d.tools.build_lazy_index "
+                f"{ann_file}\n{prepare_hint}"
             )
 
         logging.info(f"** Loading lazy index from {cache_path}")
@@ -513,26 +620,52 @@ class Omniverse3DDetTrackDataset(Dataset):
         frame_index = cached_data["frame_index"]
         self.metadata = cached_data.get("metadata", {})
         self.version = self.metadata.get("version", "unknown")
-        logging.info(f"** Loaded index with {len(frame_index)} frames in {time.time() - start_time:.2f}s")
+        logging.info(
+            f"** Loaded index with {len(frame_index)} frames in {time.time() - start_time:.2f}s"
+        )
 
-        frame_index = sorted(frame_index, key=lambda e: (e["scene_name"], e["timestamp"]))
+        frame_index = sorted(
+            frame_index, key=lambda e: (e["scene_name"], e["timestamp"])
+        )
 
         if self.max_frames > 0:
-            frame_index = frame_index[:self.max_frames]
-        frame_index = frame_index[::self.load_interval]
+            frame_index = frame_index[: self.max_frames]
+        frame_index = frame_index[:: self.load_interval]
 
         self._full_frame_index = frame_index
 
         self._pkl_cam_counts = {}
-        if self.pkl_sample_size > 0 and self.pkl_cam_counts_path:
-            if osp.exists(self.pkl_cam_counts_path):
+        if self.pkl_sample_size > 0:
+            if self.pkl_cam_counts_path:
+                if not osp.exists(self.pkl_cam_counts_path):
+                    raise FileNotFoundError(
+                        "Configured pkl_cam_counts_path does not exist: "
+                        f"{self.pkl_cam_counts_path}. {prepare_hint} "
+                        "Then remove the stale override to use embedded counts, "
+                        "or point it at the generated camera-count sidecar."
+                    )
                 with open(self.pkl_cam_counts_path, "rb") as f:
                     self._pkl_cam_counts = pickle.load(f)
-                logging.info(f"** Loaded pkl cam counts: {len(self._pkl_cam_counts)} entries")
+                logging.info(
+                    f"** Loaded pkl cam counts: {len(self._pkl_cam_counts)} entries"
+                )
             else:
-                logging.warning(f"pkl_cam_counts_path not found: {self.pkl_cam_counts_path}")
+                self._pkl_cam_counts = cached_data.get("pkl_cam_counts", {})
+                if not self._pkl_cam_counts:
+                    raise ValueError(
+                        "pkl_sample_size > 0 requires camera counts embedded in the "
+                        "lazy index or an explicit pkl_cam_counts_path. Rebuild with "
+                        "`python -m nvidia_tao_pytorch.cv.sparse4d.tools."
+                        f"build_lazy_index {ann_file}`. {prepare_hint}"
+                    )
+                logging.info(
+                    "** Loaded embedded pkl cam counts: "
+                    f"{len(self._pkl_cam_counts)} entries"
+                )
 
-        if self.pkl_sample_size > 0:
+            if not isinstance(self._pkl_cam_counts, dict):
+                raise ValueError("PKL camera-count data must be a dictionary")
+
             return self._apply_pkl_sampling(epoch=0)
 
         self._frame_index = frame_index
@@ -552,9 +685,10 @@ class Omniverse3DDetTrackDataset(Dataset):
         missing = [p for p in all_pkls if p not in self._pkl_cam_counts]
         if missing:
             raise KeyError(
-                f"{len(missing)} pkl paths in lazy index are not in pkl_cam_counts_path. "
+                f"{len(missing)} pkl paths in lazy index have no camera-count entry. "
                 f"First 5: {missing[:5]}. "
-                f"Rebuild _pkl_cam_counts.pkl or use a matching ann_file."
+                "Rebuild with tao-ds `annotations sparse4d_prepare` "
+                "(operation=lazy_index), or use a matching pkl_cam_counts_path."
             )
 
         target = min(self.pkl_sample_size, len(all_pkls))
@@ -631,15 +765,19 @@ class Omniverse3DDetTrackDataset(Dataset):
         """Build lightweight data_infos from frame_index for lazy loading."""
         data_infos = []
         for idx, entry in enumerate(frame_index):
-            data_infos.append({
-                "scene_name": entry["scene_name"],
-                "timestamp": entry["timestamp"],
-                "frame_idx": entry["frame_idx"],
-                "_lazy_idx": idx,
-            })
+            data_infos.append(
+                {
+                    "scene_name": entry["scene_name"],
+                    "timestamp": entry["timestamp"],
+                    "frame_idx": entry["frame_idx"],
+                    "_lazy_idx": idx,
+                }
+            )
 
         num_pkl_files = len({entry["pkl_path"] for entry in frame_index})
-        logging.info(f"** lazy loading complete: {len(data_infos)} frames from {num_pkl_files} pkl files")
+        logging.info(
+            f"** lazy loading complete: {len(data_infos)} frames from {num_pkl_files} pkl files"
+        )
         return data_infos
 
     def _get_full_info_lazy(self, index):
@@ -651,8 +789,14 @@ class Omniverse3DDetTrackDataset(Dataset):
         data = self._get_cached_pkl(pkl_path)
         info = data["infos"][local_idx]
 
-        if not self.test_mode and self.max_cameras > 0 and len(info.get("cams", {})) > self.max_cameras:
-            sampled_cam_names = random.sample(list(info["cams"].keys()), self.max_cameras)
+        if (
+            not self.test_mode and
+            self.max_cameras > 0 and
+            len(info.get("cams", {})) > self.max_cameras
+        ):
+            sampled_cam_names = random.sample(
+                list(info["cams"].keys()), self.max_cameras
+            )
             info = copy.copy(info)
             info["cams"] = {name: info["cams"][name] for name in sampled_cam_names}
 
@@ -662,21 +806,21 @@ class Omniverse3DDetTrackDataset(Dataset):
         """Get data info by index."""
         if self.lazy_load:
             info = self._get_full_info_lazy(index)
+            lightweight_info = self.data_infos[index]
+            group_idx = lightweight_info.get("group_idx", -1)
+            scene_idx = lightweight_info.get("scene_idx", -1)
         else:
             info = self.data_infos[index]
+            group_idx = info.get("group_idx", -1)
+            scene_idx = info.get("scene_idx", -1)
         input_dict = dict(
             sample_idx=info["token"],
             timestamp=info["timestamp"],
             scene_name=info["scene_name"],
+            frame_idx=info.get("frame_idx"),
+            group_idx=group_idx,
+            scene_idx=scene_idx,
         )
-        if "group_idx" in info:
-            input_dict["group_idx"] = info["group_idx"]
-        else:
-            input_dict["group_idx"] = -1
-        if "scene_idx" in info:
-            input_dict["scene_idx"] = info["scene_idx"]
-        else:
-            input_dict["scene_idx"] = -1
 
         if self.modality["use_camera"]:
             image_paths = []
@@ -691,13 +835,18 @@ class Omniverse3DDetTrackDataset(Dataset):
                     depthmap_paths.append(None)
                 else:
                     if isinstance(cam_info["depth_map_path"], tuple):
-                        depth_map_absolute_path = (osp.join(self.data_root, cam_info["depth_map_path"][0]), cam_info["depth_map_path"][1])
+                        depth_map_absolute_path = (
+                            osp.join(self.data_root, cam_info["depth_map_path"][0]),
+                            cam_info["depth_map_path"][1],
+                        )
                     else:
-                        depth_map_absolute_path = osp.join(self.data_root, cam_info["depth_map_path"])
+                        depth_map_absolute_path = osp.join(
+                            self.data_root, cam_info["depth_map_path"]
+                        )
                     depthmap_paths.append(depth_map_absolute_path)
                 cam_names.append(cam_type)
                 # obtain lidar to image transformation matrix
-                cam2world_transform = cam_info['sensor2world_transform']
+                cam2world_transform = cam_info["sensor2world_transform"]
                 intrinsic = copy.deepcopy(cam_info["cam_intrinsic"])
                 cam_intrinsic.append(intrinsic)
                 cam2world_transforms.append(cam2world_transform)
@@ -712,21 +861,42 @@ class Omniverse3DDetTrackDataset(Dataset):
                     depth_map_filename=depthmap_paths,
                     lidar2img=lidar2img_rts,
                     cam_intrinsic=cam_intrinsic,
+                    cam2world_transform=cam2world_transforms,
                     cam_names=cam_names,
                 )
             )
 
         if not self.test_mode:
-            annos = self.get_ann_info(index)
+            # Reuse this exact info object. In lazy mode it already contains
+            # the random camera subset selected by _get_full_info_lazy(); a
+            # second fetch here would independently resample the cameras and
+            # misalign camera-indexed annotations such as gt_visibility.
+            annos = self.get_ann_info(index, info=info)
             input_dict.update(annos)
         return input_dict
 
-    def get_ann_info(self, index):
+    def get_ann_info(self, index, info=None):
         """Get annotation info by index."""
-        if self.lazy_load:
-            info = self._get_full_info_lazy(index)
-        else:
-            info = self.data_infos[index]
+        if info is None:
+            if self.lazy_load:
+                info = self._get_full_info_lazy(index)
+            else:
+                info = self.data_infos[index]
+
+        # Real 2D-supervised frames may intentionally carry no 3D annotation.
+        # Emit shape-stable empty targets so a shared co-training pipeline can
+        # collate them while preserving an explicit route marker.
+        if info.get("gt_boxes") is None:
+            box_dims = 9 if self.with_velocity else 7
+            return dict(
+                gt_bboxes_3d=np.zeros((0, box_dims), dtype=np.float32),
+                gt_labels_3d=np.zeros((0,), dtype=np.int64),
+                gt_names=np.array([], dtype="<U32"),
+                instance_inds=np.zeros((0,), dtype=np.int64),
+                asset_inds=np.zeros((0,), dtype=np.int64),
+                has_3d_gt=False,
+            )
+
         if self.use_valid_flag:
             mask = info["valid_flag"]
         else:
@@ -751,6 +921,7 @@ class Omniverse3DDetTrackDataset(Dataset):
             gt_bboxes_3d=gt_bboxes_3d,
             gt_labels_3d=gt_labels_3d,
             gt_names=gt_names_3d,
+            has_3d_gt=True,
         )
         if "instance_inds" in info:
             instance_inds = np.array(info["instance_inds"], dtype=np.int64)[mask]
@@ -883,7 +1054,9 @@ class Omniverse3DDetTrackDataset(Dataset):
             box_list.append(box)
         return box_list
 
-    def _format_bbox(self, results, jsonfile_prefix=None, tracking=False, output_nvschema=False):
+    def _format_bbox(
+        self, results, jsonfile_prefix=None, tracking=False, output_nvschema=False
+    ):
         """Format bbox results."""
         nusc_annos = {}
         mapped_class_names = self.CLASSES
@@ -977,22 +1150,29 @@ class Omniverse3DDetTrackDataset(Dataset):
 
         os.makedirs(jsonfile_prefix, exist_ok=True)
         res_path = osp.join(jsonfile_prefix, "results_nusc.json")
-        with open(res_path, 'w') as f:
+        with open(res_path, "w") as f:
             json.dump(nusc_submissions, f)
 
         if output_nvschema:
             # only convert to nvschema when in tracking mode
             res_nvschema_path = osp.join(jsonfile_prefix, "results_nvschema")
             os.makedirs(res_nvschema_path, exist_ok=True)
-            convert_sparse4d_to_nvschema(res_path, res_nvschema_path, self.PRETTY_CLASS_NAMES)
+            convert_sparse4d_to_nvschema(
+                res_path, res_nvschema_path, self.PRETTY_CLASS_NAMES
+            )
         else:
             res_nvschema_path = None
 
         return res_path, res_nvschema_path
 
     def _evaluate_single(
-        self, result_path, result_name="img_bbox", tracking=False,
-        det_config=None, track_config=None, metric_prefix_override=None,
+        self,
+        result_path,
+        result_name="img_bbox",
+        tracking=False,
+        det_config=None,
+        track_config=None,
+        metric_prefix_override=None,
     ):
         """Evaluate single result.
 
@@ -1007,7 +1187,9 @@ class Omniverse3DDetTrackDataset(Dataset):
         output_dir = osp.join(*osp.split(result_path)[:-1])
 
         det_cfg = det_config if det_config is not None else self.det3d_eval_configs
-        trk_cfg = track_config if track_config is not None else self.track3d_eval_configs
+        trk_cfg = (
+            track_config if track_config is not None else self.track3d_eval_configs
+        )
 
         if not tracking:
             from spatialai_data_utils.eval.detection.evaluate import AIC24DetEval
@@ -1028,14 +1210,18 @@ class Omniverse3DDetTrackDataset(Dataset):
 
             metrics_path = osp.join(eval_output_dir, "metrics_summary.json")
             try:
-                with open(metrics_path, 'r') as f:
+                with open(metrics_path, "r") as f:
                     metrics = json.load(f)
             except (FileNotFoundError, json.JSONDecodeError) as e:
                 logging.error(f"Evaluation failed reading {metrics_path}: {e}")
                 return {}
 
             detail = dict()
-            metric_prefix = metric_prefix_override if metric_prefix_override else f"{result_name}_NuScenes"
+            metric_prefix = (
+                metric_prefix_override
+                if metric_prefix_override
+                else f"{result_name}_NuScenes"
+            )
             for name in self.CLASSES:
                 for k, v in metrics["label_aps"][name].items():
                     val = float(f"{v:.4f}")
@@ -1068,25 +1254,49 @@ class Omniverse3DDetTrackDataset(Dataset):
 
             metrics_path = osp.join(eval_output_dir, "metrics_summary.json")
             try:
-                with open(metrics_path, 'r') as f:
+                with open(metrics_path, "r") as f:
                     metrics = json.load(f)
             except (FileNotFoundError, json.JSONDecodeError) as e:
                 logging.error(f"Evaluation failed reading {metrics_path}: {e}")
                 return {}
 
             detail = dict()
-            metric_prefix = metric_prefix_override if metric_prefix_override else f"{result_name}_NuScenes"
+            metric_prefix = (
+                metric_prefix_override
+                if metric_prefix_override
+                else f"{result_name}_NuScenes"
+            )
             tracking_keys = [
-                "amota", "amotp", "recall", "motar", "gt", "mota", "motp",
-                "mt", "ml", "faf", "tp", "fp", "fn", "ids", "frag", "tid", "lgd",
+                "amota",
+                "amotp",
+                "recall",
+                "motar",
+                "gt",
+                "mota",
+                "motp",
+                "mt",
+                "ml",
+                "faf",
+                "tp",
+                "fp",
+                "fn",
+                "ids",
+                "frag",
+                "tid",
+                "lgd",
             ]
             for key in tracking_keys:
                 detail[f"{metric_prefix}/{key}"] = metrics[key]
 
         return detail
 
-    def _evaluate_hota(self, result_path, output_dir, eval_dist_fcn="iou_3d",
-                       metric_prefix="img_bbox_HOTA"):
+    def _evaluate_hota(
+        self,
+        result_path,
+        output_dir,
+        eval_dist_fcn="iou_3d",
+        metric_prefix="img_bbox_HOTA",
+    ):
         """Run per-class HOTA tracking evaluation.
 
         Args:
@@ -1101,7 +1311,9 @@ class Omniverse3DDetTrackDataset(Dataset):
         )
 
         if self.lazy_load:
-            data_infos = [self._get_full_info_lazy(i) for i in range(len(self.data_infos))]
+            data_infos = [
+                self._get_full_info_lazy(i) for i in range(len(self.data_infos))
+            ]
         else:
             data_infos = self.data_infos
 
@@ -1153,7 +1365,10 @@ class Omniverse3DDetTrackDataset(Dataset):
 
         if not ("pts_bbox" in results[0] or "img_bbox" in results[0]):
             result_files, _ = self._format_bbox(
-                results, jsonfile_prefix, tracking=tracking, output_nvschema=output_nvschema
+                results,
+                jsonfile_prefix,
+                tracking=tracking,
+                output_nvschema=output_nvschema,
             )
         else:
             result_files = dict()
@@ -1161,7 +1376,10 @@ class Omniverse3DDetTrackDataset(Dataset):
                 results_ = [out[name] for out in results]
                 tmp_file_ = osp.join(jsonfile_prefix, name)
                 result_files_, result_files_nvschema_ = self._format_bbox(
-                    results_, tmp_file_, tracking=tracking, output_nvschema=output_nvschema
+                    results_,
+                    tmp_file_,
+                    tracking=tracking,
+                    output_nvschema=output_nvschema,
                 )
                 result_files.update(
                     {
@@ -1171,12 +1389,19 @@ class Omniverse3DDetTrackDataset(Dataset):
                 )
 
         if show:
-            logging.info(f"\nPlotting results & saving the images to out_dir: {out_dir}\n")
-            self.show(results, save_dir=out_dir, show=show,
-                      tracking=tracking,
-                      pipeline=pipeline,
-                      vis_score_threshold=vis_score_threshold,
-                      n_images_col=n_images_col, down_sample=viz_down_sample)
+            logging.info(
+                f"\nPlotting results & saving the images to out_dir: {out_dir}\n"
+            )
+            self.show(
+                results,
+                save_dir=out_dir,
+                show=show,
+                tracking=tracking,
+                pipeline=pipeline,
+                vis_score_threshold=vis_score_threshold,
+                n_images_col=n_images_col,
+                down_sample=viz_down_sample,
+            )
 
         return result_files, tmp_dir
 
@@ -1196,11 +1421,16 @@ class Omniverse3DDetTrackDataset(Dataset):
     ):
         """Evaluate results."""
         result_files, tmp_dir = self.format_results(
-            results, jsonfile_prefix=jsonfile_prefix, tracking=True,
+            results,
+            jsonfile_prefix=jsonfile_prefix,
+            tracking=True,
             output_nvschema=output_nvschema,
-            show=show, out_dir=out_dir, pipeline=pipeline,
+            show=show,
+            out_dir=out_dir,
+            pipeline=pipeline,
             vis_score_threshold=vis_score_threshold,
-            n_images_col=n_images_col, viz_down_sample=viz_down_sample
+            n_images_col=n_images_col,
+            viz_down_sample=viz_down_sample,
         )
 
         # Determine which distance functions to evaluate
@@ -1270,7 +1500,8 @@ class Omniverse3DDetTrackDataset(Dataset):
                             res_path = result_files
                         hota_output_dir = osp.join(*osp.split(res_path)[:-1])
                         hota_detail = self._evaluate_hota(
-                            res_path, hota_output_dir,
+                            res_path,
+                            hota_output_dir,
                             eval_dist_fcn=dist_mode,
                             metric_prefix=hota_prefix,
                         )
@@ -1283,8 +1514,18 @@ class Omniverse3DDetTrackDataset(Dataset):
 
         return results_dict
 
-    def show(self, results, save_dir=None, show=False, tracking=False, pipeline=None,
-             vis_score_threshold=0.25, n_images_col=6, down_sample=3, write_video=False):
+    def show(
+        self,
+        results,
+        save_dir=None,
+        show=False,
+        tracking=False,
+        pipeline=None,
+        vis_score_threshold=0.25,
+        n_images_col=6,
+        down_sample=3,
+        write_video=False,
+    ):
         """Show results.
 
         Visualization is written as a per-frame JPEG image sequence (royalty-free). The
@@ -1341,7 +1582,9 @@ class Omniverse3DDetTrackDataset(Dataset):
                 ]
                 color = []
                 for obj_id in result["labels_3d"].cpu().numpy().tolist():
-                    color.append(self.ID_COLOR_MAP[int(obj_id % len(self.ID_COLOR_MAP))])
+                    color.append(
+                        self.ID_COLOR_MAP[int(obj_id % len(self.ID_COLOR_MAP))]
+                    )
             else:
                 pred_bboxes_3d_text = None
                 color = (255, 0, 0)
@@ -1419,7 +1662,9 @@ class Omniverse3DDetTrackDataset(Dataset):
             self._stitch_frames_to_webm(save_dir, fps=int(FPS))
 
     @staticmethod
-    def _stitch_frames_to_webm(save_dir, fps=10, pattern="%09d.jpg", out_name="video.webm"):
+    def _stitch_frames_to_webm(
+        save_dir, fps=10, pattern="%09d.jpg", out_name="video.webm"
+    ):
         """Stitch the per-frame JPEG sequence into a royalty-free VP9/WebM clip.
 
         Uses the codec-disabled ffmpeg CLI (libvpx-vp9, no audio) over the ``{i:09}.jpg``
@@ -1429,33 +1674,46 @@ class Omniverse3DDetTrackDataset(Dataset):
         """
         out_path = os.path.join(save_dir, out_name)
         cmd = [
-            "ffmpeg", "-y",
-            "-framerate", str(fps),
-            "-start_number", "0",
-            "-i", os.path.join(save_dir, pattern),
-            "-c:v", "libvpx-vp9",
-            "-pix_fmt", "yuv420p",
+            "ffmpeg",
+            "-y",
+            "-framerate",
+            str(fps),
+            "-start_number",
+            "0",
+            "-i",
+            os.path.join(save_dir, pattern),
+            "-c:v",
+            "libvpx-vp9",
+            "-pix_fmt",
+            "yuv420p",
             "-an",
             out_path,
         ]
         try:
             subprocess.run(
-                cmd, check=True,
-                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                cmd,
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
             )
         except (subprocess.CalledProcessError, FileNotFoundError) as e:
-            detail = e.stderr.decode(errors="ignore") if getattr(e, "stderr", None) else str(e)
+            detail = (
+                e.stderr.decode(errors="ignore")
+                if getattr(e, "stderr", None)
+                else str(e)
+            )
             logging.warning(
                 "VP9 video stitch failed (%s); per-frame JPEGs in %s remain the artifact.",
-                detail, save_dir,
+                detail,
+                save_dir,
             )
 
     @staticmethod
     def load_class_config_from_file(config_path):
         """Load class config from file."""
         module_name = os.path.basename(config_path)[:-3]
-        if '.' in module_name:
-            raise ValueError('Dots are not allowed in config file path.')
+        if "." in module_name:
+            raise ValueError("Dots are not allowed in config file path.")
         config_dir = os.path.dirname(config_path)
         sys.path.insert(0, config_dir)
         mod = import_module(module_name)
@@ -1463,7 +1721,7 @@ class Omniverse3DDetTrackDataset(Dataset):
         cfg_dict = {
             name: value
             for name, value in mod.__dict__.items()
-            if not name.startswith('__')
+            if not name.startswith("__")
         }
 
         CLASS_MAPPING_DICT = {}
@@ -1568,14 +1826,20 @@ class Omniverse3DDetTrackDataset(Dataset):
                     1.0,  # scale
                     (255, 255, 255),
                     3,  # thickness
-                    cv2.LINE_AA
+                    cv2.LINE_AA,
                 )
 
         return img.astype(np.uint8)
 
     @staticmethod
     def draw_lidar_bbox3d_on_img(
-        bboxes3d, bboxes3d_text, raw_img, lidar2img_rt, img_metas=None, color=(0, 255, 0), thickness=1
+        bboxes3d,
+        bboxes3d_text,
+        raw_img,
+        lidar2img_rt,
+        img_metas=None,
+        color=(0, 255, 0),
+        thickness=1,
     ):
         """Project the 3D bbox on 2D plane and draw on input image.
 
@@ -1607,7 +1871,9 @@ class Omniverse3DDetTrackDataset(Dataset):
         pts_2d[:, 1] /= pts_2d[:, 2]
         imgfov_pts_2d = pts_2d[..., :2].reshape(num_bbox, 8, 2)
 
-        return Omniverse3DDetTrackDataset.plot_rect3d_on_img(img, num_bbox, imgfov_pts_2d, bboxes3d_text, color, thickness)
+        return Omniverse3DDetTrackDataset.plot_rect3d_on_img(
+            img, num_bbox, imgfov_pts_2d, bboxes3d_text, color, thickness
+        )
 
     @staticmethod
     def draw_points_on_img(points, img, lidar2img_rt, color=(0, 255, 0), circle=4):
@@ -1619,7 +1885,8 @@ class Omniverse3DDetTrackDataset(Dataset):
         if isinstance(lidar2img_rt, torch.Tensor):
             lidar2img_rt = lidar2img_rt.cpu().numpy()
         pts_2d = (
-            np.sum(points[:, :, None] * lidar2img_rt[:3, :3], axis=-1) + lidar2img_rt[:3, 3]
+            np.sum(points[:, :, None] * lidar2img_rt[:3, :3], axis=-1) +
+            lidar2img_rt[:3, 3]
         )
         pts_2d[..., 2] = np.clip(pts_2d[..., 2], a_min=1e-5, a_max=1e5)
         pts_2d = pts_2d[..., :2] / pts_2d[..., 2:3]
@@ -1635,7 +1902,9 @@ class Omniverse3DDetTrackDataset(Dataset):
         return img.astype(np.uint8)
 
     @staticmethod
-    def draw_lidar_bbox3d_on_bev(bboxes_3d, bev_size, bev_range=115, color=(255, 0, 0), thickness=3):
+    def draw_lidar_bbox3d_on_bev(
+        bboxes_3d, bev_size, bev_range=115, color=(255, 0, 0), thickness=3
+    ):
         """Draw 3D bounding boxes on BEV."""
         if isinstance(bev_size, (list, tuple)):
             bev_h, bev_w = bev_size
@@ -1666,9 +1935,9 @@ class Omniverse3DDetTrackDataset(Dataset):
             marking_color,
         )
         if len(bboxes_3d) != 0:
-            bev_corners = Omniverse3DDetTrackDataset.box3d_to_corners(bboxes_3d)[:, [0, 3, 4, 7]][
-                ..., [0, 1]
-            ]
+            bev_corners = Omniverse3DDetTrackDataset.box3d_to_corners(bboxes_3d)[
+                :, [0, 3, 4, 7]
+            ][..., [0, 1]]
             xs = bev_corners[..., 0] / bev_resolution + bev_w / 2
             ys = -bev_corners[..., 1] / bev_resolution + bev_h / 2
             for obj_idx, (x, y) in enumerate(zip(xs, ys)):
@@ -1692,18 +1961,25 @@ class Omniverse3DDetTrackDataset(Dataset):
         vis_imgs = []
         for _, (img, lidar2img) in enumerate(zip(imgs, lidar2imgs)):
             vis_imgs.append(
-                Omniverse3DDetTrackDataset.draw_lidar_bbox3d_on_img(bboxes_3d, None, img, lidar2img, color=color)  # bboxes3d_text is None as it's not available here
+                Omniverse3DDetTrackDataset.draw_lidar_bbox3d_on_img(
+                    bboxes_3d, None, img, lidar2img, color=color
+                )  # bboxes3d_text is None as it's not available here
             )
 
         num_imgs = len(vis_imgs)
         if num_imgs < 4 or num_imgs % 2 != 0:
             vis_imgs = np.concatenate(vis_imgs, axis=1)
         else:
-            vis_imgs = np.concatenate([
-                np.concatenate(vis_imgs[:num_imgs // 2], axis=1),
-                np.concatenate(vis_imgs[num_imgs // 2:], axis=1)
-            ], axis=0)
+            vis_imgs = np.concatenate(
+                [
+                    np.concatenate(vis_imgs[: num_imgs // 2], axis=1),
+                    np.concatenate(vis_imgs[num_imgs // 2:], axis=1),
+                ],
+                axis=0,
+            )
 
-        bev = Omniverse3DDetTrackDataset.draw_lidar_bbox3d_on_bev(bboxes_3d, vis_imgs.shape[0], color=color)
+        bev = Omniverse3DDetTrackDataset.draw_lidar_bbox3d_on_bev(
+            bboxes_3d, vis_imgs.shape[0], color=color
+        )
         vis_imgs = np.concatenate([bev, vis_imgs], axis=1)
         return vis_imgs
