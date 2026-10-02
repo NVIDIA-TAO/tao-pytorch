@@ -9,6 +9,46 @@ import torch.nn.functional as F
 from nvidia_tao_pytorch.cv.depth_net.model.stereo_depth.foundation_stereo.utils import bilinear_sampler
 
 
+def _halve_last_dim(x: torch.Tensor) -> torch.Tensor:
+    """
+    Averages adjacent pairs along the last dimension, halving its size.
+
+    Equivalent to ``F.avg_pool2d(x, [1, 2], stride=[1, 2])`` on a 4-D tensor, including
+    the floor that drops a trailing odd element: a last dim of size D becomes D // 2.
+    fp32 results are bit-identical: both round the pair sum once and then halve it.
+
+    Why not avg_pool2d: the pyramids built here fold every pixel into the batch axis,
+    so the pool sees a batch of N = B * H/4 * W/4. The AveragePool kernels used by
+    TensorRT and by ONNX Runtime's CUDA EP (cuDNN) fail once N exceeds a ceiling that
+    depends on the pooled width D. It was measured at D = 48, 80 and 184 and is
+    consistent with 65535 * floor(128 / (D / 2)) there; that is a fit to three widths,
+    not a documented limit. At 480x736 input, N = 22,080 * B and the initial correlation
+    volume has D = 184, where the measured ceiling is exactly 65,535, so an exported
+    engine fails from batch 3 up (the geometry volume, D = 48, would fail from batch 15).
+    Strided slices, an add and a multiply have no such ceiling.
+
+    The slice bounds are relative (``:-1`` and open-ended), not computed from the
+    trace-time width, so an ONNX graph exported with dynamic H/W stays correct for any
+    width, even or odd.
+
+    Args:
+        x (torch.Tensor): Input tensor whose last dimension is pooled. Shape `(..., D)`.
+
+    Returns:
+        torch.Tensor: The pooled tensor. Shape `(..., D // 2)`.
+
+    Raises:
+        RuntimeError: If D < 2, which avg_pool2d also rejects. Checked in eager mode
+            only, so tracing records no data-dependent branch.
+    """
+    if not torch.jit.is_tracing() and x.shape[-1] < 2:
+        raise RuntimeError(
+            f"Cannot halve a last dimension of size {x.shape[-1]}: need at least 2 elements.")
+    # x[..., 0:-1:2] takes the even indices but stops before the last element, so for odd
+    # D the unpaired trailing element is dropped and both slices have D // 2 elements.
+    return 0.5 * (x[..., 0:-1:2] + x[..., 1::2])
+
+
 class CombinedGeoEncodingVolume:
     """
     Samples features from multiple volumes to create a multi-level encoding pyramid.
@@ -67,13 +107,15 @@ class CombinedGeoEncodingVolume:
         self.geo_volume_pyramid.append(geo_volume)
         self.init_corr_pyramid.append(init_corr)
 
-        # Build the pyramids using average pooling.
+        # Build the pyramids by halving the last dim (a [1, 2] average pool). Not
+        # F.avg_pool2d: see _halve_last_dim for the batch ceiling it hits in TensorRT and
+        # in cuDNN (ONNX Runtime CUDA EP).
         for _ in range(self.num_levels - 1):
-            geo_volume = F.avg_pool2d(geo_volume, [1, 2], stride=[1, 2])
+            geo_volume = _halve_last_dim(geo_volume)
             self.geo_volume_pyramid.append(geo_volume)
 
         for _ in range(self.num_levels - 1):
-            init_corr = F.avg_pool2d(init_corr, [1, 2], stride=[1, 2])
+            init_corr = _halve_last_dim(init_corr)
             self.init_corr_pyramid.append(init_corr)
 
     def make_ignore_mask(self, width: int):
