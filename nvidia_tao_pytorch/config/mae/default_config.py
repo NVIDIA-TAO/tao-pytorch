@@ -15,6 +15,7 @@ from nvidia_tao_pytorch.config.common.common_config import (
     InferenceConfig,
     TrainConfig,
 )
+from nvidia_tao_pytorch.config.ssl_evaluation.default_config import EvalSuiteConfig
 from nvidia_tao_pytorch.config.utils.types import (
     STR_FIELD,
     INT_FIELD,
@@ -373,6 +374,15 @@ class MAEGenTrtEngineConfig(GenTrtEngineConfig):
 
 
 @dataclass
+class MAEEvaluateExpConfig(EvaluateConfig, EvalSuiteConfig):
+    """MAE evaluate config: supervised classification test (default) PLUS the optional
+    shared embedding-quality suite (knn/segmentation/retrieval). When any suite block is
+    enabled, the evaluate action runs the core suite; otherwise the existing classification
+    test path is used.
+    """
+
+
+@dataclass
 class ExperimentConfig(CommonExperimentConfig):
     """Experiment configuration template."""
 
@@ -380,7 +390,7 @@ class ExperimentConfig(CommonExperimentConfig):
     train: MAETrainExpConfig = DATACLASS_FIELD(MAETrainExpConfig())
     model: MAEModelConfig = DATACLASS_FIELD(MAEModelConfig())
     inference: InferenceConfig = DATACLASS_FIELD(InferenceConfig())
-    evaluate: EvaluateConfig = DATACLASS_FIELD(EvaluateConfig())
+    evaluate: MAEEvaluateExpConfig = DATACLASS_FIELD(MAEEvaluateExpConfig())
     gen_trt_engine: MAEGenTrtEngineConfig = DATACLASS_FIELD(MAEGenTrtEngineConfig())
     export: ExportConfig = DATACLASS_FIELD(ExportConfig())
 
