@@ -31,6 +31,12 @@ who need to develop, debug, extend, or run the repository in containers.
 * [Integrating a New Network](new_network_integration.md): canonical checklist
   for adding a new model family to TAO PyTorch and optionally to TAO Core/FTMS.
 
+## Model Training Workflows
+
+* [Sparse4D 2D-to-3D geometric distillation](sparse4d_geometric_distillation.md): adapt
+  to calibrated multi-camera real-world scenes
+  using 2D supervision, artifact preparation, and mixed 3D/2D training.
+
 ## Diagram Format
 
 Architecture and workflow diagrams are checked in as SVG files under
