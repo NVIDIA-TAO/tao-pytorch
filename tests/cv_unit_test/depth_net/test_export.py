@@ -639,6 +639,45 @@ def _assert_batch_axis_is_dynamic(output_path, trace_batch=TRACE_BATCH, probe_ba
     )
 
 
+def _assert_no_width_halving_avg_pool(output_path):
+    """Assert the exported graph halves the geometry pyramids with slices, not a [1, 2] AveragePool.
+
+    A [1, 2] AveragePool over CombinedGeoEncodingVolume's (B*H*W, C, 1, D) layout hits the
+    batch ceiling of the TensorRT and cuDNN pool kernels. Only that kernel shape is rejected,
+    so the 3x3/s2 and 5x5/s4 pools of iterative_refinement.py are not flagged. The graph may
+    contain no AveragePool at all, so the non-vacuous check is that the _halve_last_dim
+    signature, Slice(starts=[0], ends=[-1], steps=[2]), is present.
+    """
+    from onnx import numpy_helper
+
+    graph = onnx.load(output_path, load_external_data=False).graph
+    const = {}
+    for node in graph.node:
+        if node.op_type == "Constant":
+            for attr in node.attribute:
+                if attr.name == "value":
+                    const[node.output[0]] = numpy_helper.to_array(attr.t).tolist()
+    for tensor in graph.initializer:
+        if len(tensor.dims) <= 1 and int(numpy_helper.to_array(tensor).size) <= 8:
+            const[tensor.name] = numpy_helper.to_array(tensor).tolist()
+
+    halving_slices = 0
+    for node in graph.node:
+        if node.op_type == "AveragePool":
+            kernel = next((list(attr.ints) for attr in node.attribute if attr.name == "kernel_shape"), None)
+            assert kernel != [1, 2], (
+                f"AveragePool node {node.name!r} has kernel_shape [1, 2]; the geometry pyramids must "
+                "be halved with _halve_last_dim, not F.avg_pool2d."
+            )
+        elif node.op_type == "Slice" and len(node.input) >= 5:
+            if [const.get(name) for name in (node.input[1], node.input[2], node.input[4])] == [[0], [-1], [2]]:
+                halving_slices += 1
+    assert halving_slices > 0, (
+        "no Slice(starts=[0], ends=[-1], steps=[2]) found, so the geometry pyramids were not "
+        "exported through _halve_last_dim and the AveragePool check vouches for nothing."
+    )
+
+
 @pytest.mark.cv_unit
 @pytest.mark.depth_net
 @pytest.mark.export
@@ -656,6 +695,10 @@ def test_stereo_export_batch_axis_is_really_dynamic(stereo_config, tmp_path):
     Two assertions, either of which alone would have caught the defect:
       1. no axis-0 Slice on a feature tensor carries a constant bound equal to the trace batch
       2. shape inference with the input batch pinned to 2 yields an output batch of 2
+
+    It also guards a second regression: the graph must contain no [1, 2] AveragePool, which
+    CombinedGeoEncodingVolume once emitted and which fails in TensorRT and cuDNN from batch 3
+    at 480x736.
 
     Only FastFoundationStereo is exercised. FoundationStereo shares the idiom verbatim, and has
     one more frozen site (it slices `vit_feat` as well), but exporting it needs a multiple-of-14
@@ -682,3 +725,4 @@ def test_stereo_export_batch_axis_is_really_dynamic(stereo_config, tmp_path):
         dynamic_axis=True,
     )
     _assert_batch_axis_is_dynamic(output_path)
+    _assert_no_width_halving_avg_pool(output_path)
