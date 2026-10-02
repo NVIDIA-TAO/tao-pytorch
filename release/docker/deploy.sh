@@ -19,6 +19,7 @@ BUILD_DOCKER="0"
 BUILD_WHEEL="0"
 PUSH_DOCKER="0"
 FORCE="0"
+USE_CUDA_CACHE="0"
 
 # Required for tao-core and tao-converter since they are submodules.
 if [ $SKIP_SUBMODULE_INIT = "0" ]; then
@@ -53,6 +54,10 @@ while [[ $# -gt 0 ]]
         ;;
         -f|--force)
         FORCE=1
+        shift
+        ;;
+        --use-cache)
+        USE_CUDA_CACHE="1"
         shift
         ;;
         -r|--run)
@@ -90,13 +95,33 @@ if [ $BUILD_DOCKER = "1" ]; then
           mkdir -p $wheel_dir
         fi
         echo "Building source code wheel ..."
-        # --no-tty so the wheel build works in non-interactive/CI contexts. Without it,
-        # tao_pt runs `docker run -it`, which aborts with "the input device is not a TTY".
-        # tao_pt --env 'TORCH_CUDA_ARCH_LIST="5.3 6.0 6.1 7.0 7.5 8.0 8.6 9.0"' -- bash /tao-pt/release/docker/build_wheel.sh
-        tao_pt --no-tty -- python setup.py bdist_wheel
+        # Never let an artifact from a previous invocation satisfy the build
+        # gate when tao_pt swallows the container's exit status.
+        rm -f "${wheel_dir}"/*.whl
+        if [ "$USE_CUDA_CACHE" = "1" ] && "$NV_TAO_PYTORCH_TOP/scripts/cuda_cache.sh" check; then
+            echo "Restoring cached CUDA build artifacts ..."
+            cache_build_succeeded="0"
+            if "$NV_TAO_PYTORCH_TOP/scripts/cuda_cache.sh" restore \
+                && tao_pt --no-tty -- python setup.py build_py \
+                && tao_pt --no-tty -- python setup.py bdist_wheel --skip-build \
+                && ls ${wheel_dir}/*.whl >/dev/null 2>&1; then
+                cache_build_succeeded="1"
+            fi
+            if [ "$cache_build_succeeded" = "0" ]; then
+                echo "WARNING: cached CUDA build did not produce a wheel; rebuilding from source ..."
+                rm -f "${wheel_dir}"/*.whl
+                tao_pt --no-tty -- python setup.py bdist_wheel
+                "$NV_TAO_PYTORCH_TOP/scripts/cuda_cache.sh" save
+            fi
+        else
+            tao_pt --no-tty -- python setup.py bdist_wheel
+            if [ "$USE_CUDA_CACHE" = "1" ]; then
+                "$NV_TAO_PYTORCH_TOP/scripts/cuda_cache.sh" save
+            fi
+        fi
         # tao_pt swallows the container's exit code (see runner/tao_pt.py), so verify the
         # wheel was actually produced before trying to COPY it into the image.
-        if ! ls ${wheel_dir}/*.whl >/dev/null 2>&1; then
+        if ! find "${wheel_dir}" -maxdepth 1 -type f -name '*.whl' -size +0c -print -quit | grep -q .; then
             echo "ERROR: wheel build produced no artifact in ${wheel_dir}. Aborting." >&2
             exit 1
         fi
@@ -130,5 +155,5 @@ elif [ "$RUN_DOCKER" = "1" ]; then
                           --ulimit stack=67108864 \
                           --rm -it $registry/$repository:$tag /bin/bash
 else
-    echo "Usage: ./deploy.sh [--build] [--wheel] [--run] [--push] [--default]"
+    echo "Usage: ./deploy.sh [--build] [--wheel] [--run] [--push] [--default] [--use-cache]"
 fi
