@@ -2,7 +2,7 @@
 
 For the complete real-world adaptation workflow, including TAO Data Services
 preparation, LTT fitting, training configuration, and evaluation, see
-[3D-to-2D geometric distillation](../../../../docs/sparse4d_geometric_distillation.md).
+[2D-to-3D geometric distillation](../../../../docs/sparse4d_geometric_distillation.md).
 
 Run these portable producers from the `tao-pytorch` checkout root. They import
 TAO's Loose-to-Tight geometry directly and do not require MMCV or MMDetection.

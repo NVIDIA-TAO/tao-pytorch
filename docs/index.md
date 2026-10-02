@@ -33,7 +33,7 @@ who need to develop, debug, extend, or run the repository in containers.
 
 ## Model Training Workflows
 
-* [Sparse4D geometric distillation](sparse4d_geometric_distillation.md): adapt
+* [Sparse4D 2D-to-3D geometric distillation](sparse4d_geometric_distillation.md): adapt
   to calibrated multi-camera real-world scenes
   using 2D supervision, artifact preparation, and mixed 3D/2D training.
 

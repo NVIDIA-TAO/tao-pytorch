@@ -1,13 +1,16 @@
 <!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
-# Sparse4D: 3D-to-2D geometric distillation for real-world datasets
+# Sparse4D: 2D-to-3D geometric distillation for real-world datasets
 
-Use geometric distillation to adapt Sparse4D to calibrated multi-camera
-real-world imagery with 2D annotations or detector pseudo-labels while retaining
-3D-labeled data in the training mix. Sparse4D remains a multi-camera 3D detector and tracker. Here,
-**3D-to-2D** means projecting its 3D predictions into the image plane to apply
-2D supervision; the deployed model still outputs 3D predictions.
+Use **2D-to-3D geometric distillation** to adapt Sparse4D to calibrated
+multi-camera real-world imagery with 2D annotations or detector pseudo-labels
+while retaining 3D-labeled data in the training mix. The term **2D-to-3D**
+describes the direction of supervision: 2D targets supervise the 3D model.
+During training, **3D-to-2D projection** maps Sparse4D's predicted 3D boxes
+into camera images, where they can be compared with the 2D targets. Sparse4D
+remains a multi-camera 3D detector and tracker; the deployed model outputs
+3D predictions.
 
 This guide requires a TAO PyTorch build containing
 `model.head.loose_to_tight` and the co-training dataset
