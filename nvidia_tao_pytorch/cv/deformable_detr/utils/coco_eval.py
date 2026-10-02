@@ -71,8 +71,25 @@ class CocoEvaluator(object):
     def synchronize_between_processes(self):
         """ synchronize_between_processes """
         for iou_type in self.iou_types:
-            self.eval_imgs[iou_type] = np.concatenate(self.eval_imgs[iou_type], 2)
-            create_common_coco_eval(self.coco_eval[iou_type], self.img_ids, self.eval_imgs[iou_type])
+            coco_eval = self.coco_eval[iou_type]
+            eval_imgs = self.eval_imgs[iou_type]
+            if eval_imgs:
+                eval_imgs = np.concatenate(eval_imgs, 2)
+            else:
+                # A rank may receive no validation samples. Keep it in the
+                # collective with the same category/area dimensions so the
+                # other ranks do not hang or fail in np.concatenate([]).
+                cat_ids = self.eval_class_ids
+                if cat_ids is None:
+                    cat_ids = coco_eval.params.catIds or self.coco_gt.getCatIds()
+                eval_imgs = np.empty(
+                    (len(cat_ids), len(coco_eval.params.areaRng), 0),
+                    dtype=object,
+                )
+            self.eval_imgs[iou_type] = eval_imgs
+            self.img_ids = create_common_coco_eval(
+                coco_eval, self.img_ids, eval_imgs
+            )
 
     def overall_accumulate(self):
         """ overall_accumulate """
@@ -194,6 +211,7 @@ def create_common_coco_eval(coco_eval, img_ids, eval_imgs):
     coco_eval.evalImgs = eval_imgs
     coco_eval.params.imgIds = img_ids
     coco_eval._paramsEval = copy.deepcopy(coco_eval.params)
+    return img_ids
 
 
 def createIndex(self):
@@ -379,7 +397,7 @@ def summarize(self, is_print=False):
         return stats
 
     if not self.eval:
-        raise Exception('Please run accumulate() first')
+        raise RuntimeError('Please run accumulate() first')
     iouType = self.params.iouType
     if iouType in ('segm', 'bbox'):
         summarize = _summarizeDets
