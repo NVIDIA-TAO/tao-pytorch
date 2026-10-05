@@ -6,7 +6,7 @@
 from typing import Optional
 import pytorch_lightning as pl
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 
 from nvidia_tao_pytorch.core.distributed.comm import is_dist_avail_and_initialized
 from nvidia_tao_pytorch.cv.depth_net.dataloader.stereo_datasets import build_stereo_dataset
@@ -26,6 +26,8 @@ class StereoDepthNetDataModule(pl.LightningDataModule):
         super().__init__()
         self.dataset_config = dataset_config
         self.subtask_config = subtask_config
+        self.calib_dataset = None
+        self.calib_dataset_config = None
 
     def train_dataloader(self):
         """Build the dataloader for training.
@@ -96,11 +98,35 @@ class StereoDepthNetDataModule(pl.LightningDataModule):
         )
         return test_loader
 
+    def calib_dataloader(self):
+        """Build the dataloader for quantization calibration.
+
+        Returns:
+            PyTorch DataLoader yielding stereo-pair dict batches
+            (``image``, ``right_image``, ...) with inference transforms applied.
+        """
+        if self.calib_dataset is None:
+            raise ValueError(
+                "Calibration dataset is not initialized. "
+                "Call setup(stage='calibration') first."
+            )
+        workers = self.calib_dataset_config["workers"]
+        calib_loader = DataLoader(
+            self.calib_dataset,
+            num_workers=workers,
+            pin_memory=self.calib_dataset_config["pin_memory"],
+            batch_size=self.calib_dataset_config["batch_size"],
+            drop_last=False,
+            shuffle=False,
+            multiprocessing_context='spawn' if workers > 0 else None
+        )
+        return calib_loader
+
     def setup(self, stage: Optional[str] = None):
         """ Loads in data from file and prepares PyTorch
-            tensor datasets for each split (train, val, test).
+            tensor datasets for each split (train, val, test, calibration).
         Args:
-            stage (str): stage options from fit, test, predict or None.
+            stage (str): stage options from fit, test, predict, calibration or None.
         """
         is_distributed = is_dist_avail_and_initialized()
         max_disparity = self.dataset_config["max_disparity"]
@@ -173,3 +199,31 @@ class StereoDepthNetDataModule(pl.LightningDataModule):
                 transform=self.test_transforms,
                 max_disparity=max_disparity
             )
+
+        # Assign calibration dataset for quantization (stereo-pair list files)
+        if stage == 'calibration':
+            self.calib_dataset_config = self.dataset_config["quant_calibration_dataset"]
+            data_sources = self.calib_dataset_config["data_sources"]
+            if not data_sources:
+                # Fall back to the evaluation list; the caller is expected to keep the
+                # calibration and test splits disjoint when accuracy is measured.
+                data_sources = self.dataset_config["test_dataset"]["data_sources"]
+            if not data_sources:
+                raise ValueError(
+                    "quant_calibration_dataset.data_sources (or test_dataset.data_sources) "
+                    "must be provided for the stereo calibration stage."
+                )
+            self.calib_transforms = build_stereo_transforms(
+                self.calib_dataset_config["augmentation"],
+                max_disparity=max_disparity,
+                split='infer',
+            )
+            calib_dataset = build_stereo_dataset(
+                data_sources,
+                transform=self.calib_transforms,
+                max_disparity=max_disparity
+            )
+            num_samples = self.calib_dataset_config["num_samples"]
+            if num_samples and num_samples < len(calib_dataset):
+                calib_dataset = Subset(calib_dataset, list(range(num_samples)))
+            self.calib_dataset = calib_dataset

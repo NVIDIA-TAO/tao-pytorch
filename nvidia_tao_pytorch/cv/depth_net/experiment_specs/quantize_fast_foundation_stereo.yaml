@@ -1,0 +1,116 @@
+# FastFoundationStereo (bp2) — FP8 post-training quantization of the exported ONNX graph.
+#
+# Runs `depth_net quantize` with the ModelOpt ONNX backend on the static-H/W (480x736),
+# dynamic-batch ONNX produced by `depth_net export`. Q/DQ pairs are inserted on the 2-D
+# Conv / MatMul / Gemm paths (EdgeNeXt backbone, feature extractor, projections); the
+# 3-D cost aggregation, GRU update block, convex upsampler and classifier stay in high
+# precision via `skip_names`. The resulting Q/DQ ONNX is consumed unchanged by
+# `tao-deploy depth_net gen_trt_engine` (strongly-typed FP8 engine; needs Hopper or newer).
+#
+# The `model:` block is the bp2 reference from experiment_fast_foundation_stereo.yaml and
+# must not be edited. Override `results_dir`, `quantize.model_path` and the calibration
+# `data_file` for your environment.
+
+results_dir: ???
+
+dataset:
+  dataset_name: StereoDataset
+  max_disparity: 192               # bp2 commercial; dataset-side knob (also set under model: below)
+  min_depth: 0.0
+  test_dataset:
+    data_sources:
+      - dataset_name: Middlebury
+        data_file: /data/datasets/stereo/test.txt
+    batch_size: 1
+    workers: 4
+    augmentation:
+      crop_size: [480, 736]
+  # Dataset used exclusively for quantization calibration. Keep it disjoint from
+  # test_dataset so the accuracy comparison against the fp16 engine stays honest.
+  # Images are ImageNet-normalized and resized to the ONNX static H/W when they differ.
+  quant_calibration_dataset:
+    data_sources:
+      - dataset_name: Middlebury
+        data_file: /data/datasets/stereo/train.txt
+    num_samples: 128
+    batch_size: 1
+    workers: 4
+
+model:
+  model_type: FastFoundationStereo
+  encoder: vitl
+  hidden_dims: [128]               # bp2 single-GRU; NOT [128, 128, 128] (full-FS default)
+  n_gru_layers: 1                  # bp2 single GRU layer
+  corr_radius: 4
+  corr_levels: 2
+  n_downsample: 2
+  max_disparity: 192               # CRITICAL — bp2 ckpt match. Schema default is 416 (full-FS).
+  valid_iters: 8                   # bp2 distilled (vs full-FS 22)
+  train_iters: 22
+  volume_dim: 28                   # bp2 invariant; schema default 32 is for full-FS
+  mixed_precision: false
+  gwc_feature_normalize: true      # bp2 trained with GWC L2-normalize
+
+  # 15 bp2 distilled width overrides — all required, do not omit
+  motion_encoder_widths: [56, 96, 16, 12]
+  motion_encoder_final: 48
+  gru_hidden: 60
+  gru_gating_conv_widths: [100, 168]
+  disp_head_input_dim: 60
+  disp_head_intermediate: 36
+  disp_head_pwconv1_widths: [212, 244]
+  mask_widths: [32, 16]
+  stem_2_widths: [12, 16]
+  spx_2_gru_widths: [16, 12, 16, 24]
+  spx_gru_out: 9
+  classifier_mid: 14
+  cnet_conv04_widths: [60, 48]
+  cam_mid_channels: 8
+  cost_agg_conv_patch_padding: [0, 0, 0]
+
+  stereo_backbone:
+    edgenext_pretrained_path: ""   # bp2 ckpt holds backbone weights inline
+    depth_anything_v2_pretrained_path: ""
+    use_bn: false
+    use_clstoken: false
+
+quantize:
+  backend: modelopt.onnx
+  mode: static_ptq
+  algorithm: max                   # try 'entropy' if 'max' regresses accuracy
+  model_path: ???                  # static 480x736, dynamic-batch ONNX from `depth_net export`
+  results_dir: ${results_dir}
+  device: cuda                     # ORT CUDA EP for calibration; any CUDA GPU works (FP8 only matters at TRT build time)
+
+  # FP8 E4M3 weights + activations. With the ONNX backend the module_name entries select
+  # the ONNX op types to quantize (conv -> Conv, linear -> Gemm, matmul -> MatMul); the
+  # dtype selects the single global quantize_mode.
+  layers:
+    - module_name: conv
+      weights:
+        dtype: fp8_e4m3fn
+      activations:
+        dtype: fp8_e4m3fn
+    - module_name: linear
+      weights:
+        dtype: fp8_e4m3fn
+      activations:
+        dtype: fp8_e4m3fn
+    - module_name: matmul
+      weights:
+        dtype: fp8_e4m3fn
+      activations:
+        dtype: fp8_e4m3fn
+
+  # ONNX node-name regexes (Python `re.match`, anchored at the start). Exported node
+  # names follow the module path, e.g. `/cost_agg/conv1/Conv`. ModelOpt does not exclude
+  # 3-D convolutions on its own (k=3 filters are below its "large filter" threshold), so
+  # every Conv3d-bearing module must be listed here.
+  skip_names:
+    - '/corr_feature_att/.*'       # Conv3d + 2-D attention on the correlation volume
+    - '/cost_agg/.*'               # 3-D hourglass cost aggregation
+    - '/classifier/.*'             # Conv3d disparity classifier
+    - '/update_block/.*'           # GRU update block + disparity head
+    - '/spx_2_gru/.*'              # convex-upsampling mask path
+    - '/spx_gru/.*'
+    - '/context_zqr_convs/.*'      # GRU context projections
