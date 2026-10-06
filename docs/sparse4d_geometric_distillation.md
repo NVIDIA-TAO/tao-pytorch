@@ -128,6 +128,35 @@ on those same frames. Inspect projections before training. The existing
 camera-grouping options can also generate multiple BEV groups; keep the
 calibration and cache joins consistent with each group.
 
+## Get the LTT checkpoint
+
+For the released seven-class warehouse taxonomy used in this guide, reuse
+`_loose_to_tight_mlp.pth` from the
+[Sparse4D ResNet-50 `trainable_v3.0` bundle on NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/tao/models/sparse4d_rn50/files?version=trainable_v3.0).
+With the NGC CLI, download just the LTT file:
+
+```bash
+mkdir -p /data
+ngc registry model download-version nvidia/tao/sparse4d_rn50:trainable_v3.0 \
+  --file _loose_to_tight_mlp.pth --dest /data
+```
+
+The downloaded path is
+`/data/sparse4d_rn50_vtrainable_v3.0/_loose_to_tight_mlp.pth`, including the
+leading underscore in the filename. Make it visible inside the TAO training
+environment and set `model.head.loose_to_tight.mlp_ckpt` to that path, as in the
+training fragment below. The checkpoint's ordered `class_names` must match
+`dataset.classes`; validate its corrections on the target data.
+
+Reusing this checkpoint skips `operation=ltt_data` and MLP fitting. Continue
+with teacher caches, mixed-training inputs, and optional visible-2D sidecars
+below. For a different taxonomy or custom fitting, prepare the geometry cache
+and follow [optional custom fitting](#optional-fit-a-custom-ltt-adapter).
+
+Retain the external MLP artifact for later training and resume: it is frozen
+and deliberately excluded from Sparse4D model checkpoints. Evaluation,
+inference, and export do not need this artifact.
+
 ## Prepare artifacts with TAO Data Services
 
 The [preparation entrypoint](https://github.com/NVIDIA-TAO/tao-data-services/blob/main/nvidia_tao_ds/annotations/scripts/sparse4d_prepare.py)
@@ -182,11 +211,17 @@ Only the block selected by `operation` is executed. Choose output paths that
 do not overwrite existing artifacts, or explicitly opt into a rebuild.
 The teacher threshold is an example and must be checked on your real data.
 
-First extract LTT geometry and, if using the supervised LTT loss, visible-2D
-sidecars for the 3D-labeled scenes:
+Extract the LTT geometry cache only if fitting a custom adapter. Skip this
+command when reusing the released checkpoint:
 
 ```bash
 annotations sparse4d_prepare -e /specs/sparse4d_prepare.yaml operation=ltt_data
+```
+
+If using the supervised LTT loss on 3D-labeled scenes, prepare visible-2D
+sidecars regardless of whether the MLP is downloaded or custom fitted:
+
+```bash
 annotations sparse4d_prepare -e /specs/sparse4d_prepare.yaml operation=ltt_2dgt
 ```
 
@@ -218,7 +253,7 @@ Rebuild the index after changing the split or moving data. Control aggregate
 
 | Artifact | Consumer |
 | --- | --- |
-| `ltt_training.npz` (`ltt_data/v2`) | Offline MLP fitting below |
+| `ltt_training.npz` (`ltt_data/v2`) | Optional offline custom MLP fitting below |
 | `<scene>__ltt2dgt.npz` (`ltt_2dgt/v1`) | `dataset.ltt_2dgt_sidecar_dir` |
 | `<scene>__rtdetr2d.npz` (`ltt_rtdetr2d/v1`) | `dataset.rtdetr_2d_cache_dir`, or `rtdetr_2d_cache_path` for a single scene |
 | 3D-labeled and calibrated real info PKLs | Entries in `dataset.train_dataset.ann_file` |
@@ -232,9 +267,10 @@ existing trusted TAO annotation format.
 The [native artifact tools](../nvidia_tao_pytorch/cv/sparse4d/tools/README.md)
 provide an alternative when working entirely in a TAO PyTorch checkout.
 
-## Fit the frozen LTT adapter
+## Optional: fit a custom LTT adapter
 
-In the TAO PyTorch environment, train the MLP from the geometry cache:
+Skip this section when reusing the released checkpoint. Otherwise, in the TAO
+PyTorch environment, train the MLP from the geometry cache:
 
 ```bash
 python -m nvidia_tao_pytorch.cv.sparse4d.tools.ltt_train \
@@ -249,9 +285,8 @@ views of the same frame stay together. This internal split does not replace a
 held-out scene evaluation. Compare per-class validation GIoU with the raw
 projection baseline, and check class coverage and difficult viewpoints.
 
-Retain the external MLP artifact for later training and resume: it is frozen
-and deliberately excluded from Sparse4D model checkpoints. Evaluation,
-inference, and export do not need this artifact.
+Set `model.head.loose_to_tight.mlp_ckpt` to `/data/loose_to_tight_mlp.pth` for
+this custom adapter instead of the downloaded checkpoint in the example below.
 
 ## Configure and train Sparse4D
 
@@ -265,7 +300,7 @@ model:
   head:
     loose_to_tight:
       enable: true
-      mlp_ckpt: /data/loose_to_tight_mlp.pth
+      mlp_ckpt: /data/sparse4d_rn50_vtrainable_v3.0/_loose_to_tight_mlp.pth
       num_classes: 0
       loss_weight: 0.1
       tight_l1_weight: 1.0

@@ -1,8 +1,17 @@
 # Sparse4D co-training artifact tools
 
 For the complete real-world adaptation workflow, including TAO Data Services
-preparation, LTT fitting, training configuration, and evaluation, see
+preparation, released LTT checkpoint reuse or optional fitting, training
+configuration, and evaluation, see
 [2D-to-3D geometric distillation](../../../../docs/sparse4d_geometric_distillation.md).
+
+For the released seven-class warehouse taxonomy, follow
+[Get the LTT checkpoint](../../../../docs/sparse4d_geometric_distillation.md#get-the-ltt-checkpoint)
+to download `_loose_to_tight_mlp.pth` from NGC `sparse4d_rn50:trainable_v3.0`.
+Set `model.head.loose_to_tight.mlp_ckpt` to the downloaded path and skip the
+geometry extraction and fitting commands in step 2 below. Keep the checkpoint's
+ordered class taxonomy aligned with `dataset.classes`; use custom fitting for
+a different taxonomy or when adapting the correction model to your data.
 
 Calibration-free single-view (SV2D) training is currently unsupported. The
 `build_sv2d_dataset` tool and SV2D configuration fields remain in the source
@@ -22,7 +31,7 @@ python -m nvidia_tao_pytorch.cv.sparse4d.tools.ltt_build_2dgt \
   --data-root /data/mtmc --train-split /data/ov_train_split.txt \
   --out-dir /data/ltt_2dgt
 
-# 2. Geometry cache, then the frozen Loose-to-Tight MLP checkpoint.
+# 2. Optional custom LTT fitting; skip when using the released NGC checkpoint.
 python -m nvidia_tao_pytorch.cv.sparse4d.tools.ltt_extract \
   --data-root /data/mtmc --train-split /data/ov_train_split.txt \
   --frame-stride 10 --out /data/ltt_training.npz
@@ -56,7 +65,7 @@ CLI alias for the TAO-native `rtdetr_pseudo_labels` implementation.
 | `_pkl_cam_counts.pkl` | PKL-path to camera-count mapping | Optional legacy/override input via `dataset.pkl_cam_counts_path` |
 | `<scene>__ltt2dgt.npz` | `frame_id`, `instance_id`, `class_id`, `cam`, `box2`, `box3`, `occ` | `dataset.ltt_2dgt_sidecar_dir` (the containing directory) |
 | LTT training NPZ | `packed` (`N x 18`), `class_id`, source-frame `group_id` | Offline input to `ltt_train`; not read by training |
-| `loose_to_tight_mlp.pth` | model state + architecture metadata | `model.head.loose_to_tight.mlp_ckpt` |
+| `_loose_to_tight_mlp.pth` (NGC) or `loose_to_tight_mlp.pth` (custom fit) | model state + architecture metadata | `model.head.loose_to_tight.mlp_ckpt` |
 | `<scene>__rtdetr2d.npz` | `frame_id`, `cam`, `class_id`, `box`, `score`; optional legacy-compatible validity arrays `valid_frame_id`, `valid_cam` | `dataset.rtdetr_2d_cache_dir`, or `dataset.rtdetr_2d_cache_path` for one cache |
 
 All NPZ metadata is JSON encoded into a one-dimensional `uint8` `_meta` array;
