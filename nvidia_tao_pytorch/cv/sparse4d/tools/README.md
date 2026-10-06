@@ -4,6 +4,11 @@ For the complete real-world adaptation workflow, including TAO Data Services
 preparation, LTT fitting, training configuration, and evaluation, see
 [2D-to-3D geometric distillation](../../../../docs/sparse4d_geometric_distillation.md).
 
+Calibration-free single-view (SV2D) training is currently unsupported. The
+`build_sv2d_dataset` tool and SV2D configuration fields remain in the source
+tree, but do not provide a supported training workflow. Use calibrated
+multi-camera inputs for geometric distillation.
+
 Run these portable producers from the `tao-pytorch` checkout root. They import
 TAO's Loose-to-Tight geometry directly and do not require MMCV or MMDetection.
 
