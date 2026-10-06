@@ -26,11 +26,11 @@ training and deployment behavior that changed with this implementation.
 ## How the geometric supervision works
 
 A 3D cuboid's eight projected corners define a loose 2D bounding rectangle.
-The actual object occupies a tighter image-space box. A **loose-to-tight
-(LTT) MLP** learns this correction from labeled data using the class, box
+The actual object occupies a tighter image-space box. The released **loose-to-tight
+(LTT) MLP** predicts this correction using the class, box
 extent, camera-relative orientation, projected box, image size, and distance.
-The offline fitting target is the tight **amodal** 2D box (the object's full
-extent), not just its visible fragment.
+The released MLP corrects toward the tight **amodal** 2D box (the object's
+full extent), not just its visible fragment.
 
 During Sparse4D training, the MLP is frozen and its four predicted edge scales
 are detached. Applying those scales to the projected box preserves gradients
@@ -57,7 +57,8 @@ that checkpoint. Use container-visible paths for all artifacts.
 * **Taxonomy:** use the same ordered `class_names` in preparation and
   `dataset.classes` in training. The LTT checkpoint and NPZ caches retain this
   order; readers reject mismatches. The example below uses the seven warehouse
-  classes. Replace the taxonomy and aliases together for a custom model.
+  classes. Keep that order when using the released LTT checkpoint, and map
+  teacher labels to it through the aliases.
 * **Geometry:** calibrated routes need separate camera intrinsics and rigid
   world-to-camera extrinsics, with consistent units, axes, box centers, and
   image coordinates. A projection-only `cameraMatrix` is insufficient for LTT
@@ -70,8 +71,8 @@ that checkpoint. Use container-visible paths for all artifacts.
   annotations are unavailable. An empty annotated frame is a different case.
   Prepare these info PKLs with the conversion command below; the RT-DETR
   operation produces the corresponding detection caches.
-* **Splits:** reserve separate scenes or sequences for validation before fitting
-  the LTT adapter or selecting teacher thresholds. Do not mix held-out real
+* **Splits:** reserve separate scenes or sequences for validation before
+  fine-tuning Sparse4D or selecting teacher thresholds. Do not mix held-out real
   scenes into pseudo-label training.
 
 ## Convert calibrated real scenes without 3D annotations
@@ -148,10 +149,8 @@ environment and set `model.head.loose_to_tight.mlp_ckpt` to that path, as in the
 training fragment below. The checkpoint's ordered `class_names` must match
 `dataset.classes`; validate its corrections on the target data.
 
-Reusing this checkpoint skips `operation=ltt_data` and MLP fitting. Continue
-with teacher caches, mixed-training inputs, and optional visible-2D sidecars
-below. For a different taxonomy or custom fitting, prepare the geometry cache
-and follow [optional custom fitting](#optional-fit-a-custom-ltt-adapter).
+Use the released checkpoint directly. Continue with teacher caches,
+mixed-training inputs, and optional visible-2D sidecars below.
 
 Retain the external MLP artifact for later training and resume: it is frozen
 and deliberately excluded from Sparse4D model checkpoints. Evaluation,
@@ -163,12 +162,12 @@ The [preparation entrypoint](https://github.com/NVIDIA-TAO/tao-data-services/blo
 and [shipped spec](https://github.com/NVIDIA-TAO/tao-data-services/blob/main/nvidia_tao_ds/annotations/experiment_specs/sparse4d_prepare.yaml)
 are maintained in TAO Data Services. In that environment, save the following
 configuration as `/specs/sparse4d_prepare.yaml`. Replace the example paths, scene names, and
-label aliases with your dataset's values. `ltt_data` and `ltt_2dgt` consume raw
-AICity/MTMC-style annotations; convert other annotation formats first. In
-`aic25` mode, LTT extraction reads the scene's NVSchema `calibration.json`.
+label aliases with your dataset's values while retaining the released class
+order. `ltt_2dgt` consumes raw AICity/MTMC-style annotations; convert other
+annotation formats first.
 
 ```yaml
-operation: ltt_data
+operation: ltt_2dgt
 results_dir: /results/sparse4d_prepare
 overwrite: false
 class_names: [person, gr1_t2, agility_digit, nova_carter, transporter, forklift, pallet_truck]
@@ -180,14 +179,6 @@ subclass_map:
   transporter: [Transporter]
   forklift: [Forklift]
   pallet_truck: [Pallet_Truck]
-
-ltt_data:
-  selection:
-    scene_dirs: [/data/labeled/SceneA]
-  output_path: /data/ltt_training.npz
-  calibration_mode: aic25
-  annotation_version: v0.1
-  frame_stride: 10
 
 ltt_2dgt:
   selection:
@@ -211,15 +202,8 @@ Only the block selected by `operation` is executed. Choose output paths that
 do not overwrite existing artifacts, or explicitly opt into a rebuild.
 The teacher threshold is an example and must be checked on your real data.
 
-Extract the LTT geometry cache only if fitting a custom adapter. Skip this
-command when reusing the released checkpoint:
-
-```bash
-annotations sparse4d_prepare -e /specs/sparse4d_prepare.yaml operation=ltt_data
-```
-
 If using the supervised LTT loss on 3D-labeled scenes, prepare visible-2D
-sidecars regardless of whether the MLP is downloaded or custom fitted:
+sidecars:
 
 ```bash
 annotations sparse4d_prepare -e /specs/sparse4d_prepare.yaml operation=ltt_2dgt
@@ -253,7 +237,6 @@ Rebuild the index after changing the split or moving data. Control aggregate
 
 | Artifact | Consumer |
 | --- | --- |
-| `ltt_training.npz` (`ltt_data/v2`) | Optional offline custom MLP fitting below |
 | `<scene>__ltt2dgt.npz` (`ltt_2dgt/v1`) | `dataset.ltt_2dgt_sidecar_dir` |
 | `<scene>__rtdetr2d.npz` (`ltt_rtdetr2d/v1`) | `dataset.rtdetr_2d_cache_dir`, or `rtdetr_2d_cache_path` for a single scene |
 | 3D-labeled and calibrated real info PKLs | Entries in `dataset.train_dataset.ann_file` |
@@ -266,27 +249,6 @@ existing trusted TAO annotation format.
 
 The [native artifact tools](../nvidia_tao_pytorch/cv/sparse4d/tools/README.md)
 provide an alternative when working entirely in a TAO PyTorch checkout.
-
-## Optional: fit a custom LTT adapter
-
-Skip this section when reusing the released checkpoint. Otherwise, in the TAO
-PyTorch environment, train the MLP from the geometry cache:
-
-```bash
-python -m nvidia_tao_pytorch.cv.sparse4d.tools.ltt_train \
-  --data /data/ltt_training.npz \
-  --out /data/loose_to_tight_mlp.pth \
-  --epochs 60 --device cuda
-```
-
-The cache supplies the ordered class taxonomy. Fitting separates source-frame
-`group_id` values between its training and validation partitions, so camera
-views of the same frame stay together. This internal split does not replace a
-held-out scene evaluation. Compare per-class validation GIoU with the raw
-projection baseline, and check class coverage and difficult viewpoints.
-
-Set `model.head.loose_to_tight.mlp_ckpt` to `/data/loose_to_tight_mlp.pth` for
-this custom adapter instead of the downloaded checkpoint in the example below.
 
 ## Configure and train Sparse4D
 
