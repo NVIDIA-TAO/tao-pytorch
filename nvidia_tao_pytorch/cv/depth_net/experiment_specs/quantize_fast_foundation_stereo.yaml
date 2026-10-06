@@ -81,6 +81,17 @@ quantize:
   model_path: ???                  # static 480x736, dynamic-batch ONNX from `depth_net export`
   results_dir: ${results_dir}
   device: cuda                     # ORT CUDA EP for calibration; any CUDA GPU works (FP8 only matters at TRT build time)
+  # Passed straight to modelopt.onnx.quantization.quantize. Both matter:
+  #  - calibration_eps: ModelOpt's default is ['cpu', 'cuda:0', 'trt'] (CPU first), so without this the
+  #    calibration pass runs on the CPU regardless of `device`.
+  #  - high_precision_dtype: ModelOpt's default (fp16) rewrites every non-quantized tensor and weight to fp16
+  #    in the ONNX, which pins the GRU / cost volume / LayerNorms to fp16 in TensorRT and cost ~0.45 px EPE
+  #    on Middlebury-H. Keeping them fp32 lets TensorRT pick fp16 at build time exactly as for the fp16
+  #    baseline engine (FP8 EPE 0.919 vs fp16 0.947 on H100). It also removes ModelOpt's slow single-threaded
+  #    fp16-conversion pass (~3 min instead of ~50 min).
+  backend_kwargs:
+    calibration_eps: ["cuda:0", "cpu"]
+    high_precision_dtype: fp32
 
   # FP8 E4M3 weights + activations. With the ONNX backend the module_name entries select
   # the ONNX op types to quantize (conv -> Conv, linear -> Gemm, matmul -> MatMul); the
@@ -102,15 +113,13 @@ quantize:
       activations:
         dtype: fp8_e4m3fn
 
-  # ONNX node-name regexes (Python `re.match`, anchored at the start). Exported node
-  # names follow the module path, e.g. `/cost_agg/conv1/Conv`. ModelOpt does not exclude
-  # 3-D convolutions on its own (k=3 filters are below its "large filter" threshold), so
-  # every Conv3d-bearing module must be listed here.
-  skip_names:
-    - '/corr_feature_att[.0-9]*/.*'       # Conv3d + 2-D attention on the correlation volume
-    - '/cost_agg[.0-9]*/.*'               # 3-D hourglass cost aggregation
-    - '/classifier[.0-9]*/.*'             # Conv3d disparity classifier
-    - '/update_block[.0-9]*/.*'           # GRU update block + disparity head
-    - '/spx_2_gru[.0-9]*/.*'              # convex-upsampling mask path
-    - '/spx_gru[.0-9]*/.*'
-    - '/context_zqr_convs[.0-9]*/.*'      # GRU context projections
+  # Full FP8: every eligible Conv / MatMul / Gemm is quantized (419 Q/DQ pairs on the bp2 480x736 graph,
+  # including the 3-D cost-aggregation convolutions and the GRU update block). Validated on H100 / TensorRT 10.16
+  # with 128 Middlebury calibration pairs: EPE 0.919 vs 0.947 for the fp16 engine on the Middlebury-H subset.
+  # Per-module exclusions are a quantization-config search, not part of the default spec. To keep a module in
+  # high precision add ONNX node-name regexes (Python `re.match`, anchored at the start). The exporter names
+  # ModuleList entries with their index, so use the index-tolerant form, e.g.
+  #   skip_names: ['/cost_agg[.0-9]*/.*', '/update_block[.0-9]*/.*', '/classifier[.0-9]*/.*',
+  #                '/corr_feature_att[.0-9]*/.*', '/spx_2_gru[.0-9]*/.*']
+  # (that subset gives EPE 0.912 at the same throughput — 109 Q/DQ pairs).
+  skip_names: []
