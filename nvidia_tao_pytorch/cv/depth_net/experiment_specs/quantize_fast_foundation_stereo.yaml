@@ -107,10 +107,10 @@ quantize:
   # 3-D convolutions on its own (k=3 filters are below its "large filter" threshold), so
   # every Conv3d-bearing module must be listed here.
   skip_names:
-    - '/corr_feature_att/.*'       # Conv3d + 2-D attention on the correlation volume
-    - '/cost_agg/.*'               # 3-D hourglass cost aggregation
-    - '/classifier/.*'             # Conv3d disparity classifier
-    - '/update_block/.*'           # GRU update block + disparity head
-    - '/spx_2_gru/.*'              # convex-upsampling mask path
-    - '/spx_gru/.*'
-    - '/context_zqr_convs/.*'      # GRU context projections
+    - '/corr_feature_att[.0-9]*/.*'       # Conv3d + 2-D attention on the correlation volume
+    - '/cost_agg[.0-9]*/.*'               # 3-D hourglass cost aggregation
+    - '/classifier[.0-9]*/.*'             # Conv3d disparity classifier
+    - '/update_block[.0-9]*/.*'           # GRU update block + disparity head
+    - '/spx_2_gru[.0-9]*/.*'              # convex-upsampling mask path
+    - '/spx_gru[.0-9]*/.*'
+    - '/context_zqr_convs[.0-9]*/.*'      # GRU context projections
