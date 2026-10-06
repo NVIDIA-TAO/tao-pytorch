@@ -12,11 +12,6 @@ Set `model.head.loose_to_tight.mlp_ckpt` to the downloaded path. Keep the
 checkpoint's ordered class taxonomy aligned with `dataset.classes`. Use the
 commands below to prepare supervision caches and the mixed-training index.
 
-Calibration-free single-view (SV2D) training is currently unsupported. The
-`build_sv2d_dataset` tool and SV2D configuration fields remain in the source
-tree, but do not provide a supported training workflow. Use calibrated
-multi-camera inputs for geometric distillation.
-
 Run these portable producers from the `tao-pytorch` checkout root. They import
 TAO's Loose-to-Tight geometry directly and do not require MMCV or MMDetection.
 
