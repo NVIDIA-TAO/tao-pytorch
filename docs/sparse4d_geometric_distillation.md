@@ -77,7 +77,7 @@ that checkpoint. Use container-visible paths for all artifacts.
 
 ## Convert calibrated real scenes without 3D annotations
 
-Use the [unlabeled-scene spec](https://github.com/NVIDIA-TAO/tao-data-services/blob/dbf26c3a4ba80f63e3460e3dcf06f59ecf184cde/nvidia_tao_ds/annotations/experiment_specs/aicity2ovpkl_unlabeled.yaml) from a TAO Data Services build
+Use the [unlabeled-scene spec](https://github.com/NVIDIA-TAO/tao-data-services/blob/main/nvidia_tao_ds/annotations/experiment_specs/aicity2ovpkl_unlabeled.yaml) from a TAO Data Services build
 containing the annotation-free converter. Copy it to
 `/specs/aicity2ovpkl_unlabeled.yaml` and set the ordered
 `aicity.class_config.CLASS_LIST` to match your model and teacher caches.
@@ -148,6 +148,11 @@ leading underscore in the filename. Make it visible inside the TAO training
 environment and set `model.head.loose_to_tight.mlp_ckpt` to that path, as in the
 training fragment below. The checkpoint's ordered `class_names` must match
 `dataset.classes`; validate its corrections on the target data.
+
+This workflow supports only the released checkpoint's seven classes in their
+original order. Custom taxonomies require a matching LTT checkpoint and are
+outside this guide; changing class names in the configuration does not adapt
+the released weights.
 
 Use the released checkpoint directly. Continue with teacher caches,
 mixed-training inputs, and optional visible-2D sidecars below.
