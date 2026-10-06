@@ -3,10 +3,10 @@
 For the complete real-world adaptation workflow, including TAO Data Services
 preparation, released LTT checkpoint use, training configuration, and
 evaluation, see
-[2D-to-3D geometric distillation](../../../../docs/sparse4d_geometric_distillation.md).
+[2D-to-3D geometric distillation](https://docs.nvidia.com/tao/tao-toolkit/latest/text/cv_finetuning/pytorch/sparse4d/sparse4d.html#sparse4d-geometric-distillation).
 
 For the released seven-class warehouse taxonomy, follow
-[Get the LTT checkpoint](../../../../docs/sparse4d_geometric_distillation.md#get-the-ltt-checkpoint)
+[Get the LTT checkpoint](https://docs.nvidia.com/tao/tao-toolkit/latest/text/cv_finetuning/pytorch/sparse4d/sparse4d.html#sparse4d-released-ltt-checkpoint)
 to download `_loose_to_tight_mlp.pth` from NGC `sparse4d_rn50:trainable_v3.0`.
 Set `model.head.loose_to_tight.mlp_ckpt` to the downloaded path. Keep the
 checkpoint's ordered class taxonomy aligned with `dataset.classes`. Use the
