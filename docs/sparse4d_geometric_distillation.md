@@ -15,10 +15,11 @@ remains a multi-camera 3D detector and tracker; the deployed model outputs
 This guide requires a TAO PyTorch build containing
 `model.head.loose_to_tight` and the co-training dataset
 fields in the [experiment spec](../nvidia_tao_pytorch/cv/sparse4d/experiment_specs/experiment_spec.yaml).
-The data-service commands require a companion TAO Data Services build with
-`annotations sparse4d_prepare` and the
-[annotation-free scene converter](https://github.com/NVIDIA-TAO/tao-data-services/pull/55). Check that the specs shipped with
-your build expose `aicity.load_annotations` and `aicity.fps` before using these options. The optional LTT training losses are disabled by default.
+The data-service commands require a TAO Data Services build with
+`annotations sparse4d_prepare` and `annotations convert` support for
+`aicity.load_annotations=false`. Check that the specs shipped with your build
+expose `aicity.load_annotations` and `aicity.fps` before using these options.
+The optional LTT training losses are disabled by default.
 See the [compatibility notes](../nvidia_tao_pytorch/cv/sparse4d/COMPATIBILITY.md) for
 training and deployment behavior that changed with this implementation.
 
@@ -99,6 +100,22 @@ and uses all calibrated cameras as one group per scene. It writes
 paths, and timestamps in seconds. It requires neither `ground_truth.json` nor
 depth files and skips anchor initialization; reuse the pretrained model's
 anchors. Labeled conversion still defaults to loading 3D ground truth.
+
+Each PKL stores frame records in `infos`. Each record retains `token`,
+`scene_name`, `timestamp`, `cams`, and `gt_boxes=None` for unlabeled frames.
+The `cams` mapping is keyed by camera ID; each camera entry retains its
+`data_path`. Preserve these field names and conventions:
+
+| Location | Field | Meaning |
+| --- | --- | --- |
+| Frame record | `frame_idx` | Zero-based source frame ID, matching the 2D teacher cache; starts at zero for each sequence. |
+| Camera entry in `cams` | `cam_intrinsic` | 3 × 3 camera intrinsic matrix for the source image dimensions. |
+| Camera entry in `cams` | `sensor2world_transform` | 4 × 4 **world-to-camera** extrinsic matrix for the default unrecentered spec. |
+
+`sensor2world_transform` is a legacy field name. The loader uses this matrix
+directly with the camera intrinsics to project 3D points; it does **not** invert
+it. If BEV-group recentering is enabled, the matrix must instead map the
+corresponding group-local 3D coordinates into the camera frame.
 
 For HDF5 image arrays, set `aicity.rgb_format=h5` and provide `<camera>.h5`
 files with HWC arrays at `rgb/rgb_00000.jpg`, `rgb/rgb_00001.jpg`, and so on.
