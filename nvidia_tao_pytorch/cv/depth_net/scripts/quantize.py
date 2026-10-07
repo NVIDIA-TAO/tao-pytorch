@@ -19,7 +19,7 @@ Two model families are supported:
 """
 
 import os
-from typing import Dict, List, Optional
+from typing import Tuple, Dict, List, Optional
 
 import numpy as np
 import onnx
@@ -83,20 +83,29 @@ class StereoPairLoader:
 
     Produces ``torch.cat([batch['image'], batch['right_image']], dim=1)`` so that the
     generic single-tensor calibration loop can drive :class:`StereoCalibrationWrapper`.
+    When ``target_hw`` is given, both images are bilinearly resized to it first, mirroring
+    the tao-deploy dataloader (and the ONNX-backend path) so arbitrary-size calibration
+    images meet the model's stride constraints.
     """
 
-    def __init__(self, loader):
-        """Initialize with the underlying dict dataloader."""
+    def __init__(self, loader, target_hw: Optional[Tuple[int, int]] = None):
+        """Initialize with the underlying dict dataloader and an optional (H, W) resize target."""
         self.loader = loader
+        self.target_hw = tuple(int(v) for v in target_hw) if target_hw else None
 
     def __len__(self):
         """Number of batches."""
         return len(self.loader)
 
+    def _resize(self, tensor: torch.Tensor) -> torch.Tensor:
+        if self.target_hw is None or tuple(tensor.shape[-2:]) == self.target_hw:
+            return tensor
+        return F.interpolate(tensor.float(), size=self.target_hw, mode="bilinear", align_corners=False)
+
     def __iter__(self):
-        """Yield channel-concatenated stereo pairs."""
+        """Yield channel-concatenated (and optionally resized) stereo pairs."""
         for batch in self.loader:
-            yield torch.cat([batch["image"], batch["right_image"]], dim=1)
+            yield torch.cat([self._resize(batch["image"]), self._resize(batch["right_image"])], dim=1)
 
 
 def load_stereo_model(cfg: ExperimentConfig, model_path: str) -> nn.Module:
@@ -285,7 +294,12 @@ def quantize_stereo(cfg: ExperimentConfig) -> None:
         )
     model = load_stereo_model(cfg, cfg.quantize.model_path)
     wrapped = StereoCalibrationWrapper(model, iters=cfg.model.valid_iters)
-    calibration_loader = StereoPairLoader(build_stereo_calibration_loader(cfg)) if needs_calibration else None
+    calibration_loader = None
+    if needs_calibration:
+        # Resize calibration pairs to the configured crop_size (H, W), as the deploy dataloader does;
+        # raw Middlebury frames are not multiples of the FFS stride and would fail in the model.
+        target_hw = cfg.dataset.quant_calibration_dataset.augmentation.crop_size
+        calibration_loader = StereoPairLoader(build_stereo_calibration_loader(cfg), target_hw=target_hw)
     quantized_wrapper = quantizer.quantize_model(wrapped, calibration_loader)
     logging.info("Quantization finished; saving model")
     quantizer.save_model(quantized_wrapper.model, cfg.quantize.results_dir)

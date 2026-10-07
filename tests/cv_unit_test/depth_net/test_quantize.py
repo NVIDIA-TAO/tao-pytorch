@@ -239,6 +239,19 @@ def test_stereo_pair_loader_and_wrapper_roundtrip():
 
 
 @pytest.mark.cv_unit
+def test_stereo_pair_loader_resizes_to_target_hw():
+    """Test that StereoPairLoader resizes pairs to target_hw (as the deploy dataloader does) and is a no-op otherwise."""
+    from nvidia_tao_pytorch.cv.depth_net.scripts.quantize import StereoPairLoader
+
+    resized = list(StereoPairLoader(_fake_stereo_loader(num_batches=2, hw=(30, 46)), target_hw=(32, 64)))
+    assert [tuple(x.shape) for x in resized] == [(1, 6, 32, 64)] * 2
+    same = list(StereoPairLoader(_fake_stereo_loader(num_batches=1, hw=(32, 64)), target_hw=(32, 64)))
+    assert tuple(same[0].shape) == (1, 6, 32, 64)
+    untouched = list(StereoPairLoader(_fake_stereo_loader(num_batches=1, hw=(30, 46))))
+    assert tuple(untouched[0].shape) == (1, 6, 30, 46)
+
+
+@pytest.mark.cv_unit
 def test_stereo_data_module_calibration_stage(tmp_path, monkeypatch):
     """Test that the stereo DataModule builds a capped, inference-transformed calibration dataset."""
     import torch
