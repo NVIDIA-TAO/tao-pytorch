@@ -79,8 +79,8 @@ find-unused-parameters DDP strategy. Enable it only when standard DDP reducer
 behavior is specifically required: it keeps route-specific parameters in the
 autograd graph, but the explicit zero gradients still participate in optimizer
 steps. With AdamW, otherwise inactive parameters can be weight-decayed and their
-optimizer state can advance. TAO 7.2 timm's non-reentrant activation checkpointing
-remains enabled in either mode. `sync_route` keeps every rank on the same
+optimizer state can advance. Backbone activation checkpointing remains enabled
+in either mode. `sync_route` keeps every rank on the same
 supervision branch. Choose scene keywords that match the actual calibrated real
 scene names.
 

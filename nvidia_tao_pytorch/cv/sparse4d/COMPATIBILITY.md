@@ -1,6 +1,6 @@
 # Sparse4D co-training compatibility notes
 
-The optional LTT, pseudo-label, SV-auxiliary, and parameter-touch branches are
+The optional LTT, pseudo-label, and parameter-touch branches are
 disabled by default. This does **not** mean existing 3D training is numerically
 unchanged:
 
@@ -70,10 +70,8 @@ call the explicit full reset between independent inference runs.
 
 Evaluation, inference, export, and quantization do not construct the training
 criterion, so a saved LTT-enabled spec needs no MLP artifact for those stages.
-Custom training code must instantiate
-`Sparse4DPlModel(spec, build_training_losses=True)` before checkpoint restore and
-DDP/optimizer setup. The training CLI does this; trainable SV auxiliary parameters
-are registered before restoration, not created in the first training step.
+The training CLI constructs its loss modules before checkpoint restoration and
+DDP/optimizer setup.
 
 Every ONNX export, including one from an unchanged 3D checkpoint, replaces
 invalid MSDA sampling locations with zero. A compatible deployment plugin must
