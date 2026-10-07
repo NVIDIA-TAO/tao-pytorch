@@ -12,11 +12,6 @@ Set `model.head.loose_to_tight.mlp_ckpt` to the downloaded path. Keep the
 checkpoint's ordered class taxonomy aligned with `dataset.classes`. Use the
 commands below to prepare supervision caches and the mixed-training index.
 
-Calibration-free single-view (SV2D) training is currently unsupported. The
-`build_sv2d_dataset` tool and SV2D configuration fields remain in the source
-tree, but do not provide a supported training workflow. Use calibrated
-multi-camera inputs for geometric distillation.
-
 Run these portable producers from the `tao-pytorch` checkout root. They import
 TAO's Loose-to-Tight geometry directly and do not require MMCV or MMDetection.
 
@@ -84,8 +79,8 @@ find-unused-parameters DDP strategy. Enable it only when standard DDP reducer
 behavior is specifically required: it keeps route-specific parameters in the
 autograd graph, but the explicit zero gradients still participate in optimizer
 steps. With AdamW, otherwise inactive parameters can be weight-decayed and their
-optimizer state can advance. TAO 7.2 timm's non-reentrant activation checkpointing
-remains enabled in either mode. `sync_route` keeps every rank on the same
+optimizer state can advance. Backbone activation checkpointing remains enabled
+in either mode. `sync_route` keeps every rank on the same
 supervision branch. Choose scene keywords that match the actual calibrated real
 scene names.
 
