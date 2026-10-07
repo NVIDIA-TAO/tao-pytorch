@@ -35,6 +35,9 @@ dataset:
     num_samples: 128
     batch_size: 1
     workers: 4
+    augmentation:
+      crop_size: [480, 736]        # PyTorch backends resize calibration pairs to this (stride-aligned) size;
+                                   # the ONNX backend resizes to the graph's static H/W instead
 
 model:
   model_type: FastFoundationStereo
