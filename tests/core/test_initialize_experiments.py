@@ -1,16 +1,5 @@
-# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """Unit tests for initialize_train_experiment determinism plumbing."""
 
@@ -166,3 +155,66 @@ def test_dino_opt_ins_allow_terminal_save_without_directory_resume(
         auto_resume=False,
     )
     assert resume is None
+
+
+@pytest.mark.parametrize("resume_path", [None, "", "explicit.pth"])
+@pytest.mark.parametrize("auto_resume", [False, True])
+@pytest.mark.parametrize("discovered", [None, "discovered.pth"])
+def test_resume_path_normalization(
+    tmp_path, monkeypatch, restore_determinism_state,
+    resume_path, auto_resume, discovered,
+):
+    """Unset paths mean fresh training unless directory discovery is enabled."""
+    config = _build_cfg(tmp_path, deterministic=False)
+    config["train"]["resume_training_checkpoint_path"] = resume_path
+    monkeypatch.setenv("TAO_VISIBLE_DEVICES", "0")
+    scans = []
+
+    def discover(results_dir):
+        scans.append(results_dir)
+        return discovered
+
+    monkeypatch.setattr(initialize_module, "get_latest_checkpoint", discover)
+    resume, _ = initialize_train_experiment(config, auto_resume=auto_resume)
+    should_scan = auto_resume and not resume_path
+    assert scans == ([str(tmp_path)] if should_scan else [])
+    assert resume == (resume_path or (discovered if should_scan else None))
+
+
+@pytest.mark.parametrize("resume_path", [None, ""])
+def test_disabled_resume_reaches_lightning_training_step(
+    tmp_path, monkeypatch, restore_determinism_state, resume_path,
+):
+    """Exercise Lightning's real checkpoint parser, not just the helper return."""
+    import pytorch_lightning as pl
+    from torch.utils.data import DataLoader, TensorDataset
+
+    class TinyModel(pl.LightningModule):
+        """Small CPU model for the fresh-start checkpoint boundary."""
+
+        def __init__(self):
+            super().__init__()
+            self.layer = torch.nn.Linear(2, 1)
+
+        def training_step(self, batch, batch_idx):
+            """Perform one dummy-data training step."""
+            return self.layer(batch[0]).square().mean()
+
+        def configure_optimizers(self):
+            """Use a minimal optimizer with no external assets."""
+            return torch.optim.SGD(self.parameters(), lr=0.01)
+
+    config = _build_cfg(tmp_path, deterministic=False)
+    config["train"]["resume_training_checkpoint_path"] = resume_path
+    monkeypatch.setenv("TAO_VISIBLE_DEVICES", "0")
+    resume, _ = initialize_train_experiment(config, auto_resume=False)
+    trainer = pl.Trainer(
+        accelerator="cpu", devices=1, max_steps=1, logger=False,
+        enable_checkpointing=False, enable_progress_bar=False,
+        enable_model_summary=False, default_root_dir=str(tmp_path),
+    )
+    trainer.fit(
+        TinyModel(), DataLoader(TensorDataset(torch.ones(4, 2)), batch_size=2),
+        ckpt_path=resume,
+    )
+    assert trainer.global_step == 1

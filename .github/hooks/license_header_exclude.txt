@@ -58,7 +58,6 @@ nvidia_tao_pytorch/pointcloud/pointpillars/tools/train_utils/optimization/learni
 nvidia_tao_pytorch/pointcloud/pointpillars/tools/train_utils/train_utils.py
 nvidia_tao_pytorch/pointcloud/pointpillars/tools/visual_utils/__init__.py
 nvidia_tao_pytorch/pointcloud/pointpillars/tools/visual_utils/visualize_utils.py
-tests/core/test_initialize_experiments.py
 tests/cv_unit_test/grounding_dino/test_deterministic_label_order.py
 tests/multimodal_unit_test/clip/test_masked_siglip_loss.py
 tests/multimodal_unit_test/clip/test_metadata_mask.py

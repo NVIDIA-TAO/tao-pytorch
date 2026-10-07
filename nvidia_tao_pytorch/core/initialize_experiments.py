@@ -73,7 +73,7 @@ def initialize_train_experiment(
         torch.backends.cuda.enable_mem_efficient_sdp(False)
         torch.backends.cuda.enable_math_sdp(True)
 
-    resume_ckpt = cfg["train"]["resume_training_checkpoint_path"]
+    resume_ckpt = cfg["train"]["resume_training_checkpoint_path"] or None
     if not resume_ckpt and auto_resume:
         resume_ckpt = get_latest_checkpoint(results_dir)
     if resume_ckpt:
