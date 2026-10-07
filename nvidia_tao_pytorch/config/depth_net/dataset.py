@@ -18,18 +18,6 @@ from nvidia_tao_pytorch.config.utils.types import (
 
 
 @dataclass
-class QuantCalibrationDataset:
-    """Quantization calibration dataset config."""
-
-    images_dir: str = STR_FIELD(
-        value="",
-        default_value="",
-        description="Path to the directory containing calibration images.",
-        display_name="calibration images directory"
-    )
-
-
-@dataclass
 class DNDatasetConvertConfig:
     """Dataset Convert config."""
 
@@ -263,6 +251,69 @@ class DepthNetAugmentationConfig:
         valid_max=1.0,
         automl_enabled="TRUE",
         display_name="The probability for min crop valid disparity ratio"
+    )
+
+
+@dataclass
+class QuantCalibrationDataset:
+    """Quantization calibration dataset config.
+
+    Mono models (``MetricDepthAnything`` / ``RelativeDepthAnything``) calibrate from a flat
+    image directory (``images_dir``). Stereo models (``FoundationStereo`` /
+    ``FastFoundationStereo``) calibrate from stereo-pair list files (``data_sources``, same
+    shape as ``test_dataset.data_sources``); when ``data_sources`` is unset the stereo path
+    falls back to ``test_dataset.data_sources``.
+    """
+
+    images_dir: str = STR_FIELD(
+        value="",
+        default_value="",
+        description="Path to the directory containing calibration images (mono depth models).",
+        display_name="calibration images directory"
+    )
+    data_sources: Optional[List[Dict[str, str]]] = LIST_FIELD(
+        arrList=None,
+        default_value=[{"dataset_name": "", "data_file": ""}],
+        description="""The list of stereo data sources for calibration (stereo depth models):
+                    * dataset_name : The type of the dataset
+                    * data_file : The path of the data file""",
+        display_name="calibration data sources",
+    )
+    num_samples: int = INT_FIELD(
+        value=128,
+        default_value=128,
+        valid_min=0,
+        valid_max="inf",
+        description="Maximum number of calibration samples drawn (in order) from the "
+                    "calibration dataset. 0 uses the whole dataset.",
+        display_name="number of calibration samples"
+    )
+    batch_size: int = INT_FIELD(
+        value=1,
+        default_value=1,
+        valid_min=1,
+        valid_max="inf",
+        description="The batch size for the calibration dataloader",
+        display_name="batch size"
+    )
+    workers: int = INT_FIELD(
+        value=4,
+        default_value=4,
+        valid_min=0,
+        valid_max="inf",
+        description="The number of parallel workers processing calibration data",
+        display_name="workers"
+    )
+    pin_memory: bool = BOOL_FIELD(
+        value=True,
+        default_value=True,
+        display_name="pin_memory",
+        description="Flag to enable pinned memory for the calibration dataloader."
+    )
+    augmentation: DepthNetAugmentationConfig = DATACLASS_FIELD(
+        DepthNetAugmentationConfig(),
+        description="Normalization parameters applied to calibration images (inference transforms only).",
+        display_name="augmentation",
     )
 
 
