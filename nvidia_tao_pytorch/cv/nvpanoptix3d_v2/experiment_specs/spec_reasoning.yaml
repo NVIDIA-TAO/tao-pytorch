@@ -1,0 +1,88 @@
+results_dir: /results/nvpanoptix3d_v2_reasoning
+model:
+  model_type: reasoning
+  img_size: 518
+  patch_size: 14
+  embed_dim: 1024
+  backbone:
+    pretrained_backbone_path: ""
+    metric_depth_head:
+      enable: true
+      feat_dim: 2048
+      hidden_dims: [256, 64]
+      metric_context_views: 5
+  reasoning:
+    qwen:
+      model_id: Qwen/Qwen3-VL-4B-Instruct
+      seg_token: "[SEG]"
+      freeze_vision: true
+      dtype: bfloat16
+      attn_implementation: sdpa
+      use_lora: true
+      lora:
+        r: 16
+        alpha: 32
+        dropout: 0.05
+    sam3:
+      load_from_hf: true
+      resolution: 1008
+    sam_bridge:
+      sam_prompt_dim: 256
+      hidden_dim: 4096
+      dropout: 0.0
+    point_mask_threshold: 0.5
+    point_conf_threshold: null
+train:
+  num_gpus: 1
+  gpu_ids: [0]
+  num_nodes: 1
+  seed: 42
+  num_epochs: 3
+  val_check_interval: 1.0
+  accum_iter: 1
+  lr: 2.0e-4
+  min_lr: 1.0e-6
+  weight_decay: 0.0
+  warmup_epochs: 2
+  precision: bf16
+  is_dry_run: false
+  clip_grad_norm: 1.0
+  checkpointer:
+    enable_topk: true
+    monitor: val/mIoU
+    save_top_k: 2
+  pretrained_model_path: null
+  cudnn:
+    benchmark: true
+    deterministic: false
+  metric_depth:
+    weight: 0.1
+    silog_weight: 1.0
+    absrel_weight: 0.1
+    silog_lambda: 0.85
+    min_depth: 0.1
+    max_depth: 30.0
+  reasoning:
+    text_weight: 1.0
+    mask_weight: 20.0
+    dice_weight: 1.0
+    score_weight: 1.0
+dataset:
+  reasoning:
+    train_manifest: /workspace/nvpanoptix3d_v2/reasoning_data/scannetpp_reason_train.jsonl
+    val_manifest: /workspace/nvpanoptix3d_v2/reasoning_data/scannetpp_reason_val.jsonl
+    require_seg_token: true
+    resolution: [518, 518]
+    num_views: 5
+    batch_size: 1
+evaluate:
+  checkpoint: /results/nvpanoptix3d_v2_reasoning/train/nvpanoptix3d_v2_reasoning_model_latest.pth
+  num_gpus: 1
+  gpu_ids: [0]
+  mask_threshold: 0.5
+inference:
+  checkpoint: /results/nvpanoptix3d_v2_reasoning/train/nvpanoptix3d_v2_reasoning_model_latest.pth
+  num_gpus: 1
+  gpu_ids: [0]
+  output_dir: null
+  mask_threshold: 0.5
