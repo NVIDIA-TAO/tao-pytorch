@@ -19,6 +19,7 @@ from PIL import Image
 import nvidia_tao_pytorch.multimodal.clip.scripts.evaluate as evaluate_script
 from nvidia_tao_pytorch.multimodal.clip.scripts.inference import (
     get_image_files,
+    run_image_inference,
     load_and_preprocess_batch,
     save_embeddings,
     load_text_file,
@@ -237,6 +238,54 @@ class TestEvaluateRouting:
 @pytest.mark.multimodal_unit
 class TestGetImageFiles:
     """Test get_image_files function."""
+
+    def test_image_list_selects_subset(self, tmp_path):
+        """Only listed images are selected, in list order."""
+        image_dir = tmp_path / 'images'
+        image_dir.mkdir()
+        (image_dir / 'nested').mkdir()
+        for name in ('a.jpg', 'b.jpg', 'nested/c.png'):
+            (image_dir / name).touch()
+        image_list = tmp_path / 'subset.txt'
+        image_list.write_text('nested/c.png\n\na.jpg\n', encoding='utf-8')
+
+        assert get_image_files(str(image_dir), str(image_list)) == [
+            str(image_dir / 'nested/c.png'), str(image_dir / 'a.jpg')
+        ]
+        config = SimpleNamespace(batch_size=2, datasets=[SimpleNamespace(
+            image_dir=str(image_dir), image_list_file=str(image_list)
+        )])
+        with patch(
+            'nvidia_tao_pytorch.multimodal.clip.scripts.inference.'
+            'load_and_preprocess_batch', return_value=(None, [])
+        ) as load_batch:
+            run_image_inference(SimpleNamespace(preprocess_val=None), config,
+                                str(tmp_path), torch.device('cpu'))
+        assert load_batch.call_args.args[0] == [
+            str(image_dir / 'nested/c.png'), str(image_dir / 'a.jpg')
+        ]
+
+    def test_no_list_keeps_recursive_scan(self, tmp_path):
+        """An omitted list keeps the sorted recursive directory scan."""
+        (tmp_path / 'nested').mkdir()
+        for name in ('z.jpg', 'nested/a.png', 'ignore.txt'):
+            (tmp_path / name).touch()
+
+        assert get_image_files(str(tmp_path)) == sorted([
+            str(tmp_path / 'z.jpg'), str(tmp_path / 'nested/a.png')
+        ])
+
+    def test_empty_or_missing_list_does_not_scan(self, tmp_path):
+        """An empty list selects nothing; a missing list fails clearly."""
+        (tmp_path / 'unlisted.jpg').touch()
+        image_list = tmp_path / 'empty.txt'
+        image_list.write_text('', encoding='utf-8')
+
+        assert get_image_files(str(tmp_path), str(image_list)) == []
+        with pytest.raises(ValueError, match='image_list_file'):
+            get_image_files(str(tmp_path), str(tmp_path / 'missing.txt'))
+        with pytest.raises(ValueError, match='image_list_file'):
+            get_image_files(str(tmp_path), str(tmp_path))
 
     def test_finds_supported_extensions(self):
         """Test that all supported image extensions are found."""
