@@ -33,21 +33,39 @@ from nvidia_tao_pytorch.multimodal.clip.utils.utils import (
 SUPPORTED_IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp'}
 
 
-def get_image_files(image_dir: str) -> List[str]:
-    """Get sorted list of image files from directory.
+def get_image_files(image_dir: str, image_list_file: Optional[str] = None) -> List[str]:
+    """Get listed images, or scan the directory when no list is provided.
 
-    Recursively searches the directory for supported image formats.
+    Without a list, recursively searches for supported image formats.
 
     Parameters
     ----------
     image_dir : str
         Directory path to search for images.
+    image_list_file : Optional[str]
+        Text file of image filenames relative to image_dir.
 
     Returns
     -------
     List[str]
-        Sorted list of absolute paths to image files.
+        Image paths in list order, or sorted paths from the directory scan.
     """
+    if image_list_file is not None:
+        try:
+            with open(image_list_file, 'r', encoding='utf-8') as file:
+                filenames = [line.strip() for line in file if line.strip()]
+        except OSError as exc:
+            raise ValueError(
+                f"Cannot read image_list_file: {image_list_file}"
+            ) from exc
+
+        for filename in filenames:
+            if os.path.isabs(filename) or '..' in filename.split(os.sep):
+                raise ValueError(
+                    f"image_list_file must contain paths relative to image_dir: {filename}"
+                )
+        return [os.path.join(image_dir, filename) for filename in filenames]
+
     image_files = []
     for root, _, files in os.walk(image_dir):
         for f in files:
@@ -266,9 +284,11 @@ def run_image_inference(
     image_files = []
     for dataset_cfg in inference_cfg.datasets:
         image_dir = dataset_cfg.image_dir
-        files = get_image_files(image_dir)
+        files = get_image_files(
+            image_dir, getattr(dataset_cfg, 'image_list_file', None)
+        )
         image_files.extend(files)
-        logging.info(f"Found {len(files)} images in {image_dir}")
+        logging.info("Selected %d images from %s", len(files), image_dir)
 
     if not image_files:
         logging.warning("No images found in any dataset")
