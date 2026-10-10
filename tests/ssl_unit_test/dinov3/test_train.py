@@ -9,6 +9,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from nvidia_tao_pytorch.config.dinov3.default_config import ExperimentConfig
+from nvidia_tao_pytorch.core import initialize_experiments
 from nvidia_tao_pytorch.ssl.dinov3.scripts import train
 
 
@@ -48,3 +49,34 @@ def test_run_experiment_forwards_logging_interval(monkeypatch):
         "auto_resume": cfg.train.auto_resume,
     }
     trainer.fit.assert_called_once()
+
+
+@pytest.mark.ssl_unit
+@pytest.mark.parametrize("resume_path", [None, ""])
+def test_run_experiment_starts_fresh_when_auto_resume_is_disabled(
+    tmp_path, monkeypatch, resume_path,
+):
+    """An unset resume path with auto-resume disabled reaches Lightning as None."""
+    cfg = OmegaConf.structured(ExperimentConfig())
+    cfg.results_dir = str(tmp_path)
+    cfg.train.auto_resume = False
+    cfg.train.resume_training_checkpoint_path = resume_path
+    # Keep the real initializer away from global RNG, cuDNN and WandB state.
+    cfg.train.seed = -1
+    cfg.train.cudnn.benchmark = False
+    cfg.wandb.enable = False
+    # Discovery would pick this up; disabling auto-resume must ignore it.
+    (tmp_path / "dinov3_latest.pth").touch()
+    monkeypatch.setenv("TAO_VISIBLE_DEVICES", "0")
+    # Keep the CI host's WandB credentials and TensorBoard install out of the result.
+    monkeypatch.setattr(initialize_experiments, "check_wandb_logged_in", lambda: False)
+    monkeypatch.setattr(initialize_experiments, "TensorBoardLogger", lambda **_: mock.Mock())
+
+    trainer = mock.Mock()
+    monkeypatch.setattr(train, "DinoV3DataModule", lambda *_: object())
+    monkeypatch.setattr(train, "DinoV3PlModel", lambda *_: mock.Mock())
+    monkeypatch.setattr(train, "Trainer", lambda **_: trainer)
+
+    train.run_experiment(cfg, key="")
+
+    assert trainer.fit.call_args.kwargs["ckpt_path"] is None
