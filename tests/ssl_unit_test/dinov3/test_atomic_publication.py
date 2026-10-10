@@ -3,6 +3,9 @@
 
 """Crash and competing-writer tests for DINOv3 artifact publication."""
 
+import os
+import stat
+
 import pytest
 
 from nvidia_tao_pytorch.ssl.dinov3.utils.atomic import atomic_path
@@ -32,3 +35,14 @@ def test_failed_writer_preserves_previous_publication(tmp_path):
             raise ValueError("serialization failed")
     assert destination.read_bytes() == b"old"
     assert list(tmp_path.iterdir()) == [destination]
+
+
+def test_published_files_follow_the_umask(tmp_path):
+    """Checkpoints on a shared results directory must not be owner-only."""
+    previous = os.umask(0o022)
+    try:
+        with atomic_path(tmp_path / "checkpoint.pth") as temporary:
+            temporary.write_bytes(b"weights")
+    finally:
+        os.umask(previous)
+    assert stat.S_IMODE((tmp_path / "checkpoint.pth").stat().st_mode) == 0o644
