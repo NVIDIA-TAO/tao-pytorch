@@ -3,10 +3,12 @@
 
 """Tests for DINOv3-owned manifest loading and checkpoint retention."""
 
+from collections import Counter
 from pathlib import Path
 import os
 import pickle
 import tarfile
+from types import SimpleNamespace
 import zipfile
 
 import pandas as pd
@@ -362,6 +364,91 @@ def test_manifest_sampler_pads_full_batches_without_losing_rows(rows, ranks, bat
         partitions.append(partition)
     assert len({len(partition) for partition in partitions}) == 1
     assert set().union(*map(set, partitions)) == set(range(rows))
+
+
+def _replayed_balanced_view(storage_type="file"):
+    """Mimic DS's balanced view: 200 unique task-a files, 4 task-b images x 50 replays."""
+    records = [{"storage_type": "file", "path": f"/a/{index}.jpg"} for index in range(200)]
+    if storage_type == "file":
+        records += [{"storage_type": "file", "path": f"/b/{index % 4}.jpg", "replay_repeat": index // 4}
+                    for index in range(200)]
+    else:
+        records += [{"storage_type": "tar", "path": "/b/shard.tar", "member": f"{index % 4}.jpg",
+                     "replay_repeat": index // 4} for index in range(200)]
+
+    class Dataset:
+        all_images = records
+
+        def __len__(self):
+            return len(records)
+
+        def sampling_group(self, index):
+            return DinoV3Dataset.sampling_group(self, index)
+
+    return Dataset(), records
+
+
+@pytest.mark.parametrize("storage_type", ["file", "tar"])
+@pytest.mark.parametrize("ranks", [1, 4])
+def test_replayed_rows_are_spread_across_batches_and_ranks(ranks, storage_type) -> None:
+    """Replays of one image must not fill whole batches or pin a task to some ranks."""
+    from torch.utils.data import BatchSampler
+
+    dataset, records = _replayed_balanced_view(storage_type)
+    for rank in range(ranks):
+        sampler = ShardAwareDistributedSampler(
+            dataset, num_replicas=ranks, rank=rank, batch_size=32, seed=7,
+        )
+        partition = list(sampler)
+        task_b = sum(records[index]["path"].startswith("/b/") for index in partition)
+        assert 0.3 < task_b / len(partition) < 0.7
+        for batch in BatchSampler(sampler, 32, drop_last=True):
+            # A random batch holds about 4 copies of each task-b file; grouping held 32.
+            copies = Counter((records[index]["path"], records[index].get("member")) for index in batch)
+            assert max(copies.values()) <= 12
+
+
+@pytest.mark.parametrize("shuffle", [True, False])
+def test_single_rows_water_fill_ranks_that_shards_overfilled(shuffle) -> None:
+    """Shards of 64, 64 and 3 rows plus 103 files: the two starved ranks share the files."""
+    groups = [f"tar:{name}" for name, size in (("a", 64), ("b", 64), ("c", 3)) for _ in range(size)]
+    groups += [f"row:{index}" for index in range(103)]
+
+    class Dataset:
+        def __len__(self):
+            return len(groups)
+
+        def sampling_group(self, index):
+            return groups[index]
+
+    real = sorted(len(set(ShardAwareDistributedSampler(
+        Dataset(), num_replicas=4, rank=rank, batch_size=8, shuffle=shuffle,
+    ))) for rank in range(4))
+    assert real == [53, 53, 64, 64]
+
+
+def test_rank_partition_changes_between_epochs_and_agrees_across_ranks() -> None:
+    dataset, _ = _replayed_balanced_view()
+    samplers = [ShardAwareDistributedSampler(dataset, num_replicas=4, rank=rank, seed=7) for rank in range(4)]
+    partitions = {}
+    for epoch in (0, 1):
+        for sampler in samplers:
+            sampler.set_epoch(epoch)
+        partitions[epoch] = [set(sampler) for sampler in samplers]
+        assert set().union(*partitions[epoch]) == set(range(len(dataset)))
+        assert sum(map(len, partitions[epoch])) == len(dataset)
+    assert partitions[0][0] != partitions[1][0]
+
+
+def test_archive_rows_keep_their_shard_group_per_replay_pass() -> None:
+    record = SimpleNamespace(all_images=[
+        {"storage_type": "tar", "path": "/shards/0.tar"},
+        {"storage_type": "tar", "path": "/shards/0.tar", "replay_repeat": 0},
+        {"storage_type": "tar", "path": "/shards/0.tar", "replay_repeat": 1},
+    ])
+    groups = [DinoV3Dataset.sampling_group(record, index) for index in range(3)]
+    assert groups[0] == groups[1] == "tar:/shards/0.tar#0"
+    assert groups[2] == "tar:/shards/0.tar#1"
 
 
 def test_relative_manifest_paths_do_not_depend_on_working_directory(tmp_path, monkeypatch):

@@ -34,38 +34,63 @@ class ShardAwareDistributedSampler(distributed.DistributedSampler):
 
     def _rank_assignments(self):
         cached = getattr(self, "_shard_rank_assignments", None)
-        if cached is not None:
-            return cached
-        grouped = defaultdict(list)
-        for index in range(len(self.dataset)):
-            grouped[self.dataset.sampling_group(index)].append(index)
+        if cached is not None and cached[0] == self.epoch:
+            return cached[1]
+        if getattr(self, "_shards", None) is None:
+            grouped = defaultdict(list)
+            for index in range(len(self.dataset)):
+                grouped[self.dataset.sampling_group(index)].append(index)
+            # Multi-row groups keep archive read locality; single rows need none.
+            self._shards = sorted((name, rows) for name, rows in grouped.items() if len(rows) > 1)
+            self._loose = sorted(rows[0] for rows in grouped.values() if len(rows) == 1)
+        # Every rank draws the same order from seed + epoch, so the partition
+        # stays consistent across ranks but changes each epoch.
+        generator = torch.Generator().manual_seed(self.seed + self.epoch)
+        shards, loose = self._shards, self._loose
+        if self.shuffle:
+            shards = [shards[position] for position in torch.randperm(len(shards), generator=generator).tolist()]
+            loose = [loose[position] for position in torch.randperm(len(loose), generator=generator).tolist()]
         assignments = [[] for _ in range(self.num_replicas)]
         epoch_size = self.num_samples
         capacity = [epoch_size] * self.num_replicas
-        for name, rows in sorted(grouped.items(), key=lambda item: (-len(item[1]), item[0])):
+        for name, rows in sorted(shards, key=lambda item: -len(item[1])):
             offset = 0
             while offset < len(rows):
                 remaining = len(rows) - offset
-                whole_fit = [rank for rank, free in enumerate(capacity) if free >= remaining]
-                if whole_fit:
-                    rank = min(
-                        whole_fit,
-                        key=lambda value, required=remaining: (
-                            capacity[value] - required,
-                            value,
-                        ),
-                    )
-                    count = remaining
-                else:
-                    rank = max(range(self.num_replicas), key=lambda value: (capacity[value], -value))
-                    count = min(remaining, capacity[rank])
+                # Least-loaded rank first: spreads shards (and the tasks in them)
+                # evenly instead of packing them onto the first ranks.
+                rank = max(range(self.num_replicas), key=lambda value: (capacity[value], -value))
+                count = min(remaining, capacity[rank])
                 if count == 0:
                     break
                 assignments[rank].append((f"{name}#{offset}", rows[offset:offset + count]))
                 capacity[rank] -= count
                 offset += count
-        self._shard_rank_assignments = (assignments, epoch_size)
-        return self._shard_rank_assignments
+        # Water-fill single rows: raise the ranks with the fewest real rows first,
+        # so padding duplicates stay as even as the shards allow.
+        real = [epoch_size - free for free in capacity]
+
+        def fill(level):
+            return [min(capacity[rank], max(0, level - real[rank])) for rank in range(self.num_replicas)]
+
+        low, high = 0, epoch_size
+        while low < high:
+            middle = (low + high + 1) // 2
+            low, high = (middle, high) if sum(fill(middle)) <= len(loose) else (low, middle - 1)
+        shares = fill(low)
+        for rank in range(self.num_replicas):
+            if sum(shares) == len(loose):
+                break
+            if real[rank] + shares[rank] == low and shares[rank] < capacity[rank]:
+                shares[rank] += 1
+        offset = 0
+        for rank, share in enumerate(shares):
+            for start in range(offset, offset + share, self.shuffle_window):
+                assignments[rank].append((f"rows#{start}", loose[start:min(start + self.shuffle_window, offset + share)]))
+            capacity[rank] -= share
+            offset += share
+        self._shard_rank_assignments = (self.epoch, (assignments, epoch_size))
+        return assignments, epoch_size
 
     def __iter__(self):
         """Yield a deterministic shard-local partition for the current epoch."""
@@ -220,9 +245,15 @@ class DinoV3Dataset(DinoV2Dataset):
         return records
 
     def sampling_group(self, index):
-        """Return the backing file/shard used to group sampler reads."""
+        """Return the archive shard used to group sampler reads, or the row itself."""
         record = self.all_images[index]
-        return f"{record['storage_type']}:{record['path']}"
+        if record["storage_type"] == "file":
+            # A loose file has no read locality to keep. Grouping by path would put
+            # every replayed copy of one image in the same batches and on one rank.
+            return f"row:{index}"
+        # Each replay pass over a shard is its own group, so copies of one member
+        # land in different windows, batches and ranks.
+        return f"{record['storage_type']}:{record['path']}#{record.get('replay_repeat', 0)}"
 
     def _get_item_internal_(self, idx):
         if self.manifest_path is None:

@@ -7,17 +7,22 @@ from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
-import tempfile
+import secrets
 
 
 @contextmanager
 def atomic_path(destination):
-    """Yield a private path, then sync and replace; clean up only our own file."""
+    """Yield a fresh same-directory path, then sync and replace; clean up only our own file."""
     destination = Path(destination)
-    descriptor, name = tempfile.mkstemp(prefix=f".{destination.name}.", suffix=".tmp",
-                                        dir=destination.parent)
-    os.close(descriptor)
-    temporary = Path(name)
+    while True:
+        # Unlike mkstemp's fixed 0600, mode 0666 honours the umask like any other
+        # output, so a platform reading the shared results directory can open it.
+        temporary = destination.parent / f".{destination.name}.{secrets.token_hex(8)}.tmp"
+        try:
+            os.close(os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666))
+            break
+        except FileExistsError:
+            continue
     try:
         yield temporary
         with temporary.open("rb") as stream:
