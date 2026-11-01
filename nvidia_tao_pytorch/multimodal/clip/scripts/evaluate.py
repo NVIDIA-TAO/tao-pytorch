@@ -5,6 +5,7 @@
 
 import os
 
+import torch
 from pytorch_lightning import Trainer
 
 from nvidia_tao_pytorch.core.decorators.workflow import monitor_status
@@ -47,6 +48,9 @@ def run_experiment(experiment_config, key):
     ValueError
         If no evaluation data is configured (missing captions_dir).
     """
+
+    if os.environ.get("TAO_CLIP_DISABLE_CUDNN", "").lower() in {"1", "true", "yes", "on"}:
+        torch.backends.cudnn.enabled = False
     del key  # Unused but required by TAO API
 
     # Direct PAS evaluation is an explicit opt-in through evaluate.datasets.

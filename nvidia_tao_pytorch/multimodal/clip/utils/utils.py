@@ -356,7 +356,8 @@ def load_model_from_checkpoint(model_path, experiment_config, model_class):
         model = model_class.load_from_checkpoint(
             model_path,
             map_location="cpu",
-            experiment_spec=experiment_config
+            experiment_spec=experiment_config,
+            weights_only=False,
         )
         logging.info(f"Model loaded from {model_path}")
         return model

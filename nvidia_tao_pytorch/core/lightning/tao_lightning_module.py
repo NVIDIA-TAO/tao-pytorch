@@ -204,6 +204,7 @@ class TAOLightningModule(pl.LightningModule):
                                               monitor=None,
                                               save_top_k=-1,
                                               save_last='link',
+                                              save_weights_only=True,
                                               filename='model_{epoch:03d}_{step:05d}',
                                               enable_version_counter=False)
 
