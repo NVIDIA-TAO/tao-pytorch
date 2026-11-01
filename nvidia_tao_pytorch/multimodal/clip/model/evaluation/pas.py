@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -33,6 +35,7 @@ from typing import (
     Sequence,
     Set,
     Tuple,
+    Union,
 )
 
 import numpy as np
@@ -892,7 +895,7 @@ def _compute_query_metrics(
     similarities: np.ndarray,
     gt_indices: Sequence[int],
     k: int = PAS_K,
-) -> Optional[Dict]:
+) -> Optional[Tuple[Dict, np.ndarray]]:
     """Compute PAS metrics from the ranks of positive gallery items."""
     if not gt_indices:
         return None
@@ -943,16 +946,20 @@ def _compute_query_metrics(
             num_positives * num_negatives
         )
 
-    return {
-        "ap": average_precision,
-        "rank1": float(positive_ranks[0] <= 1),
-        "rank5": float(positive_ranks[0] <= 5),
-        "auc": float(auc),
-        "top_k_rate": float(top_k_rate),
-        "zero_match": float(matches_in_top_k == 0),
-        "first_pos": float(positive_ranks[0]),
-        "num_gt": num_positives,
-    }
+    return (
+        {
+            "ap": average_precision,
+            "rank1": float(positive_ranks[0] <= 1),
+            "rank5": float(positive_ranks[0] <= 5),
+            "rank10": float(positive_ranks[0] <= 10),
+            "auc": float(auc),
+            "top_k_rate": float(top_k_rate),
+            "zero_match": float(matches_in_top_k == 0),
+            "first_pos": float(positive_ranks[0]),
+            "num_gt": num_positives,
+        },
+        positive_ranks,
+    )
 
 
 def _finalize_metrics(
@@ -970,6 +977,7 @@ def _finalize_metrics(
         "mAP": float(np.mean([metrics["ap"] for metrics in raw_metrics])),
         "Rank-1": float(np.mean([metrics["rank1"] for metrics in raw_metrics])),
         "Rank-5": float(np.mean([metrics["rank5"] for metrics in raw_metrics])),
+        "Rank-10": float(np.mean([metrics["rank10"] for metrics in raw_metrics])),
         "Separability": float(np.mean([metrics["auc"] for metrics in raw_metrics])),
         f"Match@{k}": float(
             np.mean([metrics["top_k_rate"] for metrics in raw_metrics])
@@ -984,14 +992,16 @@ def _finalize_metrics(
 def _gallery_by_dataset(
     pairs: Sequence[PasPair],
     image_embeddings: Mapping[str, np.ndarray],
-) -> Dict[str, List[str]]:
+    return_unique_name: bool = False,
+) -> Dict[str, List[Union[str, Tuple[str, str]]]]:
     """Build isolated source-image galleries for each PAS dataset."""
-    gallery: Dict[str, List[str]] = {
+    gallery: Dict[str, List[Union[str, Tuple[str, str]]]] = {
         dataset: [] for dataset in _dataset_names_from_pairs(pairs)
     }
     seen: Dict[str, Set[str]] = {dataset: set() for dataset in gallery}
     for pair in pairs:
         image_key = _pair_image_key(pair)
+        image_unique_name = pair.unique_name
         if image_key not in image_embeddings:
             continue
         gallery.setdefault(pair.dataset, [])
@@ -999,7 +1009,9 @@ def _gallery_by_dataset(
         if image_key in seen[pair.dataset]:
             continue
         seen[pair.dataset].add(image_key)
-        gallery[pair.dataset].append(image_key)
+        gallery[pair.dataset].append(
+            (image_key, image_unique_name) if return_unique_name else image_key
+        )
     return gallery
 
 
@@ -1021,9 +1033,19 @@ def _evaluate_query_items(
     text_embeddings: Mapping[str, np.ndarray],
     description: str,
     k: int,
-) -> Optional[Dict]:
+    query_to_attribute_mapping: Optional[Mapping[str, Tuple[int, ...]]] = None,
+    gallery_names: Optional[Sequence[Tuple[str, str]]] = None,
+    return_elaborate: bool = False,
+) -> Union[Optional[Dict], Tuple[Optional[Dict], List[Dict]]]:
     """Score one dataset/query-type slice in bounded query batches."""
     raw_metrics: List[Dict] = []
+    raw_metrics_elaborate: List[Dict] = []
+    if return_elaborate and (
+        query_to_attribute_mapping is None or gallery_names is None
+    ):
+        raise ValueError(
+            "Elaborate PAS metrics require query attributes and gallery names."
+        )
     for start in tqdm(
         range(0, len(query_items), PAS_EVAL_QUERY_BATCH),
         desc=description,
@@ -1034,13 +1056,32 @@ def _evaluate_query_items(
             [text_embeddings[caption] for caption, _ in batch_items]
         )
         similarities_batch = query_embeddings @ gallery_embeddings.T
-        for similarities, (_, ground_truth) in zip(
+        for similarities, (caption, ground_truth) in zip(
             similarities_batch, batch_items
         ):
-            metrics = _compute_query_metrics(similarities, ground_truth, k=k)
-            if metrics:
-                raw_metrics.append(metrics)
-    return _finalize_metrics(raw_metrics, len(gallery_embeddings), k)
+            result = _compute_query_metrics(similarities, ground_truth, k=k)
+            if result is None:
+                continue
+            metrics, positive_ranks = result
+            raw_metrics.append(metrics)
+            if return_elaborate:
+                raw_metrics_elaborate.append(
+                    {
+                        "caption": caption,
+                        "attributes": query_to_attribute_mapping[caption],
+                        "gt_imgs": [
+                            gallery_names[gallery_index][1]
+                            for gallery_index in ground_truth
+                        ],
+                        "gt_ranks": positive_ranks.tolist(),
+                        **metrics,
+                    }
+                )
+
+    summary = _finalize_metrics(raw_metrics, len(gallery_embeddings), k)
+    if return_elaborate:
+        return summary, raw_metrics_elaborate
+    return summary
 
 
 def evaluate_text_to_image(
@@ -1048,20 +1089,32 @@ def evaluate_text_to_image(
     image_embeddings: Mapping[str, np.ndarray],
     text_embeddings: Mapping[str, np.ndarray],
     k: int = PAS_K,
-) -> List[Dict]:
+) -> Tuple[List[Dict], Dict[str, List[Dict]]]:
     """Evaluate exact-caption positives for each dataset/query type."""
     query_groups = _group_text_queries(pairs)
-    gallery = _gallery_by_dataset(pairs, image_embeddings)
+    query_to_attribute_mapping = {
+        pair.caption: pair.text_attr_values or pair.image_attr_values
+        for pair in pairs
+        if pair.query_type in PAS_QUERY_TYPES
+    }
+    gallery = _gallery_by_dataset(
+        pairs,
+        image_embeddings,
+        return_unique_name=True,
+    )
     rows: List[Dict] = []
+    raw_metrics_elaborate_by_subset: Dict[str, List[Dict]] = {}
 
     for dataset in _pas_dataset_eval_order(pairs):
         gallery_names = gallery.get(dataset, [])
         if not gallery_names:
             continue
         gallery_embeddings = np.stack(
-            [image_embeddings[name] for name in gallery_names]
+            [image_embeddings[name] for name, _ in gallery_names]
         )
-        gallery_index = {name: index for index, name in enumerate(gallery_names)}
+        gallery_index = {
+            name: index for index, (name, _) in enumerate(gallery_names)
+        }
 
         for query_type in PAS_QUERY_TYPES:
             query_items: List[Tuple[str, List[int]]] = []
@@ -1082,12 +1135,15 @@ def evaluate_text_to_image(
                 if ground_truth:
                     query_items.append((caption, ground_truth))
 
-            metrics = _evaluate_query_items(
+            metrics, raw_metrics_elaborate = _evaluate_query_items(
                 query_items,
                 gallery_embeddings,
                 text_embeddings,
                 f"PAS {dataset}/{query_type}",
                 k,
+                query_to_attribute_mapping=query_to_attribute_mapping,
+                gallery_names=gallery_names,
+                return_elaborate=True,
             )
             if metrics is not None:
                 rows.append(
@@ -1098,7 +1154,10 @@ def evaluate_text_to_image(
                         **metrics,
                     }
                 )
-    return rows
+            raw_metrics_elaborate_by_subset[
+                f"<dataset>|{dataset}|<query_type>|{query_type}"
+            ] = raw_metrics_elaborate
+    return rows, raw_metrics_elaborate_by_subset
 
 
 def _metadata_gt_indices(
@@ -1138,7 +1197,7 @@ def evaluate_text_to_image_by_metadata(
     text_embeddings: Mapping[str, np.ndarray],
     k: int = PAS_K,
     ground_truth_mode: str = "scalar_attributes",
-) -> List[Dict]:
+) -> Tuple[List[Dict], Dict[str, List[Dict]]]:
     """Evaluate caption-deduplicated scalar/accessory PAS positives."""
     ground_truth_mode = _normalize_pas_ground_truth_mode(ground_truth_mode)
     if ground_truth_mode == "paired_caption":
@@ -1147,7 +1206,11 @@ def evaluate_text_to_image_by_metadata(
     if accessory_required:
         _validate_required_accessory_pairs(pairs)
 
-    gallery = _gallery_by_dataset(pairs, image_embeddings)
+    gallery = _gallery_by_dataset(
+        pairs,
+        image_embeddings,
+        return_unique_name=True,
+    )
     image_attributes: Dict[str, Tuple[int, ...]] = {}
     image_accessories: Dict[str, Tuple[int, ...]] = {}
     for pair in pairs:
@@ -1178,30 +1241,34 @@ def evaluate_text_to_image_by_metadata(
         )
 
     rows: List[Dict] = []
+    raw_metrics_elaborate_by_subset: Dict[str, List[Dict]] = {}
     for dataset in _pas_dataset_eval_order(pairs):
         gallery_names = [
-            name for name in gallery.get(dataset, []) if name in image_attributes
+            (name, unique_name)
+            for name, unique_name in gallery.get(dataset, [])
+            if name in image_attributes
         ]
         if not gallery_names:
             continue
-        widths = {len(image_attributes[name]) for name in gallery_names}
+        widths = {len(image_attributes[name]) for name, _ in gallery_names}
         if len(widths) != 1:
             raise ValueError(f"PAS dataset {dataset!r} has inconsistent scalar widths.")
         gallery_embeddings = np.stack(
-            [image_embeddings[name] for name in gallery_names]
+            [image_embeddings[name] for name, _ in gallery_names]
         )
         gallery_attributes = np.asarray(
-            [image_attributes[name] for name in gallery_names],
+            [image_attributes[name] for name, _ in gallery_names],
             dtype=np.int64,
         )
         gallery_indices_by_accessory: Dict[int, Set[int]] = defaultdict(set)
         if accessory_required:
-            for gallery_index, name in enumerate(gallery_names):
+            for gallery_index, (name, _) in enumerate(gallery_names):
                 for accessory_id in image_accessories[name]:
                     gallery_indices_by_accessory[accessory_id].add(gallery_index)
 
         for query_type in PAS_METADATA_QUERY_TYPES:
             query_items: List[Tuple[str, List[int]]] = []
+            query_to_attribute_mapping: Dict[str, Tuple[int, ...]] = {}
             for (
                 query_dataset,
                 query_kind,
@@ -1215,6 +1282,10 @@ def evaluate_text_to_image_by_metadata(
                     continue
                 ground_truth: Set[int] = set()
                 for pair in signatures.values():
+                    query_to_attribute_mapping.setdefault(
+                        caption,
+                        pair.text_attr_values or pair.image_attr_values,
+                    )
                     ground_truth.update(
                         _metadata_gt_indices(
                             pair,
@@ -1226,12 +1297,15 @@ def evaluate_text_to_image_by_metadata(
                 if ground_truth:
                     query_items.append((caption, sorted(ground_truth)))
 
-            metrics = _evaluate_query_items(
+            metrics, raw_metrics_elaborate = _evaluate_query_items(
                 query_items,
                 gallery_embeddings,
                 text_embeddings,
                 f"PAS metadata {dataset}/{query_type}",
                 k,
+                query_to_attribute_mapping=query_to_attribute_mapping,
+                gallery_names=gallery_names,
+                return_elaborate=True,
             )
             if metrics is not None:
                 rows.append(
@@ -1242,7 +1316,10 @@ def evaluate_text_to_image_by_metadata(
                         **metrics,
                     }
                 )
-    return rows
+            raw_metrics_elaborate_by_subset[
+                f"<dataset>|{dataset}|<query_type>|{query_type}"
+            ] = raw_metrics_elaborate
+    return rows, raw_metrics_elaborate_by_subset
 
 
 def evaluate_pas_metadata_embeddings(
@@ -1251,9 +1328,9 @@ def evaluate_pas_metadata_embeddings(
     text_embeddings: Mapping[str, np.ndarray],
     ground_truth_mode: str,
     k: int = PAS_K,
-) -> Dict[str, List[Dict]]:
+) -> Dict[str, object]:
     """Evaluate and aggregate metadata-compatible PAS embeddings."""
-    rows = evaluate_text_to_image_by_metadata(
+    rows, raw_metrics_elaborate = evaluate_text_to_image_by_metadata(
         pairs,
         image_embeddings,
         text_embeddings,
@@ -1263,6 +1340,7 @@ def evaluate_pas_metadata_embeddings(
     dataset_names = _dataset_names_from_pairs(pairs)
     return {
         "metadata": rows,
+        "metadata_raw_metrics_elaborate": raw_metrics_elaborate,
         "metadata_aggregate": aggregate_metric_rows(
             rows,
             k,
@@ -1288,6 +1366,7 @@ def _metric_fieldnames(k: int) -> List[str]:
         "mAP",
         "Rank-1",
         "Rank-5",
+        "Rank-10",
         "Separability",
         f"Match@{k}",
         f"Zero@{k}",
@@ -1512,9 +1591,15 @@ def run_pas_evaluation(
         device,
     )
 
-    paired_rows = evaluate_text_to_image(
+    paired_rows, paired_raw_metrics_elaborate = evaluate_text_to_image(
         pairs, image_embeddings, text_embeddings, PAS_K
     )
+    with open(
+        results_dir / "nvidia_pas_raw_t2i_metrics.json",
+        "w",
+        encoding="utf-8",
+    ) as file:
+        json.dump(paired_raw_metrics_elaborate, file)
     paired_aggregate, paired_weighted = _write_pas_metric_outputs(
         results_dir,
         "nvidia_pas_metrics",
@@ -1546,6 +1631,12 @@ def run_pas_evaluation(
                 metadata_output[key],
                 PAS_K,
             )
+        with open(
+            results_dir / "nvidia_pas_metadata_raw_t2i_metrics.json",
+            "w",
+            encoding="utf-8",
+        ) as file:
+            json.dump(metadata_output["metadata_raw_metrics_elaborate"], file)
         output.update(metadata_output)
     logging.info("PAS TAO-FT evaluation finished.")
     return output
