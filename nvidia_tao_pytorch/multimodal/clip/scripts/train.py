@@ -16,6 +16,8 @@ from nvidia_tao_pytorch.core.utils import (  # noqa: F401
 # pylint: enable=unused-import
 # isort: on
 
+import torch
+
 from lightning_fabric.utilities.distributed import _init_dist_connection
 from lightning_fabric.utilities.seed import reset_seed
 from nvidia_tao_pytorch.core.decorators.workflow import monitor_status
@@ -74,6 +76,9 @@ def _load_pretrained_model_state(model, pretrained_path):
 
 def run_experiment(experiment_config, key):
     """Start the training."""
+
+    if os.environ.get("TAO_CLIP_DISABLE_CUDNN", "").lower() in {"1", "true", "yes", "on"}:
+        torch.backends.cudnn.enabled = False
     register_checkpoint_safe_globals()
     resume_ckpt, trainer_kwargs = initialize_train_experiment(
         experiment_config,

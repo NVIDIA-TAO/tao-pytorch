@@ -415,7 +415,7 @@ def launch(args, unknown_args, subtasks, network=None):
             unknown_args_as_str
         )
     else:
-        call = "python " + script + script_args + unknown_args_as_str
+        call = sys.executable + " " + script + script_args + unknown_args_as_str
 
     process_passed = False
     user_error = False
