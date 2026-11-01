@@ -7,7 +7,10 @@ from typing import Any, Mapping, Union
 
 import torch
 from safetensors.torch import load_file
-from torch.serialization import FileLike
+try:
+    from torch.serialization import FileLike
+except ImportError:
+    FileLike = Any
 
 from nvidia_tao_pytorch.core.cookbooks.tlt_pytorch_cookbook import TLTPyTorchCookbook
 from nvidia_tao_pytorch.core.utilities import patch_decrypt_checkpoint

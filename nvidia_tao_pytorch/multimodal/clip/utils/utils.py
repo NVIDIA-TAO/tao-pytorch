@@ -7,7 +7,10 @@ import os
 
 import numpy as np
 import torch
-from apex.optimizers import FusedLAMB
+try:
+    from apex.optimizers import FusedLAMB
+except ImportError:
+    FusedLAMB = None
 from tabulate import tabulate
 from torch.optim import AdamW
 
@@ -76,6 +79,10 @@ def _create_optimizer(optimizer_type, param_groups, lr, betas, eps):
     if optimizer_type == 'adamw':
         return AdamW(param_groups, lr=lr, betas=tuple(betas), eps=eps)
     elif optimizer_type == 'lamb':
+        if FusedLAMB is None:
+            raise ImportError(
+                "optimizer_type='lamb' requires NVIDIA Apex"
+            )
         return FusedLAMB(param_groups, lr=lr, betas=tuple(betas), eps=eps)
     else:
         raise ValueError(
