@@ -102,19 +102,19 @@ def write_files(filename: str, write_mode: str, data: dict):
         elif len(data) == 2 and 'right' in data.keys():
             # write both items the data:
             for i in range(len(data['left'])):
-                f.write(f'{data['left'][i]} {data['right'][i]}' + '\n')
+                f.write(f"{data['left'][i]} {data['right'][i]}" + '\n')
 
         elif len(data) == 2 and 'disparity' in data.keys():
             for i in range(len(data['left'])):
-                f.write(f'{data['left'][i]} {data['disparity'][i]}' + '\n')
+                f.write(f"{data['left'][i]} {data['disparity'][i]}" + '\n')
 
         elif len(data) == 3:
             for i in range(len(data['left'])):
-                f.write(f'{data['left'][i]} {data['right'][i]} {data['disparity'][i]}' + '\n')
+                f.write(f"{data['left'][i]} {data['right'][i]} {data['disparity'][i]}" + '\n')
 
         elif len(data) == 4:
             for i in range(len(data['left'])):
-                f.write(f'{data['left'][i]} {data['right'][i]} {data['disparity'][i]} {data['mask'][i]}' + '\n')
+                f.write(f"{data['left'][i]} {data['right'][i]} {data['disparity'][i]} {data['mask'][i]}" + '\n')
     f.close()
 
 
