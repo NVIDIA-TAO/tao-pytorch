@@ -31,9 +31,10 @@ model:
   pretrained_ckpt: null    # set to a local .pth COMPLETE model to override all component weights above
   #
   # Train from scratch (random init): set ALL of internvideo2clip_hf_id,
-  # vision_encoder, text_encoder, clip_head, and pretrained_ckpt to null.
-  # (Honored once InternVideo2CLIP model code is migrated into TAO; until then
-  # an all-null config raises ValueError in the asset resolver.)
+  # vision_encoder, text_encoder, clip_head, and pretrained_ckpt to null. The
+  # asset resolver then builds the architecture without loading any weights
+  # (logged). A ValueError is raised only when text_encoder is null while any
+  # other source above is set.
 
   # --- InternVideo2 perf kernels (require flash-attn in the env) ---------------
   use_flash_attn: false
@@ -158,9 +159,9 @@ inference:
   overwrite_embeddings: false
   video_embeddings_file: null
   text_embeddings_file: null
-  # Ranking config for mode=retrieval (shared with evaluate).
+  # Ranking config, used when mode=retrieval (shared with evaluate, which
+  # always ranks its explicit-relevance queries).
   search:
-    enabled: false
     search_metric: cosine   # cosine | knn
     top_k: 5                # corpus matches per query
     normalize: true
@@ -173,11 +174,14 @@ inference:
 export:
   checkpoint: ???
   onnx_file: ???
-  encoder_type: separate
+  # TAO Deploy (gen_trt_engine) consumes only the combined ONNX with a dynamic
+  # batch axis: keep encoder_type=combined and batch_size=-1 for that path.
+  # 'separate' and a fixed batch remain valid for other consumers.
+  encoder_type: combined
   input_height: 224
   input_width: 224
   input_channel: 3
-  batch_size: 1
+  batch_size: -1
   opset_version: 23
   gpu_id: 0
   on_cpu: false

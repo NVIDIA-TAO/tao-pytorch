@@ -248,3 +248,34 @@ class TestInternVideo2Tokenizer:
         assert single.shape == (4,)
         assert batch.shape == (2, 4)
         assert collated.shape == (2, 4)
+
+
+@pytest.mark.multimodal_unit
+class TestInternVideo2AssetsNullSources:
+    """Behaviour the shipped spec comments describe for null weight sources."""
+
+    def test_all_null_sources_build_without_weights_and_do_not_raise(self, monkeypatch):
+        """All-null sources mean random init: no download, no ValueError, None assets."""
+        monkeypatch.setattr(
+            "huggingface_hub.hf_hub_download",
+            lambda *args, **kwargs: pytest.fail("no download expected for all-null sources"),
+        )
+        assets = resolve_internvideo2_l14_assets(SimpleNamespace(
+            internvideo2clip_hf_id=None,
+            vision_encoder=None,
+            text_encoder=None,
+            clip_head=None,
+            pretrained_ckpt=None,
+        ))
+        assert assets == {"vision_ckpt": None, "text_ckpt": None, "extra_ckpt": None}
+
+    def test_null_text_encoder_with_other_sources_raises(self):
+        """Only a missing text_encoder alongside other sources is an error."""
+        with pytest.raises(ValueError, match="requires model.text_encoder"):
+            resolve_internvideo2_l14_assets(SimpleNamespace(
+                internvideo2clip_hf_id=DEFAULT_INTERNVIDEO2CLIP_HF_ID,
+                vision_encoder=None,
+                text_encoder=None,
+                clip_head=None,
+                pretrained_ckpt=None,
+            ))

@@ -774,20 +774,15 @@ class VideoCLIPTrainConfig(TrainConfig):
 class VideoCLIPSearchConfig:
     """Text->video search / retrieval ranking over the extracted embeddings.
 
-    Shared by the evaluate and inference tasks. Disabled by default: when
-    ``enabled`` is False (and inference ``mode`` is not 'retrieval') the task
-    only extracts embeddings. When active, the task ranks, for each text query,
-    the most similar video clips and writes the retrieval results +
-    ``similarity_stats.json``. Dataset-agnostic: operates only on the generic
+    Shared by the evaluate and inference tasks. Whether ranking runs is decided
+    by the task, not here: inference ranks only when ``inference.mode`` is
+    'retrieval' (mode 'embeddings' just extracts embeddings), and evaluate
+    always ranks its explicit-relevance queries. When ranking, each text query
+    is scored against the video embeddings and the ranked matches are written
+    to the results directory. Dataset-agnostic: operates only on the generic
     video/text embeddings.
     """
 
-    enabled: bool = BOOL_FIELD(
-        value=False,
-        default_value=False,
-        description="Run text->video search over the extracted embeddings.",
-        display_name="Enable Search",
-    )
     search_metric: str = STR_FIELD(
         value="cosine",
         default_value="cosine",
@@ -1001,7 +996,10 @@ class VideoCLIPExportConfig:
     onnx_file: Optional[str] = STR_FIELD(
         value=None,
         default_value=None,
-        description="Output ONNX file path (without extension for 'separate' encoder_type).",
+        description="Output ONNX file path, including the .onnx extension. None "
+                    "writes <checkpoint stem>.onnx next to the checkpoint. For "
+                    "encoder_type='separate' the two files are derived from this "
+                    "path as <stem>_vision<ext> and <stem>_text<ext>.",
         display_name="ONNX File Path",
     )
     encoder_type: str = STR_FIELD(

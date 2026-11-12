@@ -146,7 +146,6 @@ inference:
   video_embeddings_file: null
   text_embeddings_file: null
   search:
-    enabled: false
     search_metric: cosine
     top_k: 5
     normalize: true
@@ -159,11 +158,13 @@ inference:
 export:
   checkpoint: ???
   onnx_file: ???
-  encoder_type: separate
+  # TAO Deploy (gen_trt_engine) consumes only the combined ONNX with a dynamic
+  # batch axis: keep encoder_type=combined and batch_size=-1 for that path.
+  encoder_type: combined
   input_height: 224
   input_width: 224
   input_channel: 3
-  batch_size: 1
+  batch_size: -1
   opset_version: 23
   gpu_id: 0
   on_cpu: false

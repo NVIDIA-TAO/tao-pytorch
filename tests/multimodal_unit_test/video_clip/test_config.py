@@ -38,6 +38,9 @@ from nvidia_tao_pytorch.config.video_clip.default_config import (
 SPEC_PATH = os.path.join(
     os.path.dirname(_vc_pkg.__file__), "experiment_specs", "experiment_spec.yaml"
 )
+LORA_SPEC_PATH = os.path.join(
+    os.path.dirname(_vc_pkg.__file__), "experiment_specs", "experiment_spec_lora.yaml"
+)
 
 
 @pytest.mark.multimodal_unit
@@ -85,19 +88,20 @@ class TestVideoCLIPConfigSchema:
             OmegaConf.to_object(cfg.dataset.metrics), dict
         ) or cfg.dataset.metrics.mode == "retrieval"
 
-    def test_search_is_nested_and_uses_enabled(self):
-        """Search is a nested sub-config (enabled flag) on both tasks; the
-        flat top_k/search_metric/normalize knobs are gone from inference."""
+    def test_search_is_nested_on_both_tasks(self):
+        """Search is a nested sub-config on both tasks; the flat
+        top_k/search_metric/normalize knobs are gone from inference."""
         cfg = OmegaConf.structured(VideoCLIPExperimentConfig())
-        assert cfg.inference.search.enabled is False
-        assert cfg.evaluate.search.enabled is False
+        for task in (cfg.inference, cfg.evaluate):
+            assert set(task.search.keys()) == {"search_metric", "normalize", "top_k"}
         for flat in ("top_k", "search_metric", "normalize"):
             assert flat not in cfg.inference
 
-    def test_search_config_field_is_enabled_not_enable(self):
-        """Boolean is standardized to 'enabled' (matches peft/regularization)."""
+    def test_search_config_has_no_dead_enabled_switch(self):
+        """`search.enabled` was never read (inference.mode is the switch, evaluate
+        always ranks); it must not come back into the schema."""
         s = OmegaConf.structured(VideoCLIPSearchConfig())
-        assert "enabled" in s
+        assert "enabled" not in s
         assert "enable" not in s
 
     def test_metrics_config_defaults(self):
@@ -154,3 +158,25 @@ class TestShippedSpecMergesAgainstSchema:
         """The empty dataset.val.datasets list is no longer shipped in the spec."""
         spec = OmegaConf.load(SPEC_PATH)
         assert "datasets" not in spec.dataset.val
+
+
+@pytest.mark.multimodal_unit
+class TestShippedSpecsMatchDeployContract:
+    """Both shipped specs must export what TAO Deploy consumes and carry no dead keys."""
+
+    @pytest.mark.parametrize("spec_path", [SPEC_PATH, LORA_SPEC_PATH])
+    def test_export_defaults_are_combined_dynamic_batch(self, spec_path):
+        """TAO Deploy gen_trt_engine reads only the combined ONNX with a dynamic batch axis."""
+        merged = OmegaConf.merge(
+            OmegaConf.structured(VideoCLIPExperimentConfig()), OmegaConf.load(spec_path)
+        )
+        assert merged.export.encoder_type == "combined"
+        assert merged.export.batch_size == -1
+
+    @pytest.mark.parametrize("spec_path", [SPEC_PATH, LORA_SPEC_PATH])
+    def test_spec_search_block_has_no_enabled_key(self, spec_path):
+        """A stray `search.enabled` would now fail the structured merge; keep the specs clean."""
+        spec = OmegaConf.load(spec_path)
+        assert "enabled" not in spec.inference.search
+        merged = OmegaConf.merge(OmegaConf.structured(VideoCLIPExperimentConfig()), spec)
+        assert merged.inference.search.search_metric == "cosine"
