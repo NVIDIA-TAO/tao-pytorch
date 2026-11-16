@@ -9,11 +9,13 @@ from omegaconf import MISSING
 
 from nvidia_tao_pytorch.config.common.common_config import (
     CommonExperimentConfig,
+    EvaluateConfig,
     InferenceConfig,
     TrainConfig,
     GenTrtEngineConfig,
     TrtConfig
 )
+from nvidia_tao_pytorch.config.ssl_evaluation.default_config import EvalSuiteConfig
 from nvidia_tao_pytorch.config.utils.types import (
     STR_FIELD,
     INT_FIELD,
@@ -701,6 +703,15 @@ class NVDINOv2ExportExpConfig:
 
 
 @dataclass
+class NVDINOv2EvaluateExpConfig(EvaluateConfig, EvalSuiteConfig):
+    """Evaluate experiment config — embedding-quality suite (KNN; seg/retrieval to come).
+
+    Inherits the common GPU/checkpoint/results fields from ``EvaluateConfig`` and
+    the shared per-metric blocks (``knn``, ``cache_dir``) from ``EvalSuiteConfig``.
+    """
+
+
+@dataclass
 class GenTrtEngineExpConfig(GenTrtEngineConfig):
     """Gen TRT Engine experiment config."""
 
@@ -727,6 +738,12 @@ class ExperimentConfig(CommonExperimentConfig):
         NVDINOv2InferenceExpConfig(),
         description=(
             "Configurable parameters to construct the inference trainer for a NVDINOv2 experiment."
+        ),
+    )
+    evaluate: NVDINOv2EvaluateExpConfig = DATACLASS_FIELD(
+        NVDINOv2EvaluateExpConfig(),
+        description=(
+            "Configurable parameters for the NVDINOv2 evaluate (embedding-quality) action."
         ),
     )
     export: NVDINOv2ExportExpConfig = DATACLASS_FIELD(
