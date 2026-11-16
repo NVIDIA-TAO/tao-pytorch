@@ -5,6 +5,28 @@ development failures.
 
 ![Testing and debugging funnel](assets/testing_funnel.svg)
 
+## Test Environment Setup
+
+The base development image has pytest and the runtime dependencies, but
+**not** the TAO packages themselves. Set up once per container:
+
+```sh
+# On the host
+git submodule update --init          # tao-core/ is empty otherwise
+source scripts/envsetup.sh
+tao_pt --gpus all -- bash
+
+# Inside the container
+pip install tao-core/.               # provides nvidia_tao_core
+python setup.py develop              # compiles 12 CUDA extensions; expect 10-15 minutes
+pytest tests/core                    # smoke check
+```
+
+`nvidia_tao_core` is not in the requirements files, so imports fail until the
+submodule is installed. `setup.py develop` needs torch and nvcc, which makes
+test setup container-only in practice. Several suites additionally expect
+datasets on private mounts and skip or fail elsewhere.
+
 ## Test Directory Map
 
 | Path | Coverage |

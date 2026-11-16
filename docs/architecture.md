@@ -138,7 +138,7 @@ constraints, and post-processing vary. Start from:
 ```text
 <task>/scripts/export.py
 <task>/utils/*export*
-nvidia_tao_pytorch/core/export
+third_party/onnx/utils.py
 nvidia_tao_pytorch/core/types
 ```
 
