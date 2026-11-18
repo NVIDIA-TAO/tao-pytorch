@@ -12,6 +12,7 @@ from torchvision import transforms as T
 from nvidia_tao_pytorch.ssl.nvdinov2.dataloader.transform import DinoV2Transform
 from nvidia_tao_pytorch.ssl.nvdinov2.dataloader.dataset import DinoV2Dataset
 from nvidia_tao_pytorch.ssl.nvdinov2.dataloader.collate import DinoV2Collate
+from nvidia_tao_pytorch.ssl.nvdinov2.dataloader.per_sample_loader import PerSampleBatchLoader
 from nvidia_tao_pytorch.core.distributed.comm import is_dist_avail_and_initialized
 
 
@@ -91,9 +92,22 @@ class DinoV2DataModule(pl.LightningDataModule):
         """Build the dataloader for training.
 
         Returns:
-            torch.utils.data.DataLoader: PyTorch DataLoader used for training.
+            Iterable of collated training batches (a ``PerSampleBatchLoader`` when workers > 0,
+            otherwise a ``torch.utils.data.DataLoader``).
         """
         collate = DinoV2Collate(patch_size=self.patch_size)
+
+        if self.num_workers > 0:
+            # Spread the expensive per-image augmentation across all workers instead of
+            # letting a single worker build a whole batch (which starves the GPU at large
+            # batch sizes).
+            return PerSampleBatchLoader(
+                self.train_dataset,
+                self.train_sampler,
+                batch_size=self.batch_size,
+                num_workers=self.num_workers,
+                collate_fn=collate,
+            )
 
         train_loader = DataLoader(
             self.train_dataset,
@@ -101,7 +115,7 @@ class DinoV2DataModule(pl.LightningDataModule):
             num_workers=self.num_workers,
             collate_fn=collate,
             pin_memory=True,
-            persistent_workers=True
+            persistent_workers=False
         )
         return train_loader
 
