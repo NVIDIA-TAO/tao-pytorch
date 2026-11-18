@@ -11,7 +11,7 @@ from nvidia_tao_pytorch.cv.version import __version__  # noqa: F401
 numbering = re.search(r"^(\d+).(\d+).(\d+)([^\+]*)(\+\S*)?$", torch.__version__)
 major_version, minor_version = [int(numbering.group(n)) for n in range(1, 3)]
 
-if major_version >= 1 and minor_version >= 14:
+if major_version == 1 and minor_version >= 14:
     from third_party.onnx.utils import _export
     # Monkey Patch ONNX Export to disable onnxscript
     torch.onnx.utils._export = _export
