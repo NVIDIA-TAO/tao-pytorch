@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "khai-pytorch"
+version = "0.0.1"
+description = "Placeholder package for the KHAI CI pipeline test."
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest==8.3.4"]
+ops = ["PyYAML>=6"]
+
+[tool.setuptools]
+packages = ["khai_pytorch"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
